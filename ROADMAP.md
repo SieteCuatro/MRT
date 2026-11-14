@@ -14,6 +14,13 @@ A first version should show the commands, shell, and working directory before re
 - **Split panes within a tab.** Let users split a pane horizontally or vertically so a server log can stay visible beside a shell in the same project. Each pane should keep its own terminal session and receive input when focused.
 - **Shell integration.** Use OSC 133 prompt markers to identify where prompts, commands, and output begin and end. Explore integration for Bash, Zsh, Fish, PowerShell, and CMD, accounting for how each shell emits its prompt.
 
+## Remote connections between MRT instances
+
+Open a terminal tab on another computer running MRT, across Windows, macOS, and Linux. For example, a developer on a Windows laptop could open a shell on a Linux workstation, run a build there, and watch its output appear in command blocks on the laptop. The tab should show the remote computer’s name, shell, and working directory so the user can see where each command will run.
+
+- **Local network.** Start with two computers on the same LAN. Pair the devices with approval on the host, open an encrypted session, and let the host disconnect it or revoke access.
+- **Over the internet.** Extend the same paired-device experience to computers on different networks. A milestone is reconnecting to the workstation from another network, verifying its identity, and opening a remote tab.
+
 ## Debugging and sharing results
 
 - **Markdown bug reports.** Select a failed block and the steps leading up to it. Preview the commands, shell, exit codes, and output, redact private values, then copy the report into a GitHub issue.

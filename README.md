@@ -1,101 +1,64 @@
-# ⚡ Modern Rust Terminal (MRT)
+# Modern Rust Terminal (MRT)
 
-> **100% FREE for All. Zero Restrictions. Built by AI, Powered by All AI Providers, Open to Every Collaborator.**
+A cross-platform (Windows, macOS, Linux) GPU-accelerated terminal emulator written in Rust (`eframe`/`egui` + `wgpu`). MRT combines native shell execution with structured command blocks, built-in network inspection tools, multi-provider AI translation/triage, and dual-mode Model Context Protocol (MCP) support.
 
-**Modern Rust Terminal (MRT)** is a next-generation, cross-platform (**Windows, macOS, Linux**) GPU-accelerated terminal emulator written in Rust (`eframe`/`egui` + `wgpu`). It combines the rock-solid foundation of traditional shells (**PowerShell, CMD/Batch, Bash, Git Bash, WSL, Zsh, Fish, Nushell**) with **Interactive Command Blocks**, **Built-in Internet & Network Tools**, **Multi-Provider AI**, and native **Model Context Protocol (MCP)** Host & Server capabilities.
+Licensed under the [MIT License](LICENSE).
 
----
+## Features
 
-## 🌍 Manifesto: Who Made This, What It's For, and Who It's For
+- **Polyglot Shell Support**: Auto-discovers and runs PowerShell (`pwsh`, `powershell`), Windows Batch (`cmd.exe`), Bash, Git Bash, WSL, Zsh, Fish, Nushell, and `sh` in multi-tab or Mosaic split-grid layouts, with a synchronized Folder Explorer.
+- **Structured Command Blocks**: Automatically classifies command output into collapsible JSON trees, filterable CSV/TSV tables, Markdown, or HTTP exchanges while preserving full ANSI/VT100 styling and line-by-line block diffing.
+- **Persistent History**: Stores executed blocks in SQLite with FTS5 trigram indexing for fast substring search across sessions.
+- **Built-in Network Tools**:
+  - `:http` / `:curl` — Inline REST API client with latency timing, response headers, and JSON tree rendering.
+  - `:web` — Fetches URLs and converts HTML pages into readable Markdown.
+  - `:ports` — Cross-platform local listening TCP/UDP port scanner (`netstat`, `lsof`, `ss`).
+- **MCP Host & Server**:
+  - **MCP Server (`mrt --mcp-server`)**: Exposes 24 tools and 4 resources over JSON-RPC 2.0 (`stdio`), transparently proxying to a running GUI window via a local TCP bridge (`mcp-bridge.json`) or running standalone headless.
+  - **MCP Host**: Connects to external `stdio` MCP servers from the GUI's MCP Hub panel.
+- **Safety Approval Gate**: Classifies commands (`Safe`, `Moderate`, `Critical`) across Bash, PowerShell, CMD/Batch, Git, SQL, and Kubernetes; prompts for confirmation in the GUI and blocks unapproved `Critical` commands over MCP.
+- **Provider-Agnostic AI**: Translates natural-language prompts (`#` or `?`) into shell-specific commands and diagnoses non-zero exit codes, with an offline heuristic fallback when no API key is configured.
 
-### 🤖 Who Made This?
-MRT was initiated by **[@SieteCuatro](https://github.com/SieteCuatro)** and **built by AI**.
-It is a living open-source project designed to **keep evolving and improving thanks to AI** and the global developer community.
-
-> 💜 **A Special Thank You to Token Contributors:**
-> This project is built by AI and grows through AI. **We deeply thank you if you can use a portion of your AI tokens** (whether on Gemini, Claude, ChatGPT/Codex, Grok, DeepSeek, OpenRouter, or local GPUs) to build new features, refine the UI, write tests, and improve this project for everyone!
-
-### 🎯 What Is It For?
-Traditional terminals have been stuck in the 1970s teletype era—treating everything as a flat grid of characters, isolated from the internet, structured data, and modern AI protocols.
-**MRT exists to bring the terminal into the modern era:**
-1. **Polyglot Shell Freedom**: Run PowerShell (`pwsh`/`powershell`), Windows Batch (`cmd.exe`), Bash, Git Bash, WSL, Zsh, Fish, and Nushell side-by-side in tabs without friction.
-2. **Structured Data by Default**: Automatically turn raw JSON into collapsible trees, CSV/TSV into sortable/filterable tables, and Markdown into clean formatted docs—while keeping raw ANSI/VT100 intact.
-3. **Internet-Native Workflow**: Test REST APIs (`:http`), read live web documentation as Markdown (`:web`), and inspect local listening TCP/UDP ports (`:ports`) without leaving your prompt.
-4. **First-Class MCP (Model Context Protocol)**: Act simultaneously as an **MCP Host** (connecting external tool servers into your terminal) and an **MCP Server** (`mrt --mcp-server`, allowing external AI agents to collaborate with your terminal sessions safely).
-5. **Multi-Provider AI with a Safety Gate**: Translate natural language (`#` or `?`) into shell-specific commands and diagnose non-zero exit codes using **any AI provider**, protected by an interactive **Safety Approval Gate** that intercepts destructive commands (`rm -rf`, `Remove-Item -Recurse -Force`, `DROP TABLE`, etc.).
-
-### 👥 Who Is It For?
-- **Developers & Systems Engineers** who work across multiple OSes and shells (Windows PowerShell/CMD + WSL/Bash + macOS/Linux) and want structured JSON/table views and built-in HTTP/port tools.
-- **AI Engineers & Agent Builders** who want a native **MCP Host & MCP Server** built right into their terminal.
-- **Students, Hobbyists & Learners** who can type `# how do I find large files` in any shell (`cmd`, `pwsh`, `bash`) and learn the exact command and why it works.
-- **AI Coding Agents** (Antigravity, Claude Code, Cursor, Windsurf, Codex, Aider, OpenHands) that need a safe, structured terminal runtime via MCP.
-
----
-
-## 🆓 100% Free Forever — No Restrictions
-
-**Modern Rust Terminal (MRT) is 100% FREE for everyone.**
-- **No subscriptions, no paywalls, no login required, no feature gates.**
-- **No restrictions**: Free for personal, academic, open-source, and commercial use ([LICENSE](LICENSE)).
-- **Bring Your Own AI (or Use Offline Mode)**: MRT never locks you into a proprietary cloud subscription. Use your own API keys from *any* AI provider, run 100% free local models via **Ollama**, or use MRT's built-in offline polyglot engine with zero API keys.
-
----
-
-## 🧠 All AI Providers Supported
-
-MRT is strictly **provider-agnostic**. We embrace **all AI providers** out of the box—automatically detecting whichever API key or local endpoint you have configured:
-
-| Provider | Environment Variable / Endpoint | Default Model |
-| :--- | :--- | :--- |
-| **Google Gemini** | `GEMINI_API_KEY` | `gemini-2.5-flash` |
-| **Anthropic Claude** | `ANTHROPIC_API_KEY` | `claude-3-7-sonnet-latest` |
-| **OpenAI** | `OPENAI_API_KEY` | `gpt-4o-mini` |
-| **xAI Grok** | `XAI_API_KEY` | `grok-2-latest` |
-| **DeepSeek** | `DEEPSEEK_API_KEY` | `deepseek-chat` |
-| **OpenRouter (Any Model)** | `OPENROUTER_API_KEY` | `openrouter/auto` |
-| **Ollama (Local / Free)** | `OLLAMA_HOST` (`http://localhost:11434`) | `llama3.2` / `qwen2.5-coder` |
-| **Offline Polyglot Engine** | *(Built-in fallback — no key required)* | Native Rust Heuristic Engine |
-
----
-
-## 🤝 Call for Collaborators (Humans & AI Agents Welcome!)
-
-We are actively looking for collaborators! Whether you are a Rust developer, a UI designer, a documentation writer, or someone with spare AI tokens who wants to point an AI agent at an open issue:
-
-1. **Read [CONTRIBUTING.md](CONTRIBUTING.md)** for how to contribute features, bug fixes, and ideas.
-2. **Point Your AI Agent at [AGENTS.md](AGENTS.md)** — We included a dedicated `AGENTS.md` blueprint so AI agents can immediately understand the 5-crate workspace, run tests, and build new features autonomously using your tokens.
-3. **Open PRs & Issues** at [https://github.com/SieteCuatro/MRT](https://github.com/SieteCuatro/MRT).
-
----
-
-## 🚀 Quick Start
+## Quick Start
 
 ```bash
-# 1. Clone the repository
 git clone https://github.com/SieteCuatro/MRT.git
 cd MRT
 
-# 2. Launch the native GPU Terminal GUI
+# Launch the native GPU terminal GUI
 cargo run -p mrt-app
 
-# 3. Or run MRT in headless MCP Server mode (JSON-RPC 2.0 over stdio)
+# Run in headless MCP Server mode (JSON-RPC 2.0 over stdio)
 cargo run -p mrt-app -- --mcp-server
 
-# 4. Run the automated workspace test suite
+# Run the workspace test suite
 cargo test --workspace
 ```
 
----
+## AI Providers
 
-## 📚 Documentation Index
+MRT checks configured environment variables in the following order and falls back to the built-in offline heuristic engine if none are set or reachable:
 
-- **[Roadmap and project ideas](ROADMAP.md)** — Proposed features, first milestones, and ideas for contributors.
-- **[Architecture Overview (`docs/ARCHITECTURE.md`)](docs/ARCHITECTURE.md)** — High-level system diagram and 5-crate overview.
-- **[In-Depth MCP Guide (`docs/MCP_GUIDE.md`)](docs/MCP_GUIDE.md)** — Complete JSON-RPC 2.0 tool schemas, resources, client configs (Antigravity, Claude, Cursor), and MCP Host/Server internals.
-- **[Core & Polyglot Shells Guide (`docs/CORE_AND_SHELLS.md`)](docs/CORE_AND_SHELLS.md)** — Multi-shell discovery (`pwsh`, `cmd`/Batch, `bash`, `wsl`, `zsh`), ANSI/VT100 parser, Command Blocks, and Safety Gate rules.
-- **[Internet & Network Tools Guide (`docs/INTERNET_TOOLS.md`)](docs/INTERNET_TOOLS.md)** — `:http` API inspector, `:web` HTML-to-Markdown extractor, `:ports` scanner, and how to add new tools.
-- **[Multi-Provider AI & Agent Guide (`docs/AI_PROVIDERS_AND_AGENTS.md`)](docs/AI_PROVIDERS_AND_AGENTS.md)** — Gemini, Claude, OpenAI, Grok, DeepSeek, OpenRouter, Ollama, Offline Polyglot Engine, and Error Triage.
-- **[GUI & Widgets Guide (`docs/GUI_AND_WIDGETS.md`)](docs/GUI_AND_WIDGETS.md)** — `eframe`/`egui` non-blocking async architecture, structured block viewers, and side panels.
-- **[Contributing & Token Donation Guide (`CONTRIBUTING.md`)](CONTRIBUTING.md)** — How humans and AI agents can collaborate on MRT.
-- **[AI Agent Instructions (`AGENTS.md`)](AGENTS.md)** — Context file for autonomous coding agents.
-- **[Configuration Example (`mrt.example.toml`)](mrt.example.toml)** — Sample config for shells, safety rules, AI providers, and MCP servers.
+| Provider | Environment Variable | Default Model |
+| :--- | :--- | :--- |
+| Google Gemini | `GEMINI_API_KEY` | `gemini-2.5-flash` |
+| Anthropic Claude | `ANTHROPIC_API_KEY` | `claude-3-7-sonnet-latest` |
+| OpenAI | `OPENAI_API_KEY` | `gpt-4o-mini` |
+| xAI Grok | `XAI_API_KEY` | `grok-2-latest` |
+| DeepSeek | `DEEPSEEK_API_KEY` | `deepseek-chat` |
+| OpenRouter | `OPENROUTER_API_KEY` | `openrouter/auto` |
+| Local Ollama | `OLLAMA_MODEL` (`OLLAMA_HOST`) | User-configured (e.g. `qwen2.5-coder`) |
+| Offline Engine | *(none required)* | Native Rust heuristics |
+
+## Documentation
+
+- [Architecture Overview](docs/ARCHITECTURE.md) — 5-crate workspace design and data flow.
+- [MCP Guide](docs/MCP_GUIDE.md) — Tool schemas, resources, Live GUI Bridge, and client setup.
+- [Core & Polyglot Shells](docs/CORE_AND_SHELLS.md) — Shell discovery, PTY engine, VT parser, blocks, and Safety Gate.
+- [Internet & Network Tools](docs/INTERNET_TOOLS.md) — `:http`, `:web`, and `:ports` internals.
+- [AI Providers & Error Triage](docs/AI_PROVIDERS_AND_AGENTS.md) — Provider resolution and command diagnosis.
+- [GUI & Widgets](docs/GUI_AND_WIDGETS.md) — Async architecture, block viewers, and side panels.
+- [Roadmap](ROADMAP.md) — Planned milestones and project ideas.
+- [Contributing](CONTRIBUTING.md) — Development workflow and PR checklist.
+- [AI Agent Instructions](AGENTS.md) — Workspace context for coding agents.
+- [Configuration Example](mrt.example.toml) — Reference configuration schema.

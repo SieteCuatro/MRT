@@ -81,7 +81,12 @@ pub fn render_command_block(
                         });
                 }
 
-                if let Some(previous_id) = previous_id {
+                if block.exit_code.is_none() {
+                    ui.spinner();
+                    ui.label("Running");
+                }
+
+                if let Some(previous_id) = previous_id.filter(|_| block.exit_code.is_some()) {
                     if ui.small_button("Compare with previous run").clicked() {
                         triggered_action = Some(BlockAction::Compare(previous_id, block.id));
                     }

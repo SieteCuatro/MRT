@@ -5,7 +5,7 @@ use crate::widgets::side_panels::{
 use egui::{Color32, Key, Modifiers, RichText};
 use mrt_ai::{diagnose_command_error, translate_nl_to_command, AiCommandProposal};
 use mrt_core::{
-    assess_command, discover_shells, execute_command_in_shell, CommandBlock, RiskLevel,
+    assess_command, discover_shells, execute_command_streaming, CommandBlock, RiskLevel,
     SafetyAssessment, ShellProfile, StructuredOutput,
 };
 use mrt_mcp::{McpHostManager, MrtMcpServerState};
@@ -60,6 +60,10 @@ pub enum AsyncWorkerEvent {
         tab_id: Uuid,
         proposal: AiCommandProposal,
     },
+    ExplorerLoaded {
+        path: PathBuf,
+        entries: Result<Vec<(PathBuf, bool)>, String>,
+    },
     ExternalMcpConnected(mrt_mcp::McpServerStatus),
 }
 
@@ -90,6 +94,12 @@ pub struct MrtGuiApp {
     show_history: bool,
     history_query: String,
     history_results: Vec<CommandBlock>,
+    running_output: HashMap<Uuid, (Uuid, std::sync::Arc<std::sync::Mutex<String>>)>,
+    mosaic: bool,
+    mosaic_columns: usize,
+    show_explorer: bool,
+    explorer_path: Option<PathBuf>,
+    explorer_entries: Result<Vec<(PathBuf, bool)>, String>,
 }
 
 impl MrtGuiApp {
@@ -142,6 +152,275 @@ impl MrtGuiApp {
             show_history: false,
             history_query: String::new(),
             history_results: Vec::new(),
+            running_output: HashMap::new(),
+            mosaic: false,
+            mosaic_columns: 2,
+            show_explorer: false,
+            explorer_path: None,
+            explorer_entries: Ok(Vec::new()),
+        }
+    }
+
+    fn handle_block_action(&mut self, action: BlockAction) {
+        match action {
+            BlockAction::Compare(previous, current) => {
+                self.tabs[self.active_tab].comparison = Some((previous, current));
+            }
+            BlockAction::Rerun(cmd) => {
+                self.submit_input(Some(cmd), false);
+            }
+            BlockAction::ApplySuggestedFix(fix_cmd) => {
+                self.submit_input(Some(fix_cmd), false);
+            }
+            BlockAction::DiagnoseError(block_id) => {
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    let shell = self
+                        .shells
+                        .get(tab.active_shell_idx)
+                        .cloned()
+                        .unwrap_or_else(|| self.shells[0].clone());
+                    if let Some(blk) = tab.blocks.iter_mut().find(|b| b.id == block_id) {
+                        let triage = diagnose_command_error(
+                            &blk.command,
+                            &blk.plain_output,
+                            blk.exit_code.unwrap_or(1),
+                            &shell,
+                        );
+                        blk.ai_explanation = Some(triage.explanation);
+                        blk.ai_suggested_fix = triage.suggested_fix;
+                    }
+                }
+            }
+        }
+    }
+
+    fn move_terminal(&mut self, source: Uuid, target: Uuid) {
+        let active_id = self.tabs[self.active_tab].id;
+        let from = self.tabs.iter().position(|tab| tab.id == source);
+        let to = self.tabs.iter().position(|tab| tab.id == target);
+        if let (Some(from), Some(to)) = (from, to) {
+            let tab = self.tabs.remove(from);
+            self.tabs.insert(to, tab);
+            self.active_tab = self
+                .tabs
+                .iter()
+                .position(|tab| tab.id == active_id)
+                .unwrap_or(0);
+        }
+    }
+
+    fn close_terminal(&mut self, id: Uuid) {
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        let active_id = self.tabs[self.active_tab].id;
+        self.tabs.retain(|tab| tab.id != id);
+        self.active_tab = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == active_id)
+            .unwrap_or_else(|| self.active_tab.min(self.tabs.len() - 1));
+        if self
+            .pending_safety
+            .as_ref()
+            .is_some_and(|pending| pending.tab_id == id)
+        {
+            self.pending_safety = None;
+        }
+    }
+
+    fn render_mosaic(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            ui.add(egui::Slider::new(&mut self.mosaic_columns, 1..=6).text("Columns"));
+            if ui.button("+ Terminal").clicked() {
+                let active = &self.tabs[self.active_tab];
+                let tab = TerminalTab::new(
+                    format!("Terminal {}", self.tabs.len() + 1),
+                    active.active_shell_idx,
+                    active.cwd.clone(),
+                );
+                self.tabs.push(tab);
+                self.active_tab = self.tabs.len() - 1;
+            }
+            ui.weak("Drag a title to reorder");
+        });
+        ui.add_space(8.0);
+        let spacing = 10.0;
+        let available = ui.available_width().max(1.0);
+        let columns = self
+            .mosaic_columns
+            .min(((available + spacing) / 250.0).floor().max(1.0) as usize);
+        let size = ((available - spacing * (columns - 1) as f32) / columns as f32).max(1.0);
+        let mut reorder = None;
+        let mut close = None;
+        let mut submit = None;
+        let mut action = None;
+        let active_id = self.tabs[self.active_tab].id;
+        egui::ScrollArea::vertical().id_salt("mosaic_grid").show(ui, |ui| {
+            for row in (0..self.tabs.len()).step_by(columns) {
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = spacing;
+                    for index in row..(row + columns).min(self.tabs.len()) {
+                        let tab = &mut self.tabs[index];
+                        let id = tab.id;
+                        ui.push_id(id, |ui| {
+                            ui.allocate_ui_with_layout(egui::vec2(size, size), egui::Layout::top_down(egui::Align::Min), |ui| {
+                                ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
+                                let frame = egui::Frame::none().inner_margin(8.0)
+                                    .stroke(egui::Stroke::new(1.0_f32, if id == active_id { Color32::LIGHT_BLUE } else { Color32::DARK_GRAY }))
+                                    .rounding(5.0);
+                                let (panel, dropped) = ui.dnd_drop_zone::<Uuid, _>(frame, |ui| {
+                                    ui.set_width((size - 16.0).max(1.0));
+                                    ui.horizontal(|ui| {
+                                        ui.dnd_drag_source(egui::Id::new(("terminal_drag", id)), id, |ui| {
+                                            let title = ui.add_sized(
+                                                [((size - 120.0).max(24.0)), 20.0],
+                                                egui::Label::new(RichText::new(&tab.title).strong())
+                                                    .truncate().sense(egui::Sense::click()),
+                                            );
+                                            if title.clicked() { self.active_tab = index; }
+                                        });
+                                        if ui.small_button("Expand").clicked() {
+                                            self.active_tab = index;
+                                            self.mosaic = false;
+                                        }
+                                        if ui.small_button("×").clicked() { close = Some(id); }
+                                    });
+                                    egui::ComboBox::from_id_salt("shell").selected_text(&self.shells[tab.active_shell_idx].name)
+                                        .show_ui(ui, |ui| {
+                                            for (shell_index, shell) in self.shells.iter().enumerate() {
+                                                ui.selectable_value(&mut tab.active_shell_idx, shell_index, &shell.name);
+                                            }
+                                        });
+                                    ui.add(egui::Label::new(RichText::new(tab.cwd.display().to_string()).small()).truncate());
+                                    let output_height = (size - 135.0).max(24.0);
+                                    egui::ScrollArea::both().id_salt("output").auto_shrink([false, false])
+                                        .max_height(output_height).min_scrolled_height(output_height)
+                                        .stick_to_bottom(true).show(ui, |ui| {
+                                            let mut previous_runs = HashMap::new();
+                                            for block in &mut tab.blocks {
+                                                let key = (block.command.clone(), block.shell_name.clone(), block.cwd.clone());
+                                                let previous = previous_runs.insert(key, block.id);
+                                                let filter = tab.table_filters.entry(block.id).or_default();
+                                                if let Some(event) = render_command_block(ui, block, filter, previous) {
+                                                    action = Some((index, event));
+                                                }
+                                            }
+                                            if let Some((previous_id, current_id)) = tab.comparison {
+                                                let previous = tab.blocks.iter().find(|block| block.id == previous_id);
+                                                let current = tab.blocks.iter().find(|block| block.id == current_id);
+                                                if let (Some(previous), Some(current)) = (previous, current) {
+                                                    if crate::widgets::block_view::render_comparison(ui, previous, current) {
+                                                        tab.comparison = None;
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    ui.horizontal(|ui| {
+                                        let response = ui.add(egui::TextEdit::singleline(&mut tab.input_line)
+                                            .id(egui::Id::new(("mosaic_input", id))).font(egui::TextStyle::Monospace)
+                                            .desired_width((ui.available_width() - 48.0).max(1.0)).hint_text("Command"));
+                                        if response.has_focus() || response.clicked() { self.active_tab = index; }
+                                        if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                                            submit = Some(index);
+                                            response.request_focus();
+                                        }
+                                        if ui.add_enabled(!tab.input_line.trim().is_empty(), egui::Button::new("Run")).clicked() {
+                                            submit = Some(index);
+                                        }
+                                    });
+                                });
+                                if panel.response.clicked() { self.active_tab = index; }
+                                if let Some(source) = dropped { reorder = Some((*source, id)); }
+                            });
+                        });
+                    }
+                });
+                ui.add_space(spacing);
+            }
+        });
+        if let Some(index) = submit {
+            self.active_tab = index;
+            self.submit_input(None, false);
+        }
+        if let Some((index, event)) = action {
+            self.active_tab = index;
+            self.handle_block_action(event);
+        }
+        if let Some((source, target)) = reorder {
+            self.move_terminal(source, target);
+        }
+        if let Some(id) = close {
+            self.close_terminal(id);
+        }
+    }
+
+    fn refresh_explorer(&mut self, path: PathBuf) {
+        self.explorer_path = Some(path.clone());
+        self.explorer_entries = Ok(Vec::new());
+        let tx = self.tx.clone();
+        self.busy_count += 1;
+        self.runtime.spawn_blocking(move || {
+            let entries = read_directory(&path).map_err(|error| error.to_string());
+            let _ = tx.send(AsyncWorkerEvent::ExplorerLoaded { path, entries });
+        });
+    }
+
+    fn render_explorer(&mut self, ctx: &egui::Context) {
+        let path = self.tabs[self.active_tab].cwd.clone();
+        if self.explorer_path.as_ref() != Some(&path) {
+            self.refresh_explorer(path.clone());
+        }
+        let mut navigate = None;
+        let mut refresh = false;
+        egui::SidePanel::left("folder_explorer")
+            .default_width(240.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.heading("Explorer");
+                    if ui.small_button("Refresh").clicked() {
+                        refresh = true;
+                    }
+                });
+                ui.add(egui::Label::new(path.display().to_string()).wrap());
+                if let Some(parent) = path.parent() {
+                    if ui.button("↑ Parent folder").clicked() {
+                        navigate = Some(parent.to_path_buf());
+                    }
+                }
+                ui.separator();
+                match &self.explorer_entries {
+                    Err(error) => {
+                        ui.colored_label(Color32::LIGHT_RED, error);
+                    }
+                    Ok(entries) => {
+                        egui::ScrollArea::both()
+                            .id_salt("explorer_entries")
+                            .show(ui, |ui| {
+                                for (entry, directory) in entries {
+                                    let name =
+                                        entry.file_name().unwrap_or_default().to_string_lossy();
+                                    if *directory {
+                                        if ui.button(format!("▸ {name}/")).clicked() {
+                                            navigate = Some(entry.clone());
+                                        }
+                                    } else {
+                                        ui.label(name.as_ref());
+                                    }
+                                }
+                            });
+                    }
+                }
+            });
+        if refresh {
+            self.refresh_explorer(path);
+        }
+        if let Some(path) = navigate {
+            self.tabs[self.active_tab].cwd = path.clone();
+            if let Ok(mut cwd) = self.mcp_host.local_server_state.cwd.lock() {
+                *cwd = path;
+            }
         }
     }
 
@@ -176,6 +455,15 @@ impl MrtGuiApp {
     }
 
     fn process_async_events(&mut self) {
+        for (block_id, (tab_id, output)) in &self.running_output {
+            let chunk = output.lock().map(|mut pending| std::mem::take(&mut *pending)).unwrap_or_default();
+            if chunk.is_empty() { continue; }
+            if let Some(block) = self.tabs.iter_mut().find(|tab| tab.id == *tab_id)
+                .and_then(|tab| tab.blocks.iter_mut().find(|block| block.id == *block_id)) {
+                block.raw_output.push_str(&chunk);
+                (block.ansi_spans, block.plain_output) = mrt_core::parse_ansi_text(&block.raw_output);
+            }
+        }
         while let Ok(ev) = self.rx.try_recv() {
             self.busy_count = self.busy_count.saturating_sub(1);
             match ev {
@@ -184,6 +472,7 @@ impl MrtGuiApp {
                     block,
                     updated_cwd,
                 } => {
+                    self.running_output.remove(&block.id);
                     if let Some(worker) = &self.history {
                         if worker.send(crate::history::HistoryRequest::Save(block.clone())) {
                             self.history_pending += 1;
@@ -200,7 +489,13 @@ impl MrtGuiApp {
                                 *guard = new_cwd;
                             }
                         }
-                        tab.blocks.push(block);
+                        if let Some(running) = tab.blocks.iter_mut().find(|running| running.id == block.id) {
+                            let pinned = running.pinned;
+                            *running = block;
+                            running.pinned = pinned;
+                        } else {
+                            tab.blocks.push(block);
+                        }
                     }
                 }
                 AsyncWorkerEvent::AiCommandReady { tab_id, proposal } => {
@@ -209,6 +504,11 @@ impl MrtGuiApp {
                             tab.input_line = proposal.proposed_command.clone();
                         }
                         tab.ai_proposal = Some(proposal);
+                    }
+                }
+                AsyncWorkerEvent::ExplorerLoaded { path, entries } => {
+                    if self.explorer_path.as_ref() == Some(&path) {
+                        self.explorer_entries = entries;
                     }
                 }
                 AsyncWorkerEvent::ExternalMcpConnected(status) => {
@@ -317,13 +617,24 @@ impl MrtGuiApp {
     }
 
     fn spawn_shell_command(&mut self, tab_id: Uuid, shell: ShellProfile, cwd: PathBuf, raw_input: String) {
+        let mut running = CommandBlock::new_completed(&raw_input, shell.kind.short_label(), cwd.display().to_string(), "", 0, 0);
+        running.exit_code = None;
+        let block_id = running.id;
+        let timestamp = running.timestamp;
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            tab.blocks.push(running);
+        }
+        let output = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        self.running_output.insert(block_id, (tab_id, output.clone()));
         let tx = self.tx.clone();
         self.busy_count += 1;
         self.runtime.spawn(async move {
             let cwd_str = cwd.display().to_string();
-            match execute_command_in_shell(&shell, &raw_input, &cwd).await {
+            match execute_command_streaming(&shell, &raw_input, &cwd, |chunk| {
+                if let Ok(mut pending) = output.lock() { pending.push_str(chunk); }
+            }).await {
                 Ok(res) => {
-                    let block = CommandBlock::new_completed(
+                    let mut block = CommandBlock::new_completed(
                         &raw_input,
                         shell.kind.short_label(),
                         cwd_str,
@@ -331,6 +642,8 @@ impl MrtGuiApp {
                         res.exit_code,
                         res.duration_ms,
                     );
+                    block.id = block_id;
+                    block.timestamp = timestamp;
                     let _ = tx.send(AsyncWorkerEvent::BlockCompleted {
                         tab_id,
                         block,
@@ -338,7 +651,7 @@ impl MrtGuiApp {
                     });
                 }
                 Err(e) => {
-                    let block = CommandBlock::new_completed(
+                    let mut block = CommandBlock::new_completed(
                         &raw_input,
                         shell.kind.short_label(),
                         cwd_str,
@@ -346,6 +659,8 @@ impl MrtGuiApp {
                         1,
                         0,
                     );
+                    block.id = block_id;
+                    block.timestamp = timestamp;
                     let _ = tx.send(AsyncWorkerEvent::BlockCompleted {
                         tab_id,
                         block,
@@ -567,6 +882,32 @@ impl MrtGuiApp {
     }
 }
 
+fn read_directory(path: &std::path::Path) -> std::io::Result<Vec<(PathBuf, bool)>> {
+    let mut entries = std::fs::read_dir(path)?
+        .map(|entry| {
+            let path = entry?.path();
+            let directory = path.is_dir();
+            Ok((path, directory))
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by(|(left, left_dir), (right, right_dir)| {
+        right_dir.cmp(left_dir).then_with(|| {
+            left.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_lowercase()
+                .cmp(
+                    &right
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_lowercase(),
+                )
+        })
+    });
+    Ok(entries)
+}
+
 impl eframe::App for MrtGuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let first_frame = !self.focused_on_start;
@@ -609,6 +950,9 @@ impl eframe::App for MrtGuiApp {
                 );
                 ui.separator();
 
+                ui.toggle_value(&mut self.mosaic, "Mosaic");
+                ui.toggle_value(&mut self.show_explorer, "Explorer");
+
                 // Render Tabs
                 let mut tab_to_close = None;
                 for idx in 0..self.tabs.len() {
@@ -635,13 +979,8 @@ impl eframe::App for MrtGuiApp {
                     }
                 }
                 if let Some(close_idx) = tab_to_close {
-                    let closed_id = self.tabs.remove(close_idx).id;
-                    if self.pending_safety.as_ref().is_some_and(|pending| pending.tab_id == closed_id) {
-                        self.pending_safety = None;
-                    }
-                    if self.active_tab >= self.tabs.len() {
-                        self.active_tab = self.tabs.len().saturating_sub(1);
-                    }
+                    let id = self.tabs[close_idx].id;
+                    self.close_terminal(id);
                 }
 
                 // New Tab dropdown per discovered shell
@@ -709,6 +1048,10 @@ impl eframe::App for MrtGuiApp {
                 });
             });
         });
+
+        if self.show_explorer {
+            self.render_explorer(ctx);
+        }
 
         if self.show_history {
             let mut restore = None;
@@ -783,6 +1126,9 @@ impl eframe::App for MrtGuiApp {
                 if let Some(error) = &self.history_error {
                     ui.colored_label(Color32::LIGHT_RED, error);
                 }
+            }
+            if self.mosaic {
+                ui.small(format!("Selected terminal · {}", self.tabs[self.active_tab].title));
             }
             // Optional AI Command Proposal Banner
             let mut run_ai_cmd = None;
@@ -899,6 +1245,10 @@ impl eframe::App for MrtGuiApp {
 
         // Central Terminal Block Stream
         egui::CentralPanel::default().frame(egui::Frame::none().fill(Color32::from_rgb(19, 24, 30)).inner_margin(egui::Margin::same(14.0))).show(ctx, |ui| {
+            if self.mosaic {
+                self.render_mosaic(ui);
+                return;
+            }
             let mut pending_block_action = None;
 
             if let Some(tab) = self.tabs.get_mut(self.active_tab) {
@@ -929,36 +1279,7 @@ impl eframe::App for MrtGuiApp {
             }
 
             if let Some(action) = pending_block_action {
-                match action {
-                    BlockAction::Compare(previous, current) => {
-                        self.tabs[self.active_tab].comparison = Some((previous, current));
-                    }
-                    BlockAction::Rerun(cmd) => {
-                        self.submit_input(Some(cmd), false);
-                    }
-                    BlockAction::ApplySuggestedFix(fix_cmd) => {
-                        self.submit_input(Some(fix_cmd), false);
-                    }
-                    BlockAction::DiagnoseError(block_id) => {
-                        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-                            let shell = self
-                                .shells
-                                .get(tab.active_shell_idx)
-                                .cloned()
-                                .unwrap_or_else(|| self.shells[0].clone());
-                            if let Some(blk) = tab.blocks.iter_mut().find(|b| b.id == block_id) {
-                                let triage = diagnose_command_error(
-                                    &blk.command,
-                                    &blk.plain_output,
-                                    blk.exit_code.unwrap_or(1),
-                                    &shell,
-                                );
-                                blk.ai_explanation = Some(triage.explanation);
-                                blk.ai_suggested_fix = triage.suggested_fix;
-                            }
-                        }
-                    }
-                }
+                self.handle_block_action(action);
             }
         });
 
@@ -1182,6 +1503,114 @@ mod tests {
         assert_eq!(app.busy_count, 0);
         assert!(app.pending_safety.is_none());
         assert!(app.rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn mosaic_reordering_and_closing_preserve_terminal_identity() {
+        let mut app = MrtGuiApp::new();
+        let first = app.tabs[0].id;
+        let cwd = app.tabs[0].cwd.clone();
+        app.tabs
+            .push(TerminalTab::new("Second".into(), 0, cwd.clone()));
+        app.tabs.push(TerminalTab::new("Third".into(), 0, cwd));
+        app.active_tab = 1;
+        let second = app.tabs[1].id;
+        let third = app.tabs[2].id;
+        app.move_terminal(first, third);
+        assert_eq!(
+            app.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+            vec![second, third, first]
+        );
+        assert_eq!(app.tabs[app.active_tab].id, second);
+        app.close_terminal(third);
+        assert_eq!(app.tabs[app.active_tab].id, second);
+        app.close_terminal(second);
+        app.close_terminal(first);
+        assert_eq!(app.tabs.len(), 1);
+    }
+
+    #[test]
+    fn explorer_tracks_the_selected_terminal_and_rejects_old_results() {
+        let mut app = MrtGuiApp::new();
+        let path = app.tabs[0].cwd.clone();
+        app.explorer_path = Some(path.clone());
+        app.tx
+            .send(AsyncWorkerEvent::ExplorerLoaded {
+                path: path.join("old-folder"),
+                entries: Err("stale".into()),
+            })
+            .unwrap();
+        app.process_async_events();
+        assert!(app.explorer_entries.is_ok());
+        let entries = read_directory(&path).unwrap();
+        assert!(!entries.is_empty());
+        assert!(entries
+            .iter()
+            .all(|(entry, directory)| entry.parent() == Some(path.as_path())
+                && *directory == entry.is_dir()));
+        assert!(entries.windows(2).all(|pair| pair[0].1 || !pair[1].1));
+        app.tabs[0].cwd = path.join("src");
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| app.render_explorer(ctx));
+        assert_eq!(app.explorer_path, Some(app.tabs[0].cwd.clone()));
+    }
+
+    #[test]
+    fn mosaic_renders_multiple_terminals_at_narrow_widths() {
+        let mut app = MrtGuiApp::new();
+        for number in 0..3 {
+            app.tabs.push(TerminalTab::new(
+                format!("Terminal {number}"),
+                0,
+                app.tabs[0].cwd.clone(),
+            ));
+        }
+        let ctx = egui::Context::default();
+        for width in [320.0, 900.0] {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 700.0),
+                )),
+                ..Default::default()
+            };
+            let output = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.render_mosaic(ui));
+            });
+            assert!(!output.shapes.is_empty());
+        }
+    }
+
+    #[test]
+    fn streaming_updates_the_originating_block_and_completes_without_duplicates() {
+        let mut app = MrtGuiApp::new();
+        let tab_id = app.tabs[0].id;
+        let cwd = app.tabs[0].cwd.clone();
+        let mut block = CommandBlock::new_completed("echo streaming", "test", cwd.display().to_string(), "", 0, 0);
+        block.exit_code = None;
+        let block_id = block.id;
+        app.tabs[0].blocks.push(block.clone());
+        app.tabs.push(TerminalTab::new("Other".into(), 0, cwd));
+        app.active_tab = 1;
+        let output = std::sync::Arc::new(std::sync::Mutex::new("first".into()));
+        app.running_output.insert(block_id, (tab_id, output.clone()));
+        app.busy_count = 1;
+        app.process_async_events();
+        assert_eq!(app.tabs[0].blocks[0].plain_output, "first");
+        assert!(app.tabs[1].blocks.is_empty());
+        assert_eq!(app.busy_count, 1);
+        assert!(output.lock().unwrap().is_empty());
+        block.exit_code = Some(0);
+        block.raw_output = "first last".into();
+        block.plain_output = "first last".into();
+        app.tx.send(AsyncWorkerEvent::BlockCompleted { tab_id, block, updated_cwd: None }).unwrap();
+        app.process_async_events();
+        assert_eq!(app.tabs[0].blocks.len(), 1);
+        assert_eq!(app.tabs[0].blocks[0].id, block_id);
+        assert_eq!(app.tabs[0].blocks[0].exit_code, Some(0));
+        assert_eq!(app.tabs[0].blocks[0].plain_output, "first last");
+        assert!(app.running_output.is_empty());
+        assert_eq!(app.busy_count, 0);
     }
 
     fn deliver_proposal(app: &mut MrtGuiApp, tab_id: Uuid, command: &str) {

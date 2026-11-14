@@ -8,7 +8,7 @@ Licensed under the [MIT License](LICENSE).
 
 - **Polyglot Shell Support**: Auto-discovers and runs PowerShell (`pwsh`, `powershell`), Windows Batch (`cmd.exe`), Bash, Git Bash, WSL, Zsh, Fish, Nushell, and `sh` in multi-tab or Mosaic split-grid layouts, with a synchronized Folder Explorer.
 - **Structured Command Blocks**: Automatically classifies command output into collapsible JSON trees, filterable CSV/TSV tables, Markdown, or HTTP exchanges while preserving full ANSI/VT100 styling and line-by-line block diffing.
-- **Persistent History**: Stores executed blocks in SQLite with FTS5 trigram indexing for fast substring search across sessions.
+- **Persistent History & Saved Runbooks**: Stores executed command blocks in SQLite with FTS5 trigram indexing for fast substring search across sessions, and lets you assemble, reorder, and save offline command sequences as **Runbooks**—previewing commands, shells, and working directories before replaying each step through the Safety Approval Gate and stopping on the first failure.
 - **Built-in Network Tools**:
   - `:http` / `:curl` — Inline REST API client with latency timing, response headers, and JSON tree rendering.
   - `:web` — Fetches URLs and converts HTML pages into readable Markdown.

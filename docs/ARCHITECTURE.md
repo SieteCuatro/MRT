@@ -51,4 +51,4 @@ flowchart LR
 - Includes `diagnose_command_error` to explain failed commands (non-zero exit codes) and offer one-click shell-appropriate fixes.
 
 ### 5. `mrt-app` — Native GPU GUI (`eframe` / `egui`)
-- Renders multi-shell tabs, **Mosaic** multi-terminal grid mode, **Folder Explorer**, persistent SQLite **Command History**, the **Command Block** stream (with diff comparison), the **MCP Hub** (with Live GUI Bridge indicator) and **Internet Studio** side panels, the **Safety Approval Gate** modal, and the **Universal Command Palette** (`Ctrl+K` / `Ctrl+P`).
+- Renders multi-shell tabs, **Mosaic** multi-terminal grid mode, **Folder Explorer**, persistent SQLite **Command History** and **Saved Runbooks** (with offline sequence editing, preview, Safety Gate enforcement, and stop-on-first-failure replay), the **Command Block** stream (with diff comparison), the **MCP Hub** (with Live GUI Bridge indicator) and **Internet Studio** side panels, the **Safety Approval Gate** modal, and the **Universal Command Palette** (`Ctrl+K` / `Ctrl+P`).

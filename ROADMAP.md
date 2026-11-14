@@ -2,11 +2,11 @@
 
 MRT already saves command blocks in SQLite, searches commands and output across restarts, compares a command’s output with its previous run, and displays several terminals in Mosaic view. The proposals below build on those features.
 
-## Suggested first project — saved runbooks
+## Suggested first project — saved runbooks *(implemented)*
 
 Let a developer select commands from history, arrange them in order, and save the sequence under a name. A Rust contributor could save “Check this project” with `cargo fmt --check`, `cargo clippy`, and `cargo test`, then open it again after the next edit.
 
-A first version should show the commands, shell, and working directory before replay. Run each step through the existing Safety Approval Gate, show its output in a command block, and stop on the first failure so the user can inspect it. Saving and replaying a runbook should work offline.
+The first version is implemented in the **Runbooks** panel and SQLite `HistoryStore`: it shows the commands, shell, and working directory before replay, runs each step through the existing Safety Approval Gate, shows its output in a command block, stops on the first failure so the user can inspect it, and works offline.
 
 ## Everyday terminal use
 

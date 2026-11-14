@@ -24,7 +24,7 @@ Terminal commands, HTTP requests, web fetches, port scans, MCP tool calls, and A
 - **Layout Toggles**: Toggle **Mosaic** (multi-terminal split grid with configurable columns and drag-and-drop reordering) and **Explorer** (left-hand directory browser synced to the active tab's CWD).
 - **Multi-Tab Manager**: Switch between tabs, close tabs (`×`), or click **+ New tab** to open a new tab directly in any discovered shell (`Windows PowerShell`, `Command Prompt / Batch`, `Git Bash`, `WSL`, etc.).
 - **Active Shell Switcher**: A live dropdown that changes the active tab's `ShellProfile` on the fly.
-- **Right-Side Inspector Toggles**: Toggle buttons for **History** (SQLite-backed command/output search), **MCP Hub**, **Internet Studio**, and **Palette (`Ctrl+K`)**.
+- **Right-Side Inspector Toggles**: Toggle buttons for **History** (SQLite-backed command/output search with `+ Runbook` quick-add), **Runbooks** (saved command sequences), **MCP Hub**, **Internet Studio**, and **Palette (`Ctrl+K`)**.
 
 ### 2.2 Command Block Renderer (`widgets/block_view.rs`)
 Each `CommandBlock` is rendered inside a status-colored card frame (green border for `exit 0`, red border for non-zero exit codes):
@@ -37,9 +37,10 @@ Each `CommandBlock` is rendered inside a status-colored card frame (green border
   - `render_ansi_spans`: Converts `Vec<AnsiSpan>` into an `egui::text::LayoutJob` with per-span foreground/background RGB colors, italics, and underlines.
   - `render_comparison`: Line-by-line unified diff (`similar::TextDiff`) comparing two `CommandBlock`s.
 
-### 2.3 Side Panels (`widgets/side_panels.rs`)
+### 2.3 Side Panels (`widgets/side_panels.rs` & `widgets/runbooks.rs`)
 - **MCP Hub Panel (`render_mcp_side_panel`)**: Displays the **Live GUI Bridge** status (`127.0.0.1:<port>`) with a one-click **Copy MCP Config** button, lists connected MCP servers (`mrt-native-mcp` + external `stdio` servers), expandable tool descriptions, custom JSON argument editor, one-click **Invoke Tool** buttons, and a form to connect new external `stdio` MCP servers.
 - **Internet Studio Panel (`render_internet_side_panel`)**: Interactive GUI forms for the HTTP/REST Inspector, Readable Webpage Extractor, and Local Port Scanner.
+- **Runbooks Panel (`render_runbooks_panel`)**: Offline SQLite-backed manager for saved command sequences (`Runbook` / `RunbookStep` in `history.rs`). Supports creating and editing runbooks, picking steps from command history (or adding manual steps), reordering steps (`^` / `v` / `x`), selecting per-step shell and working directory, previewing steps before execution, and replaying step-by-step via `ActiveRunbookReplay` (routing each step through the Safety Approval Gate, rendering each output as a `CommandBlock`, and stopping on the first non-zero exit code).
 
 ### 2.4 Modals (`app.rs`)
 - **MRT Safety Approval Gate**: Centered modal window that intercepts `RiskLevel::Critical` commands, displays the risk classification, reason, target shell, and working directory, and requires explicit **Approve & Execute** or **Cancel Command**.

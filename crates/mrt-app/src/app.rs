@@ -84,6 +84,12 @@ pub struct MrtGuiApp {
     pub palette_query: String,
     pub busy_count: usize,
     pub focused_on_start: bool,
+    history: Option<crate::history::HistoryWorker>,
+    history_error: Option<String>,
+    history_pending: usize,
+    show_history: bool,
+    history_query: String,
+    history_results: Vec<CommandBlock>,
 }
 
 impl MrtGuiApp {
@@ -103,6 +109,18 @@ impl MrtGuiApp {
         );
 
         let (tx, rx) = channel();
+        // Unit tests use isolated stores and never read or write the user's history.
+        let history_result = if cfg!(test) {
+            Ok(None)
+        } else {
+            directories::ProjectDirs::from("", "", "MRT")
+                .ok_or_else(|| anyhow::anyhow!("Unable to locate the application data directory"))
+                .and_then(|dirs| Ok(Some(crate::history::HistoryWorker::start(dirs.data_local_dir().join("history.sqlite")))))
+        };
+        let (history, history_error) = match history_result {
+            Ok(store) => (store, None),
+            Err(error) => (None, Some(error.to_string())),
+        };
 
         Self {
             runtime,
@@ -118,7 +136,43 @@ impl MrtGuiApp {
             palette_query: String::new(),
             busy_count: 0,
             focused_on_start: false,
+            history,
+            history_error,
+            history_pending: 0,
+            show_history: false,
+            history_query: String::new(),
+            history_results: Vec::new(),
         }
+    }
+
+    fn refresh_history(&mut self) {
+        if let Some(worker) = &self.history {
+            if worker.send(crate::history::HistoryRequest::Search(self.history_query.clone())) {
+                self.history_pending += 1;
+            }
+        }
+    }
+
+    fn process_history_events(&mut self) {
+        let mut refresh = false;
+        if let Some(worker) = &self.history {
+            while let Ok(response) = worker.responses.try_recv() {
+                self.history_pending = self.history_pending.saturating_sub(1);
+                match response {
+                    crate::history::HistoryResponse::Saved(Ok(())) => refresh |= self.show_history,
+                    crate::history::HistoryResponse::Saved(Err(error)) => self.history_error = Some(error),
+                    crate::history::HistoryResponse::Loaded(query, result) => {
+                        if query == self.history_query {
+                            match result {
+                                Ok(blocks) => self.history_results = blocks,
+                                Err(error) => self.history_error = Some(error),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if refresh { self.refresh_history(); }
     }
 
     fn process_async_events(&mut self) {
@@ -130,6 +184,11 @@ impl MrtGuiApp {
                     block,
                     updated_cwd,
                 } => {
+                    if let Some(worker) = &self.history {
+                        if worker.send(crate::history::HistoryRequest::Save(block.clone())) {
+                            self.history_pending += 1;
+                        }
+                    }
                     // Also mirror block to local MCP server state so external MCP clients see live history
                     if let Ok(mut guard) = self.mcp_host.local_server_state.blocks.lock() {
                         guard.push(block.clone());
@@ -522,8 +581,9 @@ impl eframe::App for MrtGuiApp {
         }
 
         self.process_async_events();
+        self.process_history_events();
 
-        if self.busy_count > 0 {
+        if self.busy_count > 0 || self.history_pending > 0 {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
 
@@ -636,6 +696,9 @@ impl eframe::App for MrtGuiApp {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.toggle_value(&mut self.show_history, "History").changed() && self.show_history {
+                        self.refresh_history();
+                    }
                     ui.toggle_value(&mut self.side_state.show_mcp_panel, "MCP Hub");
                     ui.toggle_value(&mut self.side_state.show_internet_panel, "Internet Studio");
                     if ui.button("Palette  Ctrl+K").clicked() {
@@ -644,6 +707,41 @@ impl eframe::App for MrtGuiApp {
                 });
             });
         });
+
+        if self.show_history {
+            let mut restore = None;
+            egui::SidePanel::right("history_panel").default_width(360.0).resizable(true).show(ctx, |ui| {
+                ui.heading("Command history");
+                if ui.add(egui::TextEdit::singleline(&mut self.history_query).hint_text("Search commands and output")).on_hover_text("Search commands and output").changed() {
+                    self.refresh_history();
+                }
+                ui.label("Latest 200 matching commands");
+                if self.history_pending > 0 { ui.spinner(); }
+                if self.history_results.is_empty() && self.history_pending == 0 {
+                    ui.label("No saved commands match.");
+                }
+                if let Some(error) = &self.history_error {
+                    ui.colored_label(Color32::LIGHT_RED, error);
+                }
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for block in &self.history_results {
+                        ui.group(|ui| {
+                            ui.monospace(&block.command);
+                            ui.small(format!("{} · {} · {}", block.timestamp.format("%Y-%m-%d %H:%M"), block.shell_name, block.cwd));
+                            if ui.button("View output").clicked() { restore = Some(block.clone()); }
+                        });
+                    }
+                });
+            });
+            if let Some(block) = restore {
+                let shell_idx = self.shells.iter().position(|shell| shell.kind.short_label() == block.shell_name).unwrap_or(0);
+                let mut tab = TerminalTab::new("History".into(), shell_idx, PathBuf::from(&block.cwd));
+                tab.command_history.push(block.command.clone());
+                tab.blocks.push(block);
+                self.tabs.push(tab);
+                self.active_tab = self.tabs.len() - 1;
+            }
+        }
 
         // Right-hand Side Panels (MCP Hub & Internet Studio)
         let mut panel_event = None;
@@ -679,6 +777,11 @@ impl eframe::App for MrtGuiApp {
         egui::TopBottomPanel::bottom("mrt_bottom_prompt")
             .frame(egui::Frame::none().fill(Color32::from_rgb(29, 37, 45)).inner_margin(egui::Margin::symmetric(18.0, 12.0)))
             .show(ctx, |ui| {
+            if !self.show_history {
+                if let Some(error) = &self.history_error {
+                    ui.colored_label(Color32::LIGHT_RED, error);
+                }
+            }
             // Optional AI Command Proposal Banner
             let mut run_ai_cmd = None;
             let mut dismiss_ai = false;

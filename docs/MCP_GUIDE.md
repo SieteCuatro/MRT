@@ -38,7 +38,7 @@ sequenceDiagram
 
 ## 2. Connecting External AI Clients (`mrt --mcp-server`)
 
-Open the **MCP Hub** side panel inside MRT and click **📋 Copy MCP Config**, or add the following to your AI client's `mcpServers` configuration file (e.g., `claude_desktop_config.json`, `.cursor/mcp.json`, or Antigravity MCP settings):
+Open the **MCP Hub** side panel inside MRT and click **Copy MCP Config**, or add the following to your AI client's `mcpServers` configuration file (e.g., `claude_desktop_config.json`, `.cursor/mcp.json`, or Antigravity MCP settings):
 
 ```json
 {
@@ -121,13 +121,13 @@ External MCP clients can list and read four native MCP resources via `resources/
 
 ## 5. Using MRT as an MCP Host (`crates/mrt-mcp/src/client.rs`)
 
-Inside the MRT GUI, open the **🔌 MCP Hub** side panel on the right:
-1. **Live GUI Bridge Indicator**: Shows the active `127.0.0.1:<port>` bridge address and a **📋 Copy MCP Config** button for external agents.
+Inside the MRT GUI, open the **MCP Hub** side panel on the right:
+1. **Live GUI Bridge Indicator**: Shows the active `127.0.0.1:<port>` bridge address and a **Copy MCP Config** button for external agents.
 2. **Built-in Loopback Server (`mrt-native-mcp`)**: Connected automatically on startup so you can test and invoke all 24 MRT MCP tools directly from the GUI.
 3. **Connecting External Stdio MCP Servers**:
-   - Enter a **Name** (e.g., `filesystem`), **Command** (e.g., `npx`), and **Args** (e.g., `-y @modelcontextprotocol/server-filesystem .`), then click **➕ Connect MCP Server**.
+   - Enter a **Name** (e.g., `filesystem`), **Command** (e.g., `npx`), and **Args** (e.g., `-y @modelcontextprotocol/server-filesystem .`), then click **Connect MCP Server**.
    - `McpHostManager::connect_external_stdio_server` spawns the server (with `CREATE_NO_WINDOW` on Windows so no console window flashes), performs the `initialize` and `tools/list` handshake, and renders every discovered tool in the side panel.
-   - Clicking **▶ Invoke Tool** executes `tools/call` and renders the returned MCP content directly as a `CommandBlock` in your active terminal tab.
+   - Clicking **Invoke Tool** executes `tools/call` and renders the returned MCP content directly as a `CommandBlock` in your active terminal tab.
 
 ---
 

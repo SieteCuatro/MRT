@@ -1,8 +1,8 @@
-# 🧠 In-Depth Multi-Provider AI & Agent Guide (`mrt-ai`)
+# In-Depth Multi-Provider AI & Agent Guide (`mrt-ai`)
 
 [`crates/mrt-ai`](../crates/mrt-ai) powers the natural-language command bar (`# <query>` or `? <query>`) and the automatic **AI Error Triage** engine in **Modern Rust Terminal (MRT)**.
 
-MRT is built on a core philosophy: **support every AI provider without lock-in, and always work 100% free and offline when no API key is set.**
+MRT is provider-agnostic and falls back to a built-in offline heuristic engine when no API key is configured.
 
 ---
 
@@ -64,9 +64,9 @@ Furthermore, when the **Offline Polyglot Engine** (`heuristic_shell_translator`)
 
 ## 3. Automatic Error Triage (`diagnose_command_error`)
 
-Whenever a command exits with a non-zero status code (`exit_code != 0`), MRT displays a **✨ Diagnose Error** button in the block header.
+Whenever a command exits with a non-zero status code (`exit_code != 0`), MRT displays a **Diagnose Error** button in the block header.
 
-`diagnose_command_error(command, output, exit_code, shell)` inspects the command, stderr/stdout text, and active `ShellKind` to detect common cross-shell issues and offer a one-click **▶ Run Fix** button:
+`diagnose_command_error(command, output, exit_code, shell)` inspects the command, stderr/stdout text, and active `ShellKind` to detect common cross-shell issues and offer a one-click **Run Fix** button:
 - Running `ls` inside Windows `cmd.exe` -> Explains that `ls` is POSIX/PowerShell and suggests `dir`.
 - Running `export VAR=val` inside `cmd.exe` or `powershell` -> Suggests `set VAR=val` (for Batch) or `$env:VAR = "val"` (for PowerShell).
 - Unrecognized command / `command not found` -> Suggests `Get-Command *<bin>*` (PowerShell), `where <bin>` (CMD), or `which <bin>` (Bash).

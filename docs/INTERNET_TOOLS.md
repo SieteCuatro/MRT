@@ -6,7 +6,7 @@
 
 ## 1. Inline HTTP / REST API Inspector (`http_inspector.rs`)
 
-Invoked from the prompt via `:http` or `:curl`, from the **🌐 Internet Studio** side panel, or via the `mrt_http_request` MCP tool.
+Invoked from the prompt via `:http` or `:curl`, from the **Internet Studio** side panel, or via the `mrt_http_request` MCP tool.
 
 ### Syntax
 ```text

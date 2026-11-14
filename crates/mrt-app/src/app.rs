@@ -1,5 +1,11 @@
-use crate::theme::{apply_mrt_theme, Palette};
+use crate::theme::{
+    apply_mrt_theme, chip, icon_button, panel_frame, primary_button, secondary_button, section_label,
+    Palette, Radius,
+};
 use crate::widgets::block_view::{render_command_block, BlockAction};
+use crate::widgets::chrome::{
+    brand_mark, centered_column, nav_row, palette_row, search_pill, tab_row, TabStatus,
+};
 use crate::widgets::runbooks::{
     render_runbooks_panel, ReplayStatusView, RunbookAction, RunbooksUiState,
 };
@@ -182,6 +188,7 @@ pub struct MrtGuiApp {
     show_explorer: bool,
     explorer_path: Option<PathBuf>,
     explorer_entries: Result<Vec<(PathBuf, bool)>, String>,
+    sidebar_collapsed: bool,
 }
 
 impl MrtGuiApp {
@@ -268,6 +275,7 @@ impl MrtGuiApp {
             show_explorer: false,
             explorer_path: None,
             explorer_entries: Ok(Vec::new()),
+            sidebar_collapsed: false,
         }
     }
 
@@ -537,40 +545,63 @@ impl MrtGuiApp {
         }
         let mut navigate = None;
         let mut refresh = false;
-        egui::SidePanel::left("folder_explorer")
+        egui::SidePanel::left("folder_explorer").frame(panel_frame())
             .default_width(240.0)
             .resizable(true)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.heading("Explorer");
-                    if ui.small_button("Refresh").clicked() {
-                        refresh = true;
-                    }
+                    ui.label(RichText::new("Explorer").size(15.0).strong().color(Palette::TEXT_PRIMARY));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if icon_button(ui, "🔄", "Refresh").clicked() {
+                            refresh = true;
+                        }
+                    });
                 });
-                ui.add(egui::Label::new(path.display().to_string()).wrap());
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(path.display().to_string())
+                            .monospace()
+                            .size(12.0)
+                            .color(Palette::TEXT_MUTED),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(path.display().to_string());
+                ui.add_space(6.0);
+                ui.spacing_mut().item_spacing.y = 0.0;
                 if let Some(parent) = path.parent() {
-                    if ui.button("↑ Parent folder").clicked() {
+                    if nav_row(ui, "↑", "Parent folder", None, false, false).clicked() {
                         navigate = Some(parent.to_path_buf());
                     }
                 }
-                ui.separator();
                 match &self.explorer_entries {
                     Err(error) => {
-                        ui.colored_label(Color32::LIGHT_RED, error);
+                        ui.colored_label(Palette::ACCENT_RED, error);
                     }
                     Ok(entries) => {
-                        egui::ScrollArea::both()
+                        egui::ScrollArea::vertical()
                             .id_salt("explorer_entries")
+                            .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 for (entry, directory) in entries {
                                     let name =
                                         entry.file_name().unwrap_or_default().to_string_lossy();
                                     if *directory {
-                                        if ui.button(format!("▸ {name}/")).clicked() {
+                                        if nav_row(ui, "🗀", &name, Some("›"), false, false).clicked() {
                                             navigate = Some(entry.clone());
                                         }
                                     } else {
-                                        ui.label(name.as_ref());
+                                        let (rect, _) = ui.allocate_exact_size(
+                                            egui::vec2(ui.available_width(), 30.0),
+                                            egui::Sense::hover(),
+                                        );
+                                        ui.painter().text(
+                                            egui::pos2(rect.left() + 42.0, rect.center().y),
+                                            egui::Align2::LEFT_CENTER,
+                                            name.as_ref(),
+                                            egui::FontId::proportional(13.5),
+                                            Palette::TEXT_SECONDARY,
+                                        );
                                     }
                                 }
                             });
@@ -1817,6 +1848,308 @@ fn forward_egui_event_to_pty(event: &egui::Event, pty: &InteractivePty) {
     }
 }
 
+impl MrtGuiApp {
+    fn tab_status(tab: &TerminalTab) -> TabStatus {
+        if tab.blocks.iter().any(|b| b.exit_code.is_none()) {
+            TabStatus::Running
+        } else {
+            match tab.blocks.last().and_then(|b| b.exit_code) {
+                None => TabStatus::Idle,
+                Some(0) => TabStatus::Succeeded,
+                Some(_) => TabStatus::Failed,
+            }
+        }
+    }
+
+    fn open_new_tab(&mut self, shell_idx: usize) {
+        let cwd = self
+            .tabs
+            .get(self.active_tab)
+            .map(|t| t.cwd.clone())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let n = self.tabs.len() + 1;
+        self.tabs.push(TerminalTab::new(
+            format!("Tab {n} ({})", self.shells[shell_idx].kind.short_label()),
+            shell_idx,
+            cwd,
+        ));
+        self.active_tab = self.tabs.len() - 1;
+    }
+
+    /// Left sidebar: brand, new tab, tabs list, workspace panels and status card.
+    fn render_sidebar(&mut self, ctx: &egui::Context) {
+        let compact = self.sidebar_collapsed;
+        let mut new_tab_shell = None;
+        let mut tab_to_close = None;
+        let mut select_tab = None;
+        let mut toggle_history = false;
+        let mut toggle_runbooks = false;
+        let new_tab_popup = egui::Id::new("mrt_new_tab_popup");
+
+        egui::SidePanel::left("mrt_sidebar")
+            .resizable(false)
+            .exact_width(if compact { 60.0 } else { 264.0 })
+            .frame(
+                egui::Frame::none()
+                    .fill(Palette::BG_SIDEBAR)
+                    .inner_margin(egui::Margin::symmetric(if compact { 8.0 } else { 10.0 }, 14.0)),
+            )
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                // Brand row
+                if compact {
+                    ui.vertical_centered(|ui| {
+                        brand_mark(ui, 28.0);
+                        ui.add_space(6.0);
+                        if icon_button(ui, "»", "Expand sidebar").clicked() {
+                            self.sidebar_collapsed = false;
+                        }
+                    });
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.add_space(6.0);
+                        brand_mark(ui, 26.0);
+                        ui.label(
+                            RichText::new("MRT")
+                                .size(15.0)
+                                .strong()
+                                .color(Palette::TEXT_PRIMARY),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if icon_button(ui, "«", "Collapse sidebar").clicked() {
+                                self.sidebar_collapsed = true;
+                            }
+                        });
+                    });
+                }
+                ui.add_space(12.0);
+
+                // New tab (popup listing every discovered shell)
+                let new_tab = if compact {
+                    nav_row(ui, "+", "New tab", None, false, true)
+                } else {
+                    let response = ui.add(
+                        egui::Button::new(
+                            RichText::new("+   New tab")
+                                .size(14.0)
+                                .color(Palette::TEXT_PRIMARY),
+                        )
+                        .fill(Color32::from_rgb(26, 26, 30))
+                        .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_SUBTLE))
+                        .rounding(egui::Rounding::same(Radius::BUTTON))
+                        .min_size(egui::vec2(ui.available_width(), 40.0)),
+                    );
+                    response
+                };
+                if new_tab.clicked() {
+                    ui.memory_mut(|m| m.toggle_popup(new_tab_popup));
+                }
+                egui::popup_below_widget(
+                    ui,
+                    new_tab_popup,
+                    &new_tab,
+                    egui::PopupCloseBehavior::CloseOnClick,
+                    |ui| {
+                        ui.set_min_width(220.0);
+                        for (idx, shell) in self.shells.iter().enumerate() {
+                            if ui
+                                .add(
+                                    egui::Button::new(format!(
+                                        "{}   {}",
+                                        shell.name, shell.program
+                                    ))
+                                    .frame(false)
+                                    .min_size(egui::vec2(ui.available_width(), 30.0)),
+                                )
+                                .clicked()
+                            {
+                                new_tab_shell = Some(idx);
+                            }
+                        }
+                    },
+                );
+                if nav_row(ui, "🔍", "Search history", None, self.show_history, compact).clicked() {
+                    toggle_history = true;
+                }
+
+                // Tabs
+                if compact {
+                    ui.add_space(10.0);
+                } else {
+                    section_label(ui, "   Tabs");
+                }
+                let closable = self.tabs.len() > 1;
+                for (idx, tab) in self.tabs.iter().enumerate() {
+                    let shell = self
+                        .shells
+                        .get(tab.active_shell_idx)
+                        .map(|s| s.kind.short_label())
+                        .unwrap_or("shell");
+                    let folder = tab
+                        .cwd
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| tab.cwd.display().to_string());
+                    let title = if tab.title.starts_with("Tab ") { folder.clone() } else { tab.title.clone() };
+                    let status = Self::tab_status(tab);
+                    let subtitle = if tab.title.starts_with("Tab ") {
+                        format!("{shell} · {}", status.label())
+                    } else {
+                        format!("{shell} · {folder}")
+                    };
+                    let row = tab_row(
+                        ui,
+                        &title,
+                        &subtitle,
+                        status,
+                        idx == self.active_tab,
+                        closable,
+                        compact,
+                    );
+                    if row.close {
+                        tab_to_close = Some(tab.id);
+                    } else if row.selected {
+                        select_tab = Some(idx);
+                    }
+                }
+
+                // Workspace panels
+                if compact {
+                    ui.add_space(10.0);
+                } else {
+                    section_label(ui, "   Workspace");
+                }
+                if nav_row(ui, "🗀", "Explorer", None, self.show_explorer, compact).clicked() {
+                    self.show_explorer = !self.show_explorer;
+                }
+                if nav_row(ui, "☰", "Runbooks", None, self.runbooks_state.show_panel, compact).clicked() {
+                    toggle_runbooks = true;
+                }
+                if nav_row(ui, "🕘", "History", None, self.show_history, compact).clicked() {
+                    toggle_history = true;
+                }
+                if nav_row(ui, "🔌", "MCP Hub", None, self.side_state.show_mcp_panel, compact).clicked() {
+                    self.side_state.show_mcp_panel = !self.side_state.show_mcp_panel;
+                }
+                if nav_row(ui, "🌐", "Internet Studio", None, self.side_state.show_internet_panel, compact).clicked() {
+                    self.side_state.show_internet_panel = !self.side_state.show_internet_panel;
+                }
+                if nav_row(ui, "⊞", "Mosaic", None, self.mosaic, compact).clicked() {
+                    self.mosaic = !self.mosaic;
+                }
+
+                // Status card pinned to the bottom
+                if !compact {
+                    const CARD_HEIGHT: f32 = 66.0;
+                    let gap = ui.available_height() - CARD_HEIGHT;
+                    if gap > 0.0 {
+                        ui.add_space(gap);
+                    } else {
+                        ui.add_space(12.0);
+                    }
+                    egui::Frame::none()
+                        .fill(Color32::from_rgb(26, 26, 30))
+                        .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_FAINT))
+                        .rounding(egui::Rounding::same(12.0))
+                        .inner_margin(egui::Margin::symmetric(12.0, 10.0))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.spacing_mut().item_spacing.y = 4.0;
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("●").size(10.0).color(Palette::ACCENT_GREEN));
+                                ui.label(RichText::new("Safety Gate on").size(13.0).color(Palette::TEXT_PRIMARY));
+                            });
+                            let bridge = match self.bridge_port {
+                                Some(port) => format!("MCP bridge · port {port}"),
+                                None => "MCP bridge offline".to_string(),
+                            };
+                            ui.label(RichText::new(bridge).size(12.0).color(Palette::TEXT_MUTED));
+                        });
+                }
+            });
+
+        if let Some(idx) = new_tab_shell {
+            self.open_new_tab(idx);
+        }
+        if let Some(idx) = select_tab {
+            self.active_tab = idx;
+        }
+        if let Some(id) = tab_to_close {
+            self.close_terminal(id);
+        }
+        if toggle_history {
+            self.show_history = !self.show_history;
+            if self.show_history {
+                self.refresh_history();
+            }
+        }
+        if toggle_runbooks {
+            self.runbooks_state.show_panel = !self.runbooks_state.show_panel;
+            if self.runbooks_state.show_panel {
+                self.refresh_runbooks();
+                self.refresh_history();
+            }
+        }
+    }
+
+    /// Header: working directory, command palette pill and layout controls.
+    fn render_header(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("mrt_header")
+            .frame(
+                egui::Frame::none()
+                    .fill(Palette::BG_BASE)
+                    .inner_margin(egui::Margin::symmetric(20.0, 10.0)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if let Some(tab) = self.tabs.get(self.active_tab) {
+                        let full = tab.cwd.display().to_string();
+                        let leaf = tab
+                            .cwd
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| full.clone());
+                        let parent = full.strip_suffix(&leaf).unwrap_or("").to_string();
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.label(RichText::new(parent).monospace().size(13.0).color(Palette::TEXT_SECONDARY))
+                            .on_hover_text(&full);
+                        ui.label(RichText::new(leaf).monospace().size(13.0).color(Palette::TEXT_PRIMARY))
+                            .on_hover_text(&full);
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                    }
+                    if self.mosaic {
+                        ui.add_space(10.0);
+                        chip(ui, "Mosaic", Palette::BG_OVERLAY, Palette::TEXT_BODY);
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if !self.mosaic {
+                            let shells_len = self.shells.len();
+                            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                                if tab.split_direction == SplitDirection::None {
+                                    if icon_button(ui, "⊟", "Split vertically (:split-v)").clicked() {
+                                        tab.split(SplitDirection::Vertical, shells_len);
+                                    }
+                                    if icon_button(ui, "‖", "Split horizontally (:split-h)").clicked() {
+                                        tab.split(SplitDirection::Horizontal, shells_len);
+                                    }
+                                } else if icon_button(ui, "×", "Close split (:unsplit)").clicked() {
+                                    tab.close_split();
+                                }
+                            }
+                        }
+                        ui.add_space(4.0);
+                        let width = ui.available_width().clamp(160.0, 320.0);
+                        if search_pill(ui, width, "Commands, tabs, tools…", "Ctrl K").clicked() {
+                            self.show_command_palette = !self.show_command_palette;
+                        }
+                    });
+                });
+            });
+    }
+}
+
 impl eframe::App for MrtGuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let first_frame = !self.focused_on_start;
@@ -1851,155 +2184,8 @@ impl eframe::App for MrtGuiApp {
             self.show_command_palette = !self.show_command_palette;
         }
 
-        // Top Navigation Bar: Tabs, Shell Switcher, and Side Panel Toggles
-        egui::TopBottomPanel::top("mrt_top_bar")
-            .frame(
-                egui::Frame::none()
-                    .fill(Palette::BG_SURFACE)
-                    .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_SUBTLE))
-                    .inner_margin(egui::Margin::symmetric(14.0, 8.0)),
-            )
-            .show(ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new("MRT")
-                        .size(14.0)
-                        .monospace()
-                        .strong()
-                        .color(Palette::ACCENT_BLUE),
-                );
-                ui.separator();
-
-                ui.toggle_value(&mut self.mosaic, "Mosaic");
-                ui.toggle_value(&mut self.show_explorer, "Explorer");
-
-                if !self.mosaic {
-                    if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-                        let shells_len = self.shells.len();
-                        if tab.split_direction == SplitDirection::None {
-                            if ui.small_button("Split ◫").on_hover_text("Split tab horizontally into 2 panes").clicked() {
-                                tab.split(SplitDirection::Horizontal, shells_len);
-                            }
-                            if ui.small_button("Split ⊟").on_hover_text("Split tab vertically into 2 panes").clicked() {
-                                tab.split(SplitDirection::Vertical, shells_len);
-                            }
-                        } else {
-                            if ui.small_button("Close Split ✕").on_hover_text("Close secondary split pane").clicked() {
-                                tab.close_split();
-                            }
-                        }
-                    }
-                }
-
-                // Render Tabs
-                let mut tab_to_close = None;
-                for idx in 0..self.tabs.len() {
-                    let is_active = idx == self.active_tab;
-                    let title = self.tabs[idx].title.clone();
-                    let btn = egui::Button::new(
-                        RichText::new(&title)
-                            .size(12.0)
-                            .color(if is_active {
-                                Palette::TEXT_PRIMARY
-                            } else {
-                                Palette::TEXT_SECONDARY
-                            }),
-                    )
-                    .fill(if is_active {
-                        Palette::BG_OVERLAY
-                    } else {
-                        Color32::TRANSPARENT
-                    })
-                    .stroke(if is_active {
-                        egui::Stroke::new(1.0_f32, Palette::BORDER_SUBTLE)
-                    } else {
-                        egui::Stroke::NONE
-                    });
-
-                    if ui.add(btn).clicked() {
-                        self.active_tab = idx;
-                    }
-                    if self.tabs.len() > 1 && ui.small_button("×").clicked() {
-                        tab_to_close = Some(idx);
-                    }
-                }
-                if let Some(close_idx) = tab_to_close {
-                    let id = self.tabs[close_idx].id;
-                    self.close_terminal(id);
-                }
-
-                // New Tab dropdown per discovered shell
-                egui::menu::menu_button(ui, "+ Tab", |ui| {
-                    for (s_idx, shell) in self.shells.iter().enumerate() {
-                        if ui
-                            .button(format!("{} ({})", shell.name, shell.program))
-                            .clicked()
-                        {
-                            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                            let n = self.tabs.len() + 1;
-                            self.tabs.push(TerminalTab::new(
-                                format!("Tab {n} ({})", shell.kind.short_label()),
-                                s_idx,
-                                cwd,
-                            ));
-                            self.active_tab = self.tabs.len() - 1;
-                            ui.close_menu();
-                        }
-                    }
-                });
-
-                ui.separator();
-
-                // Active Tab Shell Profile Switcher
-                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-                    let current_shell_name = self
-                        .shells
-                        .get(tab.active_shell_idx)
-                        .map(|s| s.kind.short_label().to_string())
-                        .unwrap_or_else(|| "shell".into());
-
-                    egui::ComboBox::from_id_salt("active_shell_selector")
-                        .selected_text(RichText::new(current_shell_name).monospace().size(12.0))
-                        .show_ui(ui, |ui| {
-                            for (idx, s) in self.shells.iter().enumerate() {
-                                if ui
-                                    .selectable_value(
-                                        &mut tab.active_shell_idx,
-                                        idx,
-                                        format!("{} — {}", s.name, s.program),
-                                    )
-                                    .changed()
-                                {
-                                    tab.title = format!(
-                                        "Tab {} ({})",
-                                        self.active_tab + 1,
-                                        s.kind.short_label()
-                                    );
-                                }
-                            }
-                        });
-                }
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Ctrl+K").clicked() {
-                        self.show_command_palette = !self.show_command_palette;
-                    }
-                    ui.toggle_value(&mut self.side_state.show_internet_panel, "Net");
-                    ui.toggle_value(&mut self.side_state.show_mcp_panel, "MCP");
-                    if ui.toggle_value(&mut self.show_history, "History").changed() && self.show_history {
-                        self.refresh_history();
-                    }
-                    if ui
-                        .toggle_value(&mut self.runbooks_state.show_panel, "Runbooks")
-                        .changed()
-                        && self.runbooks_state.show_panel
-                    {
-                        self.refresh_runbooks();
-                        self.refresh_history();
-                    }
-                });
-            });
-        });
+        self.render_sidebar(ctx);
+        self.render_header(ctx);
 
         if self.show_explorer {
             self.render_explorer(ctx);
@@ -2008,7 +2194,7 @@ impl eframe::App for MrtGuiApp {
         if self.show_history {
             let mut restore = None;
             let mut add_to_runbook: Option<crate::history::RunbookStep> = None;
-            egui::SidePanel::right("history_panel").default_width(360.0).resizable(true).show(ctx, |ui| {
+            egui::SidePanel::right("history_panel").frame(panel_frame()).default_width(360.0).resizable(true).show(ctx, |ui| {
                 ui.heading("Command history");
                 if ui.add(egui::TextEdit::singleline(&mut self.history_query).hint_text("Search commands and output")).on_hover_text("Search commands and output").changed() {
                     self.refresh_history();
@@ -2087,7 +2273,7 @@ impl eframe::App for MrtGuiApp {
                 .map(|t| t.cwd.display().to_string())
                 .unwrap_or_else(|| ".".into());
             let mut runbook_action = None;
-            egui::SidePanel::right("runbooks_panel")
+            egui::SidePanel::right("runbooks_panel").frame(panel_frame())
                 .default_width(380.0)
                 .resizable(true)
                 .show(ctx, |ui| {
@@ -2135,7 +2321,7 @@ impl eframe::App for MrtGuiApp {
         // Right-hand Side Panels (MCP Hub & Internet Studio)
         let mut panel_event = None;
         if self.side_state.show_mcp_panel {
-            egui::SidePanel::right("mrt_mcp_panel")
+            egui::SidePanel::right("mrt_mcp_panel").frame(panel_frame())
                 .default_width(330.0)
                 .resizable(true)
                 .show(ctx, |ui| {
@@ -2150,7 +2336,7 @@ impl eframe::App for MrtGuiApp {
                 });
         }
         if self.side_state.show_internet_panel {
-            egui::SidePanel::right("mrt_internet_panel")
+            egui::SidePanel::right("mrt_internet_panel").frame(panel_frame())
                 .default_width(330.0)
                 .resizable(true)
                 .show(ctx, |ui| {
@@ -2165,162 +2351,233 @@ impl eframe::App for MrtGuiApp {
 
         focus_prompt |= previous_tab != self.tabs[self.active_tab].id || (palette_was_open && !self.show_command_palette);
 
-        // Bottom Smart Prompt Bar
+        // Floating composer: AI suggestion card + command input card
         egui::TopBottomPanel::bottom("mrt_bottom_prompt")
-            .frame(
-                egui::Frame::none()
-                    .fill(Palette::BG_SURFACE)
-                    .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_SUBTLE))
-                    .inner_margin(egui::Margin::symmetric(16.0, 12.0)),
-            )
+            .show_separator_line(false)
+            .frame(egui::Frame::none().fill(Palette::BG_BASE).inner_margin(egui::Margin {
+                left: 20.0,
+                right: 20.0,
+                top: 6.0,
+                bottom: 18.0,
+            }))
             .show(ctx, |ui| {
-            if !self.show_history {
-                if let Some(error) = &self.history_error {
-                    ui.colored_label(Palette::ACCENT_RED, error);
-                }
-            }
-            if self.mosaic {
-                ui.label(
-                    RichText::new(format!("Active · {}", self.tabs[self.active_tab].title))
-                        .size(11.0)
-                        .color(Palette::TEXT_MUTED),
-                );
-            }
-            // Optional AI Command Proposal Banner
-            let mut run_ai_cmd = None;
-            let mut dismiss_ai = false;
-            let tab = &mut self.tabs[self.active_tab];
-            if let Some(proposal) = &tab.ai_proposal {
-                let cmd = &proposal.proposed_command;
-                let explanation = &proposal.explanation;
-                let provider = &proposal.provider_used;
-                egui::Frame::none()
-                    .fill(Color32::from_rgba_unmultiplied(88, 166, 255, 18))
-                    .stroke(egui::Stroke::new(1.0_f32, Palette::ACCENT_BLUE))
-                    .rounding(egui::Rounding::same(6.0))
-                    .inner_margin(egui::Margin::symmetric(10.0, 8.0))
-                    .show(ui, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(
-                                RichText::new(format!("AI · {provider}"))
-                                    .size(11.5)
-                                    .strong()
-                                    .color(Palette::ACCENT_BLUE),
-                            );
-                            ui.label(
-                                RichText::new(cmd)
-                                    .monospace()
-                                    .size(12.5)
-                                    .strong()
-                                    .color(Palette::TEXT_PRIMARY),
-                            );
-                            ui.label(
-                                RichText::new(format!("— {explanation}"))
-                                    .size(12.0)
-                                    .color(Palette::TEXT_SECONDARY),
-                            );
-                            if ui.small_button("Run").clicked() {
-                                run_ai_cmd = Some(cmd.clone());
-                                dismiss_ai = true;
-                            }
-                            if ui.small_button("Dismiss").clicked() {
-                                dismiss_ai = true;
-                            }
-                        });
-                    });
-                ui.add_space(6.0);
-            }
-            if dismiss_ai {
-                tab.ai_proposal = None;
-            }
-            if let Some(c) = run_ai_cmd {
-                self.submit_input(Some(c), false);
-            }
-
-            let mut should_submit = false;
-            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(tab.cwd.display().to_string())
-                            .size(11.5)
-                            .monospace()
-                            .color(Palette::TEXT_MUTED),
-                    )
-                    .truncate(),
-                )
-                .on_hover_text(tab.cwd.display().to_string());
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("›")
-                            .size(20.0)
-                            .monospace()
-                            .strong()
-                            .color(Palette::ACCENT_GREEN),
-                    );
-                    let response = ui.add(
-                        egui::TextEdit::singleline(&mut tab.input_line)
-                            .id(egui::Id::new(("command_input", tab.id)))
-                            .font(egui::FontId::monospace(14.5))
-                            .margin(egui::Margin::symmetric(10.0, 8.0))
-                            .hint_text(if tab.blocks.is_empty() {
-                                "Enter a command, # for AI, or Ctrl+K for palette"
-                            } else {
-                                "Enter a command..."
-                            })
-                            .desired_width((ui.available_width() - 72.0).max(32.0)),
-                    );
-                    if focus_prompt && !self.show_command_palette && self.pending_safety.is_none() && self.active_tui.is_none() {
-                        response.request_focus();
-                    }
-                    if self.active_tui.is_none() && response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                        should_submit = true;
-                        response.request_focus();
-                    }
-
-                    // Up/Down history navigation
-                    if response.has_focus() {
-                        if ui.input(|i| i.key_pressed(Key::ArrowUp)) && !tab.command_history.is_empty()
-                        {
-                            let next_idx = match tab.history_cursor {
-                                Some(c) => c.saturating_sub(1),
-                                None => tab.command_history.len() - 1,
-                            };
-                            tab.history_cursor = Some(next_idx);
-                            tab.input_line = tab.command_history[next_idx].clone();
-                        } else if ui.input(|i| i.key_pressed(Key::ArrowDown))
-                            && !tab.command_history.is_empty()
-                        {
-                            if let Some(c) = tab.history_cursor {
-                                if c + 1 < tab.command_history.len() {
-                                    tab.history_cursor = Some(c + 1);
-                                    tab.input_line = tab.command_history[c + 1].clone();
-                                } else {
-                                    tab.history_cursor = None;
-                                    tab.input_line.clear();
-                                }
-                            }
+                centered_column(ui, |ui| {
+                    if !self.show_history {
+                        if let Some(error) = &self.history_error {
+                            ui.colored_label(Palette::ACCENT_RED, error);
                         }
                     }
 
-                    if ui.add_enabled(!tab.input_line.trim().is_empty(), egui::Button::new("Run").min_size(egui::vec2(52.0, 34.0))).clicked() {
-                        response.request_focus();
-                        should_submit = true;
+                    // AI command proposal card
+                    let mut run_ai_cmd = None;
+                    let mut dismiss_ai = false;
+                    if let Some(proposal) = &self.tabs[self.active_tab].ai_proposal {
+                        egui::Frame::none()
+                            .fill(Palette::AI_FILL)
+                            .stroke(egui::Stroke::new(1.0_f32, Palette::AI_BORDER))
+                            .rounding(egui::Rounding::same(14.0))
+                            .inner_margin(egui::Margin::symmetric(16.0, 12.0))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new("✨").size(14.0).color(Palette::ACCENT));
+                                    ui.label(
+                                        RichText::new("Suggested command")
+                                            .size(13.0)
+                                            .strong()
+                                            .color(Palette::ACCENT_TEXT),
+                                    );
+                                    ui.label(
+                                        RichText::new(&proposal.provider_used)
+                                            .size(12.0)
+                                            .color(Palette::TEXT_SECONDARY),
+                                    );
+                                });
+                                if !proposal.explanation.trim().is_empty() {
+                                    ui.label(
+                                        RichText::new(&proposal.explanation)
+                                            .size(13.5)
+                                            .color(Palette::TEXT_BODY),
+                                    );
+                                }
+                                ui.add_space(4.0);
+                                egui::Frame::none()
+                                    .fill(Palette::BG_INSET)
+                                    .rounding(egui::Rounding::same(Radius::BUTTON))
+                                    .inner_margin(egui::Margin { left: 12.0, right: 8.0, top: 6.0, bottom: 6.0 })
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                RichText::new(&proposal.proposed_command)
+                                                    .monospace()
+                                                    .size(13.0)
+                                                    .color(Palette::TEXT_PRIMARY),
+                                            );
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                if ui.add(primary_button("Run")).clicked() {
+                                                    run_ai_cmd = Some(proposal.proposed_command.clone());
+                                                    dismiss_ai = true;
+                                                }
+                                                if ui.add(secondary_button("Dismiss")).clicked() {
+                                                    dismiss_ai = true;
+                                                }
+                                            });
+                                        });
+                                    });
+                            });
+                        ui.add_space(10.0);
+                    }
+                    if dismiss_ai {
+                        self.tabs[self.active_tab].ai_proposal = None;
+                    }
+                    if let Some(c) = run_ai_cmd {
+                        self.submit_input(Some(c), false);
+                    }
+
+                    let mut should_submit = false;
+                    let active_idx = self.active_tab;
+                    let mosaic = self.mosaic;
+                    let may_focus = focus_prompt
+                        && !self.show_command_palette
+                        && self.pending_safety.is_none()
+                        && self.active_tui.is_none();
+                    let tui_active = self.active_tui.is_some();
+                    let shells = &self.shells;
+                    if let Some(tab) = self.tabs.get_mut(active_idx) {
+                        egui::Frame::none()
+                            .fill(Palette::BG_ELEVATED)
+                            .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_STRONG))
+                            .rounding(egui::Rounding::same(Radius::COMPOSER))
+                            .inner_margin(egui::Margin { left: 16.0, right: 12.0, top: 12.0, bottom: 10.0 })
+                            .shadow(egui::epaint::Shadow {
+                                offset: egui::vec2(0.0, 12.0),
+                                blur: 32.0,
+                                spread: 0.0,
+                                color: Color32::from_black_alpha(90),
+                            })
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                if mosaic {
+                                    ui.label(
+                                        RichText::new(format!("Active · {}", tab.title))
+                                            .size(12.0)
+                                            .color(Palette::TEXT_MUTED),
+                                    );
+                                }
+                                let response = ui.add(
+                                    egui::TextEdit::singleline(&mut tab.input_line)
+                                        .id(egui::Id::new(("command_input", tab.id)))
+                                        .font(egui::FontId::monospace(14.5))
+                                        .frame(false)
+                                        .margin(egui::Margin::symmetric(0.0, 6.0))
+                                        .hint_text(if tab.blocks.is_empty() {
+                                            "Run a command — start with # to ask AI, Ctrl+K for everything else"
+                                        } else {
+                                            "Run a command — or start with # to ask AI"
+                                        })
+                                        .desired_width(f32::INFINITY),
+                                );
+                                if may_focus {
+                                    response.request_focus();
+                                }
+                                if !tui_active && response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                                    should_submit = true;
+                                    response.request_focus();
+                                }
+
+                                // Up/Down history navigation
+                                if response.has_focus() {
+                                    if ui.input(|i| i.key_pressed(Key::ArrowUp)) && !tab.command_history.is_empty() {
+                                        let next_idx = match tab.history_cursor {
+                                            Some(c) => c.saturating_sub(1),
+                                            None => tab.command_history.len() - 1,
+                                        };
+                                        tab.history_cursor = Some(next_idx);
+                                        tab.input_line = tab.command_history[next_idx].clone();
+                                    } else if ui.input(|i| i.key_pressed(Key::ArrowDown))
+                                        && !tab.command_history.is_empty()
+                                    {
+                                        if let Some(c) = tab.history_cursor {
+                                            if c + 1 < tab.command_history.len() {
+                                                tab.history_cursor = Some(c + 1);
+                                                tab.input_line = tab.command_history[c + 1].clone();
+                                            } else {
+                                                tab.history_cursor = None;
+                                                tab.input_line.clear();
+                                            }
+                                        }
+                                    }
+                                }
+
+                                ui.add_space(4.0);
+                                ui.horizontal(|ui| {
+                                    let current_shell_name = shells
+                                        .get(tab.active_shell_idx)
+                                        .map(|s| s.kind.short_label().to_string())
+                                        .unwrap_or_else(|| "shell".into());
+                                    egui::ComboBox::from_id_salt("active_shell_selector")
+                                        .selected_text(
+                                            RichText::new(format!("›_  {current_shell_name}"))
+                                                .monospace()
+                                                .size(12.0)
+                                                .color(Palette::TEXT_BODY),
+                                        )
+                                        .show_ui(ui, |ui| {
+                                            for (idx, s) in shells.iter().enumerate() {
+                                                if ui
+                                                    .selectable_value(
+                                                        &mut tab.active_shell_idx,
+                                                        idx,
+                                                        format!("{} — {}", s.name, s.program),
+                                                    )
+                                                    .changed()
+                                                {
+                                                    tab.title = format!(
+                                                        "Tab {} ({})",
+                                                        active_idx + 1,
+                                                        s.kind.short_label()
+                                                    );
+                                                }
+                                            }
+                                        });
+                                    ui.add_space(6.0);
+                                    ui.label(RichText::new("🛡").size(12.0).color(Palette::ACCENT_GREEN));
+                                    ui.label(RichText::new("Safety Gate on").size(12.0).color(Palette::TEXT_MUTED));
+
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        let has_input = !tab.input_line.trim().is_empty();
+                                        let run = egui::Button::new(
+                                            RichText::new("→")
+                                                .size(17.0)
+                                                .strong()
+                                                .color(if has_input { Palette::ON_ACCENT } else { Palette::TEXT_MUTED }),
+                                        )
+                                        .fill(if has_input { Palette::ACCENT } else { Palette::BG_OVERLAY })
+                                        .stroke(egui::Stroke::NONE)
+                                        .rounding(egui::Rounding::same(17.0))
+                                        .min_size(egui::vec2(34.0, 34.0));
+                                        if ui.add_enabled(has_input, run).on_hover_text("Run command (Enter)").clicked() {
+                                            response.request_focus();
+                                            should_submit = true;
+                                        }
+                                    });
+                                });
+                            });
+                    }
+
+                    if should_submit {
+                        self.submit_input(None, false);
                     }
                 });
-            }
-
-            if should_submit {
-                self.submit_input(None, false);
-            }
-        });
+            });
 
         // Central Terminal Block Stream
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::none()
                     .fill(Palette::BG_BASE)
-                    .inner_margin(egui::Margin::same(16.0)),
+                    .inner_margin(egui::Margin { left: 20.0, right: 20.0, top: 12.0, bottom: 4.0 }),
             )
             .show(ctx, |ui| {
             if self.mosaic {
@@ -2457,7 +2714,31 @@ impl eframe::App for MrtGuiApp {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .stick_to_bottom(true)
-                        .show(ui, |ui| {
+                        .show(ui, |ui| centered_column(ui, |ui| {
+                            ui.add_space(8.0);
+                            if tab.blocks.is_empty() {
+                                ui.add_space((ui.available_height() * 0.28).max(48.0));
+                                ui.vertical_centered(|ui| {
+                                    brand_mark(ui, 40.0);
+                                    ui.add_space(14.0);
+                                    ui.label(RichText::new("Ready when you are").size(22.0).strong().color(Palette::TEXT_PRIMARY));
+                                    ui.add_space(4.0);
+                                    ui.label(RichText::new("Run any command below. Output lands here as blocks you can search, diff and diagnose.").size(14.0).color(Palette::TEXT_SECONDARY));
+                                    ui.add_space(18.0);
+                                    for (keys, hint) in [
+                                        ("#", "Describe what you want and AI writes the command"),
+                                        (":http  :dns  :ports  :web", "Built-in network tools"),
+                                        ("Ctrl K", "Command palette"),
+                                    ] {
+                                        ui.horizontal(|ui| {
+                                            let total = 420.0_f32.min(ui.available_width());
+                                            ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
+                                            chip(ui, keys, Palette::BG_OVERLAY, Palette::TEXT_BODY);
+                                            ui.label(RichText::new(hint).size(13.0).color(Palette::TEXT_MUTED));
+                                        });
+                                    }
+                                });
+                            }
                             let mut previous_runs = HashMap::new();
                             for block in &mut tab.blocks {
                                 let key = (block.command.clone(), block.shell_name.clone(), block.cwd.clone());
@@ -2466,7 +2747,7 @@ impl eframe::App for MrtGuiApp {
                                 if let Some(action) = render_command_block(ui, block, filter, previous_id) {
                                     pending_block_action = Some(action);
                                 }
-                                ui.add_space(10.0);
+                                ui.add_space(14.0);
                             }
                             if let Some((previous_id, current_id)) = tab.comparison {
                                 let previous = tab.blocks.iter().find(|block| block.id == previous_id);
@@ -2477,7 +2758,7 @@ impl eframe::App for MrtGuiApp {
                                     }
                                 }
                             }
-                        });
+                        }));
                 }
             }
 
@@ -2486,7 +2767,7 @@ impl eframe::App for MrtGuiApp {
             }
         });
 
-        // Safety Gate Modal Overlay
+        // Safety Gate: anchored just above the composer, like an inline confirmation
         if self.pending_safety.is_some() {
             let mut approve = false;
             let mut cancel = false;
@@ -2496,78 +2777,113 @@ impl eframe::App for MrtGuiApp {
                 .order(egui::Order::Middle)
                 .show(ctx, |ui| {
                     let screen = ctx.screen_rect();
-                    ui.painter().rect_filled(
-                        screen,
-                        0.0,
-                        Color32::from_black_alpha(140),
-                    );
+                    ui.painter()
+                        .rect_filled(screen, 0.0, Color32::from_black_alpha(120));
                 });
 
             if let Some(ref pending) = self.pending_safety {
+                let critical = pending.assessment.risk == RiskLevel::Critical;
+                let width = (ctx.screen_rect().width() - 80.0).clamp(320.0, 720.0);
                 egui::Window::new("MRT Safety Gate")
                     .title_bar(false)
                     .collapsible(false)
                     .resizable(false)
-                    .default_width(460.0)
-                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .default_width(width)
+                    .min_width(width)
+                    .max_width(width)
+                    .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -150.0])
+                    .frame(
+                        egui::Frame::window(&ctx.style())
+                            .fill(Palette::DANGER_FILL)
+                            .stroke(egui::Stroke::new(1.0_f32, Palette::DANGER_BORDER))
+                            .rounding(egui::Rounding::same(Radius::COMPOSER))
+                            .inner_margin(egui::Margin::symmetric(22.0, 20.0)),
+                    )
                     .show(ctx, |ui| {
-                        ui.label(
-                            RichText::new("Destructive Command Intercepted")
-                                .size(15.0)
-                                .strong()
-                                .color(Palette::ACCENT_RED),
-                        );
-                        ui.add_space(4.0);
-                        ui.label(
-                            RichText::new(format!(
-                                "{} · {}",
-                                pending.assessment.risk.label(),
-                                pending.assessment.reason
-                            ))
-                            .size(12.0)
-                            .color(Palette::TEXT_SECONDARY),
-                        );
-                        ui.label(
-                            RichText::new(format!(
-                                "{} · {}",
-                                pending.shell.name,
-                                pending.cwd.display()
-                            ))
-                            .size(11.5)
-                            .monospace()
-                            .color(Palette::TEXT_MUTED),
-                        );
-                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            egui::Frame::none()
+                                .fill(Color32::from_rgb(58, 38, 20))
+                                .rounding(egui::Rounding::same(12.0))
+                                .inner_margin(egui::Margin::same(10.0))
+                                .show(ui, |ui| {
+                                    ui.label(RichText::new("🛡").size(18.0).color(Color32::from_rgb(253, 186, 116)));
+                                });
+                            ui.add_space(6.0);
+                            ui.vertical(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(if critical {
+                                            "This command can’t be undone"
+                                        } else {
+                                            "Check this command before it runs"
+                                        })
+                                        .size(16.0)
+                                        .strong()
+                                        .color(Palette::TEXT_PRIMARY),
+                                    );
+                                    let (fill, fg) = if critical {
+                                        (Color32::from_rgb(74, 31, 31), Color32::from_rgb(252, 165, 165))
+                                    } else {
+                                        (Color32::from_rgb(66, 48, 18), Color32::from_rgb(253, 224, 138))
+                                    };
+                                    chip(ui, pending.assessment.risk.label(), fill, fg);
+                                });
+                                ui.label(
+                                    RichText::new(&pending.assessment.reason)
+                                        .size(14.0)
+                                        .color(Color32::from_rgb(214, 206, 200)),
+                                );
+                            });
+                        });
+                        ui.add_space(12.0);
                         egui::Frame::none()
-                            .fill(Color32::from_rgba_unmultiplied(248, 81, 73, 20))
-                            .stroke(egui::Stroke::new(1.0_f32, Palette::ACCENT_RED))
-                            .rounding(egui::Rounding::same(6.0))
-                            .inner_margin(egui::Margin::same(10.0))
+                            .fill(Palette::BG_INSET)
+                            .rounding(egui::Rounding::same(12.0))
+                            .inner_margin(egui::Margin::symmetric(14.0, 12.0))
                             .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
                                 ui.label(
                                     RichText::new(&pending.assessment.command)
                                         .monospace()
-                                        .size(13.0)
-                                        .strong()
+                                        .size(13.5)
                                         .color(Palette::TEXT_PRIMARY),
                                 );
                             });
-                        ui.add_space(10.0);
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new(format!("{} · {}", pending.shell.name, pending.cwd.display()))
+                                .size(12.0)
+                                .monospace()
+                                .color(Color32::from_rgb(189, 179, 172)),
+                        );
+                        ui.add_space(12.0);
                         ui.horizontal(|ui| {
-                            if ui
-                                .button(
-                                    RichText::new("Approve & Execute")
-                                        .color(Palette::ACCENT_RED),
+                            ui.label(RichText::new("Esc to cancel").size(12.0).color(Color32::from_rgb(189, 179, 172)));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let run = egui::Button::new(
+                                    RichText::new("Run anyway")
+                                        .strong()
+                                        .color(Color32::from_rgb(31, 10, 10)),
                                 )
-                                .clicked()
-                            {
-                                approve = true;
-                            }
-                            if ui.button("Cancel").clicked() {
-                                cancel = true;
-                            }
+                                .fill(Palette::ACCENT_RED)
+                                .stroke(egui::Stroke::NONE)
+                                .rounding(egui::Rounding::same(Radius::BUTTON))
+                                .min_size(egui::vec2(0.0, 36.0));
+                                if ui.add(run).clicked() {
+                                    approve = true;
+                                }
+                                if ui
+                                    .add(secondary_button("Cancel").min_size(egui::vec2(0.0, 36.0)))
+                                    .clicked()
+                                {
+                                    cancel = true;
+                                }
+                            });
                         });
                     });
+                if ctx.input(|i| i.key_pressed(Key::Escape)) {
+                    cancel = true;
+                }
             }
 
             if approve {
@@ -2588,7 +2904,7 @@ impl eframe::App for MrtGuiApp {
             }
         }
 
-        // Universal Command Palette Modal (Ctrl+K / Ctrl+P)
+        // Universal Command Palette (Ctrl+K / Ctrl+P)
         if self.show_command_palette {
             let mut close_palette = false;
             let mut cmd_to_run = None;
@@ -2599,90 +2915,182 @@ impl eframe::App for MrtGuiApp {
                 .order(egui::Order::Middle)
                 .show(ctx, |ui| {
                     let screen = ctx.screen_rect();
-                    ui.painter().rect_filled(
-                        screen,
-                        0.0,
-                        Color32::from_black_alpha(130),
-                    );
+                    ui.painter()
+                        .rect_filled(screen, 0.0, Color32::from_rgba_unmultiplied(8, 8, 10, 160));
                 });
 
+            let width = (ctx.screen_rect().width() - 48.0).clamp(300.0, 640.0);
             egui::Window::new("Command palette")
                 .title_bar(false)
                 .collapsible(false)
                 .resizable(false)
-                .default_width(500.0)
-                .anchor(egui::Align2::CENTER_TOP, [0.0, 64.0])
+                .default_width(width)
+                    .min_width(width)
+                    .max_width(width)
+                .anchor(egui::Align2::CENTER_TOP, [0.0, 96.0])
+                .frame(
+                    egui::Frame::window(&ctx.style())
+                        .fill(Palette::BG_ELEVATED)
+                        .rounding(egui::Rounding::same(Radius::COMPOSER))
+                        .inner_margin(egui::Margin::same(0.0)),
+                )
                 .show(ctx, |ui| {
-                    let search = ui.add(
-                        egui::TextEdit::singleline(&mut self.palette_query)
-                            .font(egui::FontId::proportional(14.0))
-                            .margin(egui::Margin::symmetric(10.0, 8.0))
-                            .hint_text("Type a command or switch shell...")
-                            .desired_width(f32::INFINITY),
-                    );
-                    ui.add_space(4.0);
-                    ui.separator();
-
-                    if !palette_was_open { search.request_focus(); }
-                    let q = self.palette_query.trim().to_lowercase();
-                    egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
-                        ui.label(
-                            RichText::new("Shell Profiles")
-                                .size(11.0)
-                                .strong()
-                                .color(Palette::TEXT_MUTED),
-                        );
-                        for (idx, s) in self.shells.iter().enumerate() {
-                            let label = format!("Switch Shell: {} ({})", s.name, s.program);
-                            if q.is_empty() || label.to_lowercase().contains(&q) {
-                                if ui.button(label).clicked() {
-                                    switch_shell_idx = Some(idx);
-                                    close_palette = true;
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    // Search row
+                    let mut enter_pressed = false;
+                    egui::Frame::none()
+                        .inner_margin(egui::Margin::symmetric(18.0, 14.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("🔍").size(15.0).color(Palette::TEXT_SECONDARY));
+                                let search = ui.add(
+                                    egui::TextEdit::singleline(&mut self.palette_query)
+                                        .font(egui::FontId::proportional(16.0))
+                                        .frame(false)
+                                        .hint_text("Search commands, tools and shells…")
+                                        .desired_width(ui.available_width() - 50.0),
+                                );
+                                if !palette_was_open {
+                                    search.request_focus();
                                 }
-                            }
-                        }
-
-                        ui.add_space(6.0);
-                        ui.label(
-                            RichText::new("Tools & Actions")
-                                .size(11.0)
-                                .strong()
-                                .color(Palette::TEXT_MUTED),
-                        );
-                        for (title, cmd) in [
-                            ("Scan Listening TCP/UDP Ports", ":ports"),
-                            ("DNS & Latency Trace (google.com)", ":dns google.com"),
-                            ("HTTP GET Sample JSON API", ":http GET https://httpbin.org/json"),
-                            ("Fetch Rust Homepage as Markdown", ":web https://www.rust-lang.org"),
-                            ("AI: Show System Info in Active Shell", "# show system info"),
-                            ("Fetch example.com as Markdown", ":web https://example.com"),
-                            ("AI: List files", "# list all files in directory"),
-                            ("AI: Show running processes", "# show running processes"),
-                            ("Test Safety Gate", "rm -rf ./important_production_data"),
-                            ("Clear terminal blocks", ":clear"),
-                        ] {
-                            if q.is_empty() || title.to_lowercase().contains(&q) || cmd.to_lowercase().contains(&q) {
-                                if ui.button(title).clicked() {
-                                    cmd_to_run = Some(cmd.to_string());
-                                    close_palette = true;
-                                }
-                            }
-                        }
-                    });
-
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("Esc to close")
-                                .size(11.0)
-                                .color(Palette::TEXT_MUTED),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("Close").clicked() {
-                                close_palette = true;
-                            }
+                                enter_pressed = search.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                                chip(ui, "Esc", Palette::BG_OVERLAY, Palette::TEXT_SECONDARY);
+                            });
                         });
-                    });
+                    ui.painter().hline(
+                        ui.min_rect().x_range(),
+                        ui.min_rect().bottom(),
+                        egui::Stroke::new(1.0_f32, Palette::BORDER_FAINT),
+                    );
+
+                    let q = self.palette_query.trim().to_lowercase();
+                    let matches = |title: &str, hint: &str| {
+                        q.is_empty() || title.to_lowercase().contains(&q) || hint.to_lowercase().contains(&q)
+                    };
+                    let mut first_cmd: Option<String> = None;
+                    let mut first_shell: Option<usize> = None;
+                    let mut results = 0usize;
+
+                    egui::Frame::none()
+                        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+                        .show(ui, |ui| {
+                            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                let sections: [(&str, &str, &[(&str, &str)]); 3] = [
+                                    (
+                                        "Layout",
+                                        "‖",
+                                        &[
+                                            ("Split pane horizontally", ":split-h"),
+                                            ("Split pane vertically", ":split-v"),
+                                            ("Unsplit", ":unsplit"),
+                                            ("Clear terminal blocks", ":clear"),
+                                        ],
+                                    ),
+                                    (
+                                        "Tools",
+                                        "🌐",
+                                        &[
+                                            ("Scan listening TCP/UDP ports", ":ports"),
+                                            ("DNS and latency trace", ":dns google.com"),
+                                            ("HTTP GET sample JSON API", ":http GET https://httpbin.org/json"),
+                                            ("Read a web page as Markdown", ":web https://www.rust-lang.org"),
+                                            ("Test the Safety Gate", "rm -rf ./important_production_data"),
+                                        ],
+                                    ),
+                                    (
+                                        "Ask AI",
+                                        "✨",
+                                        &[
+                                            ("Show system info", "# show system info"),
+                                            ("List all files in this folder", "# list all files in directory"),
+                                            ("Show running processes", "# show running processes"),
+                                        ],
+                                    ),
+                                ];
+                                for (section, icon, items) in sections {
+                                    let visible: Vec<_> = items.iter().filter(|(t, c)| matches(t, c)).collect();
+                                    if visible.is_empty() {
+                                        continue;
+                                    }
+                                    section_label(ui, &format!("   {section}"));
+                                    for (title, cmd) in visible {
+                                        results += 1;
+                                        if first_cmd.is_none() && first_shell.is_none() {
+                                            first_cmd = Some(cmd.to_string());
+                                        }
+                                        if palette_row(ui, icon, title, cmd).clicked() {
+                                            cmd_to_run = Some(cmd.to_string());
+                                            close_palette = true;
+                                        }
+                                    }
+                                }
+                                let shell_rows: Vec<_> = self
+                                    .shells
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(idx, s)| (idx, format!("Switch shell to {}", s.name), s.program.clone()))
+                                    .filter(|(_, title, program)| matches(title, program))
+                                    .collect();
+                                if !shell_rows.is_empty() {
+                                    section_label(ui, "   Shells");
+                                    for (idx, title, program) in shell_rows {
+                                        results += 1;
+                                        if first_cmd.is_none() && first_shell.is_none() {
+                                            first_shell = Some(idx);
+                                        }
+                                        if palette_row(ui, "›_", &title, &program).clicked() {
+                                            switch_shell_idx = Some(idx);
+                                            close_palette = true;
+                                        }
+                                    }
+                                }
+                                if results == 0 {
+                                    ui.add_space(18.0);
+                                    ui.vertical_centered(|ui| {
+                                        ui.label(RichText::new("No matches. Press Enter to run it as a command.").size(13.0).color(Palette::TEXT_MUTED));
+                                    });
+                                    ui.add_space(18.0);
+                                }
+                                ui.add_space(4.0);
+                            });
+                        });
+
+                    if enter_pressed {
+                        if let Some(cmd) = first_cmd.take() {
+                            cmd_to_run = Some(cmd);
+                        } else if let Some(idx) = first_shell {
+                            switch_shell_idx = Some(idx);
+                        } else if !q.is_empty() {
+                            cmd_to_run = Some(self.palette_query.trim().to_string());
+                        }
+                        close_palette = true;
+                    }
+
+                    // Footer hints
+                    let top = ui.min_rect().bottom();
+                    ui.painter().hline(
+                        ui.min_rect().x_range(),
+                        top,
+                        egui::Stroke::new(1.0_f32, Palette::BORDER_FAINT),
+                    );
+                    egui::Frame::none()
+                        .inner_margin(egui::Margin::symmetric(18.0, 10.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 18.0;
+                                for hint in ["Enter  Run first match", "Click  Run", "Esc  Close"] {
+                                    ui.label(RichText::new(hint).size(12.0).color(Palette::TEXT_MUTED));
+                                }
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.label(
+                                        RichText::new(format!("{results} results"))
+                                            .size(12.0)
+                                            .color(Palette::TEXT_MUTED),
+                                    );
+                                });
+                            });
+                        });
                 });
 
             if let Some(s_idx) = switch_shell_idx {
@@ -2696,6 +3104,7 @@ impl eframe::App for MrtGuiApp {
                 }
             }
             if let Some(cmd) = cmd_to_run {
+                self.palette_query.clear();
                 self.submit_input(Some(cmd), false);
             }
             if close_palette || ctx.input(|i| i.key_pressed(Key::Escape)) {

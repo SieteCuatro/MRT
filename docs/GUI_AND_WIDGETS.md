@@ -20,16 +20,20 @@ Terminal commands, HTTP requests, web fetches, port scans, MCP tool calls, and A
 
 ## 2. Key UI Components
 
-### 2.1 Top Bar (`app.rs`)
-- **Layout Toggles**: Toggle **Mosaic** (multi-terminal split grid with configurable columns and drag-and-drop reordering) and **Explorer** (left-hand directory browser synced to the active tab's CWD).
-- **Split Panes**: Split any active tab horizontally or vertically (`Split ◫`, `Split ⊟`, or via `:split`, `:split-h`, `:split-v`, `:unsplit`). Each pane maintains its own independent command block history, shell execution stream, and focus state.
-- **Multi-Tab Manager**: Switch between tabs, close tabs (`×`), or click **+ New tab** to open a new tab directly in any discovered shell (`Windows PowerShell`, `Command Prompt / Batch`, `Git Bash`, `WSL`, etc.).
-- **Active Shell Switcher**: A live dropdown that changes the active tab's `ShellProfile` on the fly.
-- **Right-Side Inspector Toggles**: Toggle buttons for **History** (SQLite-backed command/output search with `+ Runbook` quick-add), **Runbooks** (saved command sequences), **MCP Hub**, **Internet Studio**, and **Palette (`Ctrl+K`)**.
+### 2.0 Visual Language ("Graphite Calm", `theme.rs`)
+Neutral graphite surfaces, one soft accent (`#8EA2FF`), generous radii (10 px buttons, 14 px blocks, 18 px composer and modals) and a 4 px spacing grid. All colors live in `theme::Palette`, radii in `theme::Radius`, and shared building blocks (`chip`, `icon_button`, `ghost_button`, `primary_button`, `secondary_button`, `panel_frame`, `section_label`) in `theme.rs`. Layout primitives (`nav_row`, `tab_row`, `search_pill`, `palette_row`, `brand_mark`, `centered_column`) live in `widgets/chrome.rs`. The block stream and the composer are capped at `STREAM_MAX_WIDTH` (880 px) and centered.
+
+### 2.1 Sidebar & Header (`app.rs`: `render_sidebar`, `render_header`)
+- **Sidebar**: **+ New tab** (popup listing every discovered shell: `Windows PowerShell`, `Command Prompt / Batch`, `Git Bash`, `WSL`, etc.), **Search history**, the **Tabs** list (each row shows the folder, shell and a status dot: idle, running, ok or failed; hover to reveal `×` to close), and **Workspace** toggles for **Explorer**, **Runbooks**, **History**, **MCP Hub**, **Internet Studio** and **Mosaic**. A status card at the bottom shows the Safety Gate and the MCP bridge port. The `«` / `»` button collapses the sidebar to a 60 px icon rail.
+- **Header**: The active tab's working directory, a search pill that opens the **Command Palette** (`Ctrl+K`), and split controls.
+- **Split Panes**: Split any active tab horizontally or vertically (header buttons, the palette, or `:split`, `:split-h`, `:split-v`, `:unsplit`). Each pane maintains its own independent command block history, shell execution stream, and focus state.
+- **Composer**: A floating card at the bottom with the command input (`#` prefix asks AI), the per-tab **Active Shell Switcher**, the Safety Gate indicator and a round Run button. AI command proposals appear as a card just above it with **Run** / **Dismiss**.
+- **Empty state**: A new tab shows a short welcome with the main shortcuts.
 
 ### 2.2 Command Block Renderer (`widgets/block_view.rs`)
-Each `CommandBlock` is rendered inside a status-colored card frame (green border for `exit 0`, red border for non-zero exit codes):
-- **Header Bar**: Shell badge (`pwsh`, `cmd`, `git-bash`, `wsl`, `mrt-http`, `mrt-net`, `mcp-tool`), command text, exit status & duration pill (`0 (42ms)`), **Compare with previous run**, **Report Bug** (for failed commands, generating sanitized Markdown for GitHub), **Rerun**, **Copy**, **Structured / Raw ANSI Toggle**, and **Diagnose Error**.
+Each `CommandBlock` is rendered as a rounded card (a red-tinted border marks non-zero exit codes):
+- **Header Row**: Status icon (✔ / ✖ / spinner), command text (truncated, full text on hover), structured-output chip (`JSON`, `Table`, `HTTP`, `Markdown`), `exit N` chip for failures, duration and time (hover for shell and CWD), and quiet actions: **Diagnose** (failed commands), **Raw / Structured** toggle, **Copy**, **Rerun**, **Diff** (compare with previous run) and **Report** (sanitized Markdown bug report for failed commands).
+- **Inline Diagnosis**: AI explanations render inside the block, with the suggested fix command and **Run** / **Copy** buttons.
 - **Specialized Viewers**:
   - `render_json_tree`: Recursive collapsible `egui::CollapsingHeader` tree with syntax-colored keys, strings, numbers, booleans, and nulls.
   - `render_structured_table`: Striped `egui::Grid` with a real-time row substring filter box.
@@ -45,5 +49,5 @@ Each `CommandBlock` is rendered inside a status-colored card frame (green border
 
 ### 2.4 Modals & Overlays (`app.rs`)
 - **Interactive TUI Mode Overlay (`ActiveTuiSession`)**: When launching interactive console tools (`vim`, `vi`, `nvim`, `nano`, `htop`, `lazygit`, `less`, etc., or via `:tui <cmd>`), MRT opens a full-screen alt-screen PTY overlay. Keystrokes (including arrow keys, Enter, Backspace, Tab, Escape, and Ctrl sequences) are streamed directly to the child process with rapid 30ms GUI repainting. Exiting cleanly or pressing `Ctrl+Q` terminates the session and stores the transcript as a standard completed `CommandBlock`.
-- **MRT Safety Approval Gate**: Centered modal window that intercepts `RiskLevel::Critical` commands, displays the risk classification, reason, target shell, and working directory, and requires explicit **Approve & Execute** or **Cancel Command**.
-- **Universal Command Palette (`Ctrl+K` / `Ctrl+P`)**: Fuzzy-searchable modal to switch shell profiles or run built-in internet/AI actions from the keyboard.
+- **MRT Safety Approval Gate**: A warning card anchored just above the composer that intercepts commands requiring approval, shows the risk level, reason, command, target shell and working directory, and requires explicit **Run anyway** or **Cancel** (`Esc` also cancels).
+- **Universal Command Palette (`Ctrl+K` / `Ctrl+P`)**: Searchable modal grouped into **Layout**, **Tools**, **Ask AI** and **Shells**. `Enter` runs the first match (or the typed text as a command when nothing matches); `Esc` closes it.

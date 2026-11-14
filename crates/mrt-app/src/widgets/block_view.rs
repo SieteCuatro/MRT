@@ -56,7 +56,7 @@ pub fn render_command_block(
                     .color(Color32::from_rgb(235, 240, 248)),
             );
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.horizontal_wrapped(|ui| {
                 // Exit code badge
                 if let Some(code) = block.exit_code {
                     let (bg, fg, text) = if code == 0 {

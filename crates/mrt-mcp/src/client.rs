@@ -552,4 +552,20 @@ mod tests {
         let result_str = serde_json::to_string(&resp.result).unwrap();
         assert!(result_str.contains("Bridged TCP Tab"));
     }
+
+    #[tokio::test]
+    async fn test_mcp_inspect_dns_tool() {
+        let state = MrtMcpServerState::default();
+        let host = McpHostManager::new(state);
+        let res = host
+            .call_tool(
+                "mrt-native-mcp",
+                "mrt_inspect_dns",
+                json!({ "host": "127.0.0.1:9" }),
+            )
+            .await
+            .unwrap();
+        assert!(!res.is_error);
+        assert!(res.content[0].text.contains("127.0.0.1"));
+    }
 }

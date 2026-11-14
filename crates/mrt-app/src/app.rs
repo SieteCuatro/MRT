@@ -16,7 +16,8 @@ use mrt_mcp::{
     start_gui_bridge_listener, GuiUiCommand, McpHostManager, McpTabSession, MrtMcpServerState,
 };
 use mrt_tools::{
-    execute_http_request, fetch_url_as_markdown, inspect_listening_ports, parse_http_command,
+    execute_http_request, fetch_url_as_markdown, inspect_dns, inspect_listening_ports,
+    parse_http_command,
 };
 use serde_json::json;
 use std::collections::HashMap;
@@ -783,6 +784,11 @@ impl MrtGuiApp {
             return;
         }
 
+        if raw_input.starts_with(":dns") {
+            self.spawn_dns_command(tab_id, cwd, raw_input);
+            return;
+        }
+
         if raw_input.starts_with(":http") || raw_input.starts_with(":curl") {
             self.spawn_http_command(tab_id, cwd, raw_input);
             return;
@@ -1030,6 +1036,39 @@ impl MrtGuiApp {
         });
     }
 
+    fn spawn_dns_command(&mut self, tab_id: Uuid, cwd: PathBuf, cmd_str: String) {
+        let tx = self.tx.clone();
+        self.busy_count += 1;
+        self.runtime.spawn(async move {
+            let start = std::time::Instant::now();
+            let cwd_str = cwd.display().to_string();
+            let block = match inspect_dns(&cmd_str).await {
+                Ok((structured, plain, _)) => CommandBlock::new_structured(
+                    &cmd_str,
+                    "mrt-dns",
+                    cwd_str,
+                    plain,
+                    structured,
+                    0,
+                    start.elapsed().as_millis() as u64,
+                ),
+                Err(e) => CommandBlock::new_completed(
+                    &cmd_str,
+                    "mrt-dns",
+                    cwd_str,
+                    format!("DNS lookup failed: {e}"),
+                    1,
+                    start.elapsed().as_millis() as u64,
+                ),
+            };
+            let _ = tx.send(AsyncWorkerEvent::BlockCompleted {
+                tab_id,
+                block,
+                updated_cwd: None,
+            });
+        });
+    }
+
     fn spawn_http_command(&mut self, tab_id: Uuid, cwd: PathBuf, cmd_str: String) {
         let tx = self.tx.clone();
         self.busy_count += 1;
@@ -1203,6 +1242,14 @@ impl MrtGuiApp {
             }
             SidePanelEvent::RunPortScanner => {
                 self.spawn_port_scanner(tab_id, cwd);
+            }
+            SidePanelEvent::RunDnsTrace { host } => {
+                let cmd = if host.trim().starts_with(":dns") {
+                    host.trim().to_string()
+                } else {
+                    format!(":dns {}", host.trim())
+                };
+                self.spawn_dns_command(tab_id, cwd, cmd);
             }
         }
     }
@@ -1924,6 +1971,7 @@ impl eframe::App for MrtGuiApp {
                         );
                         for (title, cmd) in [
                             ("Scan Listening TCP/UDP Ports", ":ports"),
+                            ("DNS & Latency Trace (google.com)", ":dns google.com"),
                             ("HTTP GET Sample JSON API", ":http GET https://httpbin.org/json"),
                             ("Fetch Rust Homepage as Markdown", ":web https://www.rust-lang.org"),
                             ("AI: Show System Info in Active Shell", "# show system info"),
@@ -2341,5 +2389,25 @@ mod tests {
             .active_replay
             .as_ref()
             .is_some_and(|r| r.waiting_block_id.is_none()));
+    }
+
+    #[test]
+    fn dns_command_creates_structured_block() {
+        let mut app = MrtGuiApp::new();
+        app.submit_input(Some(":dns 127.0.0.1:9".to_string()), false);
+
+        let start = std::time::Instant::now();
+        while app.tabs[0].blocks.is_empty()
+            || app.tabs[0].blocks[0].exit_code.is_none()
+        {
+            app.process_async_events();
+            assert!(start.elapsed() < std::time::Duration::from_secs(10), "DNS command timed out");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        let block = &app.tabs[0].blocks[0];
+        assert_eq!(block.exit_code, Some(0));
+        assert!(block.structured.is_structured());
+        assert!(block.plain_output.contains("127.0.0.1"));
     }
 }

@@ -9,7 +9,8 @@ use mrt_core::{
     InteractivePty, RiskLevel, ShellProfile,
 };
 use mrt_tools::{
-    execute_http_request, fetch_url_as_markdown, inspect_listening_ports, HttpRequestSpec,
+    execute_http_request, fetch_url_as_markdown, inspect_dns, inspect_listening_ports,
+    HttpRequestSpec,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -452,6 +453,17 @@ impl MrtMcpServerState {
                 input_schema: json!({
                     "type": "object",
                     "properties": {}
+                }),
+            },
+            McpTool {
+                name: "mrt_inspect_dns".into(),
+                description: "Inspect DNS resolution for a hostname and measure TCP handshake latency to all resolved IPv4 and IPv6 addresses.".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "host": { "type": "string", "description": "Hostname, domain, or host:port to resolve and trace (e.g. 'google.com', 'api.github.com:443')" }
+                    },
+                    "required": ["host"]
                 }),
             },
         ]
@@ -1645,6 +1657,15 @@ pub async fn execute_mrt_mcp_tool(
             Ok((_, csv)) => McpToolCallResult::text(csv, false),
             Err(e) => McpToolCallResult::text(format!("Port inspection error: {e}"), true),
         },
+        "mrt_inspect_dns" => {
+            let Some(host) = args.get("host").and_then(|v| v.as_str()) else {
+                return McpToolCallResult::text("Missing required 'host' parameter", true);
+            };
+            match inspect_dns(host).await {
+                Ok((_, plain, _)) => McpToolCallResult::text(plain, false),
+                Err(e) => McpToolCallResult::text(format!("DNS inspection error: {e}"), true),
+            }
+        }
         other => McpToolCallResult::text(format!("Unknown MCP tool: {other}"), true),
     }
 }

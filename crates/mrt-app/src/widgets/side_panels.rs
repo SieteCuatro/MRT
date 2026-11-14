@@ -23,6 +23,9 @@ pub enum SidePanelEvent {
         url: String,
     },
     RunPortScanner,
+    RunDnsTrace {
+        host: String,
+    },
 }
 
 pub struct SidePanelState {
@@ -36,6 +39,7 @@ pub struct SidePanelState {
     pub http_url: String,
     pub http_body: String,
     pub web_url: String,
+    pub dns_host: String,
 }
 
 impl Default for SidePanelState {
@@ -51,6 +55,7 @@ impl Default for SidePanelState {
             http_url: "https://httpbin.org/json".to_string(),
             http_body: String::new(),
             web_url: "https://www.rust-lang.org".to_string(),
+            dns_host: "google.com".to_string(),
         }
     }
 }
@@ -343,6 +348,30 @@ pub fn render_internet_side_panel(
     );
     if ui.button("Scan Ports").clicked() {
         event = Some(SidePanelEvent::RunPortScanner);
+    }
+
+    ui.add_space(10.0);
+    ui.separator();
+    ui.label(
+        RichText::new("DNS & Latency Trace (:dns)")
+            .size(12.0)
+            .strong()
+            .color(Palette::ACCENT_BLUE),
+    );
+    ui.label(
+        RichText::new("Resolves IPv4/IPv6 addresses and measures TCP handshake latency.")
+            .size(11.5)
+            .color(Palette::TEXT_SECONDARY),
+    );
+    ui.add(
+        egui::TextEdit::singleline(&mut state.dns_host)
+            .hint_text("google.com, api.github.com:443")
+            .desired_width(f32::INFINITY),
+    );
+    if ui.button("Trace Host").clicked() {
+        event = Some(SidePanelEvent::RunDnsTrace {
+            host: state.dns_host.clone(),
+        });
     }
 
     event

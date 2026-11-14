@@ -27,7 +27,7 @@ Attach to an existing MRT tab from a second computer running Windows, macOS, or 
 - **Markdown bug reports.** Select a failed block and the steps leading up to it. Preview the commands, shell, exit codes, and output, redact private values, then copy the report into a GitHub issue.
 - **Structured output comparison.** Extend the current line diff with a `:diff` command for two selected blocks. Show changed JSON fields side by side and identify listeners added or removed between two `:ports` snapshots. Reordering JSON object keys should leave the comparison empty.
 - **WebSocket inspector.** Open a connection with `:ws`, display incoming messages as they arrive, and send a test message while the server log is visible in another terminal.
-- **DNS and latency tools.** Use `:dns` to inspect a hostname’s resolved addresses. Add a latency trace to help investigate slow connections.
+- **DNS and latency tools.** *(implemented)* Use `:dns` to inspect a hostname or URL, resolve its IPv4 (A) and IPv6 (AAAA) addresses, measure DNS lookup duration, trace concurrent TCP handshake latency to all endpoints, and inspect the results via an interactive table block, the Internet Studio panel, the Command Palette, or the `mrt_inspect_dns` MCP tool.
 
 ## AI and MCP
 

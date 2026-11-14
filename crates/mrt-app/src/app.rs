@@ -28,6 +28,7 @@ pub struct TerminalTab {
     pub ai_proposal: Option<AiCommandProposal>,
     pub command_history: Vec<String>,
     pub history_cursor: Option<usize>,
+    pub comparison: Option<(Uuid, Uuid)>,
     pub table_filters: HashMap<Uuid, String>,
 }
 
@@ -43,6 +44,7 @@ impl TerminalTab {
             ai_proposal: None,
             command_history: Vec::new(),
             history_cursor: None,
+            comparison: None,
             table_filters: HashMap::new(),
         }
     }
@@ -209,6 +211,7 @@ impl MrtGuiApp {
         // 2. Check built-in Internet & Network tools (`:http`, `:curl`, `:web`, `:ports`, `:clear`)
         if raw_input.eq_ignore_ascii_case(":clear") || raw_input.eq_ignore_ascii_case("cls") {
             tab.blocks.clear();
+            tab.comparison = None;
             return;
         }
 
@@ -241,7 +244,18 @@ impl MrtGuiApp {
             }
         }
 
-        // 4. Execute command in the active tab's ShellProfile
+        self.spawn_shell_command(tab_id, shell, cwd, raw_input);
+    }
+
+    fn approve_pending_command(&mut self) {
+        if let Some(pending) = self.pending_safety.take() {
+            if self.tabs.iter().any(|tab| tab.id == pending.tab_id) {
+                self.spawn_shell_command(pending.tab_id, pending.shell, pending.cwd, pending.assessment.command);
+            }
+        }
+    }
+
+    fn spawn_shell_command(&mut self, tab_id: Uuid, shell: ShellProfile, cwd: PathBuf, raw_input: String) {
         let tx = self.tx.clone();
         self.busy_count += 1;
         self.runtime.spawn(async move {
@@ -559,7 +573,10 @@ impl eframe::App for MrtGuiApp {
                     }
                 }
                 if let Some(close_idx) = tab_to_close {
-                    self.tabs.remove(close_idx);
+                    let closed_id = self.tabs.remove(close_idx).id;
+                    if self.pending_safety.as_ref().is_some_and(|pending| pending.tab_id == closed_id) {
+                        self.pending_safety = None;
+                    }
                     if self.active_tab >= self.tabs.len() {
                         self.active_tab = self.tabs.len().saturating_sub(1);
                     }
@@ -717,7 +734,7 @@ impl eframe::App for MrtGuiApp {
                     .on_hover_text(tab.cwd.display().to_string());
                 ui.add_space(5.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("❯").size(21.0).color(Color32::from_rgb(132, 224, 188)));
+                    ui.label(RichText::new(">").size(21.0).color(Color32::from_rgb(132, 224, 188)));
                     let response = ui.add(
                         egui::TextEdit::singleline(&mut tab.input_line)
                             .id(egui::Id::new(("command_input", tab.id)))
@@ -784,18 +801,33 @@ impl eframe::App for MrtGuiApp {
                     .auto_shrink([false, false])
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
+                        let mut previous_runs = HashMap::new();
                         for block in &mut tab.blocks {
+                            let key = (block.command.clone(), block.shell_name.clone(), block.cwd.clone());
+                            let previous_id = previous_runs.insert(key, block.id);
                             let filter = tab.table_filters.entry(block.id).or_default();
-                            if let Some(action) = render_command_block(ui, block, filter) {
+                            if let Some(action) = render_command_block(ui, block, filter, previous_id) {
                                 pending_block_action = Some(action);
                             }
                             ui.add_space(8.0);
+                        }
+                        if let Some((previous_id, current_id)) = tab.comparison {
+                            let previous = tab.blocks.iter().find(|block| block.id == previous_id);
+                            let current = tab.blocks.iter().find(|block| block.id == current_id);
+                            if let (Some(previous), Some(current)) = (previous, current) {
+                                if crate::widgets::block_view::render_comparison(ui, previous, current) {
+                                    tab.comparison = None;
+                                }
+                            }
                         }
                     });
             }
 
             if let Some(action) = pending_block_action {
                 match action {
+                    BlockAction::Compare(previous, current) => {
+                        self.tabs[self.active_tab].comparison = Some((previous, current));
+                    }
                     BlockAction::Rerun(cmd) => {
                         self.submit_input(Some(cmd), false);
                     }
@@ -885,9 +917,7 @@ impl eframe::App for MrtGuiApp {
             }
 
             if approve {
-                if let Some(pending) = self.pending_safety.take() {
-                    self.submit_input(Some(pending.assessment.command), true);
-                }
+                self.approve_pending_command();
             } else if cancel {
                 self.pending_safety = None;
             }
@@ -980,6 +1010,74 @@ impl eframe::App for MrtGuiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_entry_creates_comparable_output_blocks() {
+        let mut app = MrtGuiApp::new();
+        for value in ["first", "second"] {
+            let command = format!("echo {value}");
+            app.tabs[0].input_line = command;
+            app.submit_input(None, false);
+            let event = app.rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap();
+            app.tx.send(event).unwrap();
+            app.process_async_events();
+        }
+        assert_eq!(app.tabs[0].blocks.len(), 2);
+        assert!(app.tabs[0].blocks[0].plain_output.contains("first"));
+        assert!(app.tabs[0].blocks[1].plain_output.contains("second"));
+        let context = egui::Context::default();
+        let _ = context.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let blocks = &app.tabs[0].blocks;
+                assert!(!crate::widgets::block_view::render_comparison(ui, &blocks[0], &blocks[1]));
+                assert!(!crate::widgets::block_view::render_comparison(ui, &blocks[0], &blocks[0]));
+            });
+        });
+    }
+
+    #[test]
+    fn approval_preserves_captured_context_after_switching_tabs() {
+        let mut app = MrtGuiApp::new();
+        let tab_id = app.tabs[0].id;
+        let cwd = app.tabs[0].cwd.clone();
+        let shell = app.shells[0].clone();
+        app.pending_safety = Some(PendingSafetyApproval {
+            tab_id,
+            assessment: assess_command("echo approval-test"),
+            shell: shell.clone(),
+            cwd: cwd.clone(),
+        });
+        app.tabs.push(TerminalTab::new("Other".into(), 0, cwd.join("missing-directory")));
+        app.active_tab = 1;
+        app.tabs[0].cwd = cwd.join("changed-directory");
+        app.approve_pending_command();
+        let event = app.rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap();
+        match event {
+            AsyncWorkerEvent::BlockCompleted { tab_id: result_id, block, .. } => {
+                assert_eq!(result_id, tab_id);
+                assert_eq!(block.cwd, cwd.display().to_string());
+                assert_eq!(block.shell_name, shell.kind.short_label());
+                assert_eq!(block.exit_code, Some(0));
+                assert!(block.plain_output.contains("approval-test"));
+            }
+            _ => panic!("Expected command completion"),
+        }
+    }
+
+    #[test]
+    fn approval_for_a_closed_tab_does_not_execute() {
+        let mut app = MrtGuiApp::new();
+        app.pending_safety = Some(PendingSafetyApproval {
+            tab_id: Uuid::new_v4(),
+            assessment: assess_command("echo approval-test"),
+            shell: app.shells[0].clone(),
+            cwd: app.tabs[0].cwd.clone(),
+        });
+        app.approve_pending_command();
+        assert_eq!(app.busy_count, 0);
+        assert!(app.pending_safety.is_none());
+        assert!(app.rx.try_recv().is_err());
+    }
 
     fn deliver_proposal(app: &mut MrtGuiApp, tab_id: Uuid, command: &str) {
         let proposal = AiCommandProposal {

@@ -4,6 +4,7 @@ use serde_json::Value;
 
 #[derive(Debug, Clone)]
 pub enum BlockAction {
+    Compare(uuid::Uuid, uuid::Uuid),
     Rerun(String),
     DiagnoseError(uuid::Uuid),
     ApplySuggestedFix(String),
@@ -13,6 +14,7 @@ pub fn render_command_block(
     ui: &mut Ui,
     block: &mut CommandBlock,
     table_filter: &mut String,
+    previous_id: Option<uuid::Uuid>,
 ) -> Option<BlockAction> {
     let mut triggered_action = None;
 
@@ -79,6 +81,11 @@ pub fn render_command_block(
                         });
                 }
 
+                if let Some(previous_id) = previous_id {
+                    if ui.small_button("Compare with previous run").clicked() {
+                        triggered_action = Some(BlockAction::Compare(previous_id, block.id));
+                    }
+                }
                 // Action buttons
                 if ui.small_button("↻ Rerun").clicked() {
                     triggered_action = Some(BlockAction::Rerun(block.command.clone()));
@@ -463,4 +470,34 @@ fn render_markdown_block(ui: &mut Ui, md: &str) {
             );
         }
     }
+}
+
+
+/// Returns true when the comparison is dismissed.
+pub fn render_comparison(ui: &mut Ui, previous: &CommandBlock, current: &CommandBlock) -> bool {
+    let mut close = false;
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("Output comparison");
+            ui.monospace(&current.command);
+            if ui.button("Close comparison").clicked() { close = true; }
+        });
+        ui.label(format!("Previous {} · Current {}",
+            previous.timestamp.format("%H:%M:%S"), current.timestamp.format("%H:%M:%S")));
+        if previous.plain_output == current.plain_output {
+            ui.label("Outputs are identical.");
+            return;
+        }
+        egui::ScrollArea::horizontal().id_salt(("comparison", current.id)).show(ui, |ui| {
+            for change in similar::TextDiff::from_lines(&previous.plain_output, &current.plain_output).iter_all_changes() {
+                let (prefix, color) = match change.tag() {
+                    similar::ChangeTag::Delete => ("- ", Color32::from_rgb(255, 160, 165)),
+                    similar::ChangeTag::Insert => ("+ ", Color32::from_rgb(132, 224, 188)),
+                    similar::ChangeTag::Equal => ("  ", Color32::from_rgb(175, 189, 202)),
+                };
+                ui.label(RichText::new(format!("{prefix}{change}").trim_end_matches('\n')).monospace().color(color));
+            }
+        });
+    });
+    close
 }

@@ -264,6 +264,26 @@ pub async fn execute_command_in_shell(
     command: &str,
     cwd: &Path,
 ) -> Result<CommandExecutionResult> {
+    execute_command_impl(shell, command, cwd, None).await
+}
+
+/// Streams decoded stdout and stderr as they become available. Programs control
+/// their own flushing when writing to pipes. The callback must return promptly.
+pub async fn execute_command_streaming(
+    shell: &ShellProfile,
+    command: &str,
+    cwd: &Path,
+    mut on_output: impl FnMut(&str) + Send,
+) -> Result<CommandExecutionResult> {
+    execute_command_impl(shell, command, cwd, Some(&mut on_output)).await
+}
+
+async fn execute_command_impl(
+    shell: &ShellProfile,
+    command: &str,
+    cwd: &Path,
+    on_output: Option<&mut (dyn FnMut(&str) + Send)>,
+) -> Result<CommandExecutionResult> {
     let start = Instant::now();
     let trimmed = command.trim();
 
@@ -307,6 +327,7 @@ pub async fn execute_command_in_shell(
     cmd_builder
         .args(&args)
         .current_dir(cwd)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -316,10 +337,64 @@ pub async fn execute_command_in_shell(
         cmd_builder.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let output = cmd_builder
-        .output()
-        .await
-        .with_context(|| format!("Failed to spawn shell '{}' with args {:?}", shell.program, args))?;
+    let (output, streamed_output) = if let Some(callback) = on_output {
+        let mut child = cmd_builder
+            .kill_on_drop(true)
+            .spawn()
+            .with_context(|| format!("Failed to spawn shell '{}'", shell.program))?;
+        let mut stdout = child.stdout.take().context("Missing stdout pipe")?;
+        let mut stderr = child.stderr.take().context("Missing stderr pipe")?;
+        let mut stdout_raw = Vec::new();
+        let mut stderr_raw = Vec::new();
+        let mut stdout_pending = Vec::new();
+        let mut stderr_pending = Vec::new();
+        let mut combined = String::new();
+        let mut out_buffer = [0u8; 8192];
+        let mut err_buffer = [0u8; 8192];
+        let mut out_open = true;
+        let mut err_open = true;
+        use tokio::io::AsyncReadExt;
+        while out_open || err_open {
+            let (bytes, raw, pending) = tokio::select! {
+                result = stdout.read(&mut out_buffer), if out_open => {
+                    let count = result.context("Failed to read stdout")?;
+                    out_open = count != 0;
+                    (&out_buffer[..count], &mut stdout_raw, &mut stdout_pending)
+                }
+                result = stderr.read(&mut err_buffer), if err_open => {
+                    let count = result.context("Failed to read stderr")?;
+                    err_open = count != 0;
+                    (&err_buffer[..count], &mut stderr_raw, &mut stderr_pending)
+                }
+            };
+            raw.extend_from_slice(bytes);
+            pending.extend_from_slice(bytes);
+            let text = decode_output(pending, bytes.is_empty());
+            if !text.is_empty() {
+                callback(&text);
+                combined.push_str(&text);
+            }
+        }
+        let status = child.wait().await?;
+        (
+            std::process::Output {
+                status,
+                stdout: stdout_raw,
+                stderr: stderr_raw,
+            },
+            Some(combined),
+        )
+    } else {
+        (
+            cmd_builder.output().await.with_context(|| {
+                format!(
+                    "Failed to spawn shell '{}' with args {:?}",
+                    shell.program, args
+                )
+            })?,
+            None,
+        )
+    };
 
     let stdout_raw = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
     let stderr_raw = String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n");
@@ -335,16 +410,51 @@ pub async fn execute_command_in_shell(
         combined.push_str(stderr_raw.trim_end());
     }
 
-    let exit_code = output.status.code().unwrap_or(if output.status.success() { 0 } else { 1 });
+    let exit_code = output
+        .status
+        .code()
+        .unwrap_or(if output.status.success() { 0 } else { 1 });
 
     Ok(CommandExecutionResult {
         stdout_raw,
         stderr_raw,
-        combined_output: combined,
+        combined_output: streamed_output.unwrap_or(combined).replace("\r\n", "\n"),
         exit_code,
         duration_ms: start.elapsed().as_millis() as u64,
         updated_cwd: None,
     })
+}
+
+// Retain incomplete UTF-8 between reads, separately for each output stream.
+fn decode_output(pending: &mut Vec<u8>, eof: bool) -> String {
+    let mut text = String::new();
+    let mut consumed = 0;
+    while consumed < pending.len() {
+        match std::str::from_utf8(&pending[consumed..]) {
+            Ok(valid) => {
+                text.push_str(valid);
+                consumed = pending.len();
+            }
+            Err(error) => {
+                let valid_end = consumed + error.valid_up_to();
+                text.push_str(std::str::from_utf8(&pending[consumed..valid_end]).unwrap());
+                consumed = valid_end;
+                match error.error_len() {
+                    Some(length) => {
+                        text.push('�');
+                        consumed += length;
+                    }
+                    None if eof => {
+                        text.push('�');
+                        consumed = pending.len();
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+    pending.drain(..consumed);
+    text
 }
 
 fn parse_cd_command(cmd: &str, kind: &ShellKind) -> Option<String> {
@@ -454,10 +564,90 @@ mod directory_tests {
     use super::*;
 
     #[test]
+    fn streaming_decoder_preserves_split_utf8_and_reports_invalid_bytes() {
+        let bytes = "á🙂".as_bytes();
+        for split in 0..=bytes.len() {
+            let mut pending = bytes[..split].to_vec();
+            let first = decode_output(&mut pending, false);
+            pending.extend_from_slice(&bytes[split..]);
+            let last = decode_output(&mut pending, true);
+            assert_eq!(format!("{first}{last}"), "á🙂");
+            assert!(pending.is_empty());
+        }
+        let mut pending = vec![b'a', 0xff, 0xf0];
+        assert_eq!(decode_output(&mut pending, true), "a\u{fffd}\u{fffd}");
+    }
+
+    #[tokio::test]
+    async fn streaming_delivers_output_before_exit_and_drains_both_pipes() {
+        let shell = discover_shells()
+            .into_iter()
+            .find(|shell| {
+                matches!(
+                    shell.kind,
+                    ShellKind::PowerShellCore
+                        | ShellKind::WindowsPowerShell
+                        | ShellKind::Sh
+                        | ShellKind::Bash
+                )
+            })
+            .unwrap();
+        let command = if matches!(
+            shell.kind,
+            ShellKind::PowerShellCore | ShellKind::WindowsPowerShell
+        ) {
+            "[Console]::Out.WriteLine('first'); [Console]::Out.Flush(); Start-Sleep -Seconds 2; [Console]::Error.WriteLine('error'); [Console]::Out.WriteLine('last'); exit 7"
+        } else {
+            "printf 'first\\n'; sleep 2; printf 'error\\n' >&2; printf 'last\\n'; exit 7"
+        };
+        let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut first_tx = Some(first_tx);
+            let mut chunks = String::new();
+            let result = execute_command_streaming(
+                &shell,
+                command,
+                &std::env::current_dir().unwrap(),
+                |chunk| {
+                    chunks.push_str(chunk);
+                    if chunks.contains("first") {
+                        if let Some(sender) = first_tx.take() {
+                            let _ = sender.send(());
+                        }
+                    }
+                },
+            )
+            .await
+            .unwrap();
+            (result, chunks)
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(15), first_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !task.is_finished(),
+            "Output was buffered until process exit"
+        );
+        let (result, chunks) = tokio::time::timeout(std::time::Duration::from_secs(15), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.exit_code, 7);
+        assert!(result.stdout_raw.contains("first"));
+        assert!(result.stdout_raw.contains("last"));
+        assert!(result.stderr_raw.contains("error"));
+        assert_eq!(result.combined_output, chunks.replace("\r\n", "\n"));
+    }
+
+    #[test]
     fn bare_cd_preserves_cmd_semantics() {
         assert_eq!(parse_cd_command("cd", &ShellKind::CmdBatch), None);
         assert_eq!(parse_cd_command("CD", &ShellKind::CmdBatch), None);
         assert_eq!(parse_cd_command("cd", &ShellKind::Bash), Some("~".into()));
-        assert_eq!(parse_cd_command("cd /d project", &ShellKind::CmdBatch), Some("project".into()));
+        assert_eq!(
+            parse_cd_command("cd /d project", &ShellKind::CmdBatch),
+            Some("project".into())
+        );
     }
 }

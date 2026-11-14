@@ -89,7 +89,12 @@ cargo test --workspace
 
 ## 📚 Documentation Index
 
-- **[Architecture & Crate Guide](docs/ARCHITECTURE.md)** — Deep dive into `mrt-core`, `mrt-tools`, `mrt-mcp`, `mrt-ai`, and `mrt-app`.
-- **[Contributing & Token Donation Guide](CONTRIBUTING.md)** — How humans and AI agents can collaborate on MRT.
+- **[Architecture Overview (`docs/ARCHITECTURE.md`)](docs/ARCHITECTURE.md)** — High-level system diagram and 5-crate overview.
+- **[In-Depth MCP Guide (`docs/MCP_GUIDE.md`)](docs/MCP_GUIDE.md)** — Complete JSON-RPC 2.0 tool schemas, resources, client configs (Antigravity, Claude, Cursor), and MCP Host/Server internals.
+- **[Core & Polyglot Shells Guide (`docs/CORE_AND_SHELLS.md`)](docs/CORE_AND_SHELLS.md)** — Multi-shell discovery (`pwsh`, `cmd`/Batch, `bash`, `wsl`, `zsh`), ANSI/VT100 parser, Command Blocks, and Safety Gate rules.
+- **[Internet & Network Tools Guide (`docs/INTERNET_TOOLS.md`)](docs/INTERNET_TOOLS.md)** — `:http` API inspector, `:web` HTML-to-Markdown extractor, `:ports` scanner, and how to add new tools.
+- **[Multi-Provider AI & Agent Guide (`docs/AI_PROVIDERS_AND_AGENTS.md`)](docs/AI_PROVIDERS_AND_AGENTS.md)** — Gemini, Claude, OpenAI, Grok, DeepSeek, OpenRouter, Ollama, Offline Polyglot Engine, and Error Triage.
+- **[GUI & Widgets Guide (`docs/GUI_AND_WIDGETS.md`)](docs/GUI_AND_WIDGETS.md)** — `eframe`/`egui` non-blocking async architecture, structured block viewers, and side panels.
+- **[Contributing & Token Donation Guide (`CONTRIBUTING.md`)](CONTRIBUTING.md)** — How humans and AI agents can collaborate on MRT.
 - **[AI Agent Instructions (`AGENTS.md`)](AGENTS.md)** — Context file for autonomous coding agents.
 - **[Configuration Example (`mrt.example.toml`)](mrt.example.toml)** — Sample config for shells, safety rules, AI providers, and MCP servers.

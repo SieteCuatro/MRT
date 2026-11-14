@@ -10,9 +10,9 @@ The first version is implemented in the **Runbooks** panel and SQLite `HistorySt
 
 ## Everyday terminal use
 
-- **Interactive terminal mode.** Let a user launch `vim`, `htop`, or `lazygit` from a block, interact with the full-screen program, and return to the block view when it exits. A first milestone is editing and saving a file in Vim, including resizing the window during the edit.
-- **Split panes within a tab.** Let users split a pane horizontally or vertically so a server log can stay visible beside a shell in the same project. Each pane should keep its own terminal session and receive input when focused.
-- **Shell integration.** Use OSC 133 prompt markers to identify where prompts, commands, and output begin and end. Explore integration for Bash, Zsh, Fish, PowerShell, and CMD, accounting for how each shell emits its prompt.
+- **Interactive terminal mode.** *(implemented)* Launch full-screen interactive TUI applications (`vim`, `vi`, `nvim`, `nano`, `htop`, `lazygit`, `less`, etc., or via `:tui <cmd>`) inside an alt-screen PTY overlay modal. Forwards text and control keystrokes, provides rapid repaint streaming, supports graceful exit via `Ctrl+Q` or normal process termination, and preserves the full session transcript as a standard completed CommandBlock.
+- **Split panes within a tab.** *(implemented)* Split any tab horizontally or vertically into independent panes (`:split`, `:split-h`, `:split-v`, `:unsplit`, and UI buttons), each with its own block stream, shell, and focus management.
+- **Shell integration.** *(implemented)* Built-in OSC 133 semantic prompt marker parser and integration script generator for Bash, Zsh, Fish, PowerShell, and CMD to identify prompt, command start, execution, and exit codes.
 
 ## Remote connections between MRT instances
 
@@ -24,18 +24,18 @@ Attach to an existing MRT tab from a second computer running Windows, macOS, or 
 
 ## Debugging and sharing results
 
-- **Markdown bug reports.** Select a failed block and the steps leading up to it. Preview the commands, shell, exit codes, and output, redact private values, then copy the report into a GitHub issue.
-- **Structured output comparison.** Extend the current line diff with a `:diff` command for two selected blocks. Show changed JSON fields side by side and identify listeners added or removed between two `:ports` snapshots. Reordering JSON object keys should leave the comparison empty.
-- **WebSocket inspector.** Open a connection with `:ws`, display incoming messages as they arrive, and send a test message while the server log is visible in another terminal.
+- **Markdown bug reports.** *(implemented)* Select a failed block and its preceding history via the Report button, the `:report` / `:bug` commands, or the `mrt_generate_bug_report` MCP tool. Previews the commands, shell, exit codes, and output with automatic secret token redaction (API keys, GitHub tokens, bearer tokens, private keys) ready for GitHub issues.
+- **Structured output comparison.** *(implemented)* Compare two selected blocks via the GUI Diff button, the `:diff` command, or the `mrt_compare_blocks` MCP tool. Compares JSON structures canonically so reordering keys produces zero diff, reports added/removed/modified JSON paths, and tracks added or removed socket listeners between `:ports` snapshots.
+- **WebSocket inspector.** *(implemented)* Open a connection with `:ws` or the `mrt_inspect_ws` MCP tool, inspect connection handshake latency, stream incoming frames in real-time, and send probe frames with interactive tabular breakdown and text logs.
 - **DNS and latency tools.** *(implemented)* Use `:dns` to inspect a hostname or URL, resolve its IPv4 (A) and IPv6 (AAAA) addresses, measure DNS lookup duration, trace concurrent TCP handshake latency to all endpoints, and inspect the results via an interactive table block, the Internet Studio panel, the Command Palette, or the `mrt_inspect_dns` MCP tool.
 
 ## AI and MCP
 
-- **Streaming AI responses.** Display the first tokens of an explanation in the requesting tab while the provider continues generating.
+- **Streaming AI responses.** *(implemented)* Display tokens of an AI error explanation in the requesting terminal tab progressively as they are generated, eliminating UI latency.
 - **Remote MCP connections.** Add HTTP transport with support for streamed server events alongside the existing stdio client.
-- **MCP server presets.** Let a user select a known server configuration in the MCP Hub and review its settings before connecting. A searchable server catalog could follow.
+- **MCP server presets.** *(implemented)* Pre-configured server profiles in the MCP Hub (Filesystem, Git, Memory Graph, SQLite, Fetch) with one-click settings population for review before connecting.
 - **Multi-step MCP assistance.** Let the assistant use results from one tool call to choose the next. For example, it could inspect a failed command block, retrieve the previous run, and explain the differences. Route any proposed shell execution through the existing Safety Approval Gate.
 
-## Distribution
+## Distribution *(implemented)*
 
-Publish downloadable releases through GitHub Actions so testers can launch MRT without a Rust toolchain. Candidate formats are an executable or MSI for Windows, an app bundle or DMG for macOS, and an AppImage or Debian package for Linux. Verify each published package by launching MRT and running a command on its target OS.
+Automated multi-platform CI/CD release workflow via `.github/workflows/release.yml`. On tagged releases (`v*`), compiles optimized release binaries and generates downloadable release packages across Windows (MSVC ZIP), Linux (Ubuntu tar.gz), and macOS (Intel x86_64 and Apple Silicon aarch64 tar.gz) and uploads them directly to GitHub Releases.

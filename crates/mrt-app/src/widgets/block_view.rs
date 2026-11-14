@@ -1,6 +1,7 @@
 use crate::theme::Palette;
 use egui::{Color32, RichText, Ui};
 use mrt_core::{CommandBlock, HttpExchangeSummary, StructuredOutput, ViewMode};
+use mrt_tools::{compare_blocks_structured, ChangeType, StructuredDiffKind};
 use serde_json::Value;
 
 #[derive(Debug, Clone)]
@@ -9,6 +10,7 @@ pub enum BlockAction {
     Rerun(String),
     DiagnoseError(uuid::Uuid),
     ApplySuggestedFix(String),
+    CopyBugReport(uuid::Uuid),
 }
 
 pub fn render_command_block(
@@ -101,6 +103,12 @@ pub fn render_command_block(
                 if let Some(previous_id) = previous_id.filter(|_| block.exit_code.is_some()) {
                     if ui.small_button(RichText::new("Diff").size(11.5)).clicked() {
                         triggered_action = Some(BlockAction::Compare(previous_id, block.id));
+                    }
+                }
+
+                if block.exit_code.map(|c| c != 0).unwrap_or(false) {
+                    if ui.small_button(RichText::new("Report").size(11.5)).on_hover_text("Generate redacted GitHub markdown bug report").clicked() {
+                        triggered_action = Some(BlockAction::CopyBugReport(block.id));
                     }
                 }
 
@@ -503,24 +511,107 @@ pub fn render_comparison(ui: &mut Ui, previous: &CommandBlock, current: &Command
         ui.horizontal_wrapped(|ui| {
             ui.strong("Output comparison");
             ui.monospace(&current.command);
-            if ui.button("Close comparison").clicked() { close = true; }
-        });
-        ui.label(format!("Previous {} · Current {}",
-            previous.timestamp.format("%H:%M:%S"), current.timestamp.format("%H:%M:%S")));
-        if previous.plain_output == current.plain_output {
-            ui.label("Outputs are identical.");
-            return;
-        }
-        egui::ScrollArea::horizontal().id_salt(("comparison", current.id)).show(ui, |ui| {
-            for change in similar::TextDiff::from_lines(&previous.plain_output, &current.plain_output).iter_all_changes() {
-                let (prefix, color) = match change.tag() {
-                    similar::ChangeTag::Delete => ("- ", Color32::from_rgb(255, 160, 165)),
-                    similar::ChangeTag::Insert => ("+ ", Color32::from_rgb(132, 224, 188)),
-                    similar::ChangeTag::Equal => ("  ", Color32::from_rgb(175, 189, 202)),
-                };
-                ui.label(RichText::new(format!("{prefix}{change}").trim_end_matches('\n')).monospace().color(color));
+            if ui.button("Close comparison").clicked() {
+                close = true;
             }
         });
+        ui.label(format!(
+            "Previous {} · Current {}",
+            previous.timestamp.format("%H:%M:%S"),
+            current.timestamp.format("%H:%M:%S")
+        ));
+
+        let report = compare_blocks_structured(previous, current);
+
+        match report.kind {
+            StructuredDiffKind::Identical { summary } => {
+                ui.label(RichText::new(summary).color(Palette::ACCENT_GREEN));
+            }
+            StructuredDiffKind::Json {
+                added_paths,
+                removed_paths,
+                modified_paths,
+                diff_lines,
+            } => {
+                ui.horizontal_wrapped(|ui| {
+                    if !added_paths.is_empty() {
+                        ui.label(
+                            RichText::new(format!("+{} added keys", added_paths.len()))
+                                .size(11.5)
+                                .color(Palette::ACCENT_GREEN),
+                        );
+                    }
+                    if !removed_paths.is_empty() {
+                        ui.label(
+                            RichText::new(format!("-{} removed keys", removed_paths.len()))
+                                .size(11.5)
+                                .color(Palette::ACCENT_RED),
+                        );
+                    }
+                    if !modified_paths.is_empty() {
+                        ui.label(
+                            RichText::new(format!("~{} changed values", modified_paths.len()))
+                                .size(11.5)
+                                .color(Palette::ACCENT_BLUE),
+                        );
+                    }
+                });
+                egui::ScrollArea::horizontal()
+                    .id_salt(("comparison_json", current.id))
+                    .show(ui, |ui| {
+                        for (line, tag) in diff_lines {
+                            let (prefix, color) = match tag {
+                                ChangeType::Remove => ("- ", Color32::from_rgb(255, 160, 165)),
+                                ChangeType::Add => ("+ ", Color32::from_rgb(132, 224, 188)),
+                                ChangeType::Equal => ("  ", Color32::from_rgb(175, 189, 202)),
+                            };
+                            ui.label(RichText::new(format!("{prefix}{line}")).monospace().color(color));
+                        }
+                    });
+            }
+            StructuredDiffKind::PortsDelta {
+                added_listeners,
+                removed_listeners,
+                unchanged_count,
+            } => {
+                ui.label(
+                    RichText::new(format!(
+                        "Listening Ports Delta · {unchanged_count} unchanged"
+                    ))
+                    .size(11.5)
+                    .italics()
+                    .color(Palette::TEXT_SECONDARY),
+                );
+                for added in added_listeners {
+                    ui.label(
+                        RichText::new(format!("+ {added}"))
+                            .monospace()
+                            .color(Palette::ACCENT_GREEN),
+                    );
+                }
+                for removed in removed_listeners {
+                    ui.label(
+                        RichText::new(format!("- {removed}"))
+                            .monospace()
+                            .color(Palette::ACCENT_RED),
+                    );
+                }
+            }
+            StructuredDiffKind::Text { diff_lines } => {
+                egui::ScrollArea::horizontal()
+                    .id_salt(("comparison", current.id))
+                    .show(ui, |ui| {
+                        for (line, tag) in diff_lines {
+                            let (prefix, color) = match tag {
+                                ChangeType::Remove => ("- ", Color32::from_rgb(255, 160, 165)),
+                                ChangeType::Add => ("+ ", Color32::from_rgb(132, 224, 188)),
+                                ChangeType::Equal => ("  ", Color32::from_rgb(175, 189, 202)),
+                            };
+                            ui.label(RichText::new(format!("{prefix}{line}")).monospace().color(color));
+                        }
+                    });
+            }
+        }
     });
     close
 }

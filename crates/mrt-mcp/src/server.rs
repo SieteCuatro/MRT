@@ -9,8 +9,9 @@ use mrt_core::{
     InteractivePty, RiskLevel, ShellProfile,
 };
 use mrt_tools::{
-    execute_http_request, fetch_url_as_markdown, inspect_dns, inspect_listening_ports,
-    HttpRequestSpec,
+    compare_blocks_structured, execute_http_request, fetch_url_as_markdown,
+    generate_markdown_bug_report, inspect_dns, inspect_listening_ports, inspect_websocket,
+    ChangeType, HttpRequestSpec, StructuredDiffKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -464,6 +465,30 @@ impl MrtMcpServerState {
                         "host": { "type": "string", "description": "Hostname, domain, or host:port to resolve and trace (e.g. 'google.com', 'api.github.com:443')" }
                     },
                     "required": ["host"]
+                }),
+            },
+            McpTool {
+                name: "mrt_generate_bug_report".into(),
+                description: "Generate a redacted GitHub-flavored Markdown bug report from a failed command block and its preceding history.".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "block_id": { "type": "string", "description": "Optional UUID of the failed block (defaults to the most recent failed block)" },
+                        "tab_id": { "type": "string", "description": "Optional tab UUID or index" }
+                    }
+                }),
+            },
+            McpTool {
+                name: "mrt_inspect_ws".into(),
+                description: "Connect to a WebSocket server (ws:// or wss://), optionally send an initial message, and collect logged frames and handshake latency.".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string", "description": "WebSocket endpoint URL (e.g. 'wss://echo.websocket.events')" },
+                        "message": { "type": "string", "description": "Optional message string to send immediately after connecting" },
+                        "timeout_ms": { "type": "integer", "description": "Milliseconds to listen for frames before closing (default 2500)" }
+                    },
+                    "required": ["url"]
                 }),
             },
         ]
@@ -1084,17 +1109,7 @@ pub async fn execute_mrt_mcp_tool(
                 return McpToolCallResult::text(format!("Block not found: {curr_id}"), true);
             };
 
-            let mut diff_lines = Vec::new();
-            for change in similar::TextDiff::from_lines(&prev_blk.plain_output, &curr_blk.plain_output)
-                .iter_all_changes()
-            {
-                let sign = match change.tag() {
-                    similar::ChangeTag::Delete => "-",
-                    similar::ChangeTag::Insert => "+",
-                    similar::ChangeTag::Equal => " ",
-                };
-                diff_lines.push(format!("{sign}{}", change.value().trim_end_matches('\n')));
-            }
+            let report = compare_blocks_structured(&prev_blk, &curr_blk);
 
             let show_in_gui = args
                 .get("show_in_gui")
@@ -1108,11 +1123,60 @@ pub async fn execute_mrt_mcp_tool(
                 });
             }
 
+            let (diff_text, is_identical) = match &report.kind {
+                StructuredDiffKind::Identical { summary } => (summary.clone(), true),
+                StructuredDiffKind::Json { added_paths, removed_paths, modified_paths, diff_lines } => {
+                    let mut s = format!(
+                        "JSON Diff (+{} keys, -{} keys, ~{} modified values):\n\n",
+                        added_paths.len(),
+                        removed_paths.len(),
+                        modified_paths.len()
+                    );
+                    for (line, tag) in diff_lines {
+                        let sign = match tag {
+                            ChangeType::Remove => "-",
+                            ChangeType::Add => "+",
+                            ChangeType::Equal => " ",
+                        };
+                        s.push_str(&format!("{sign}{line}\n"));
+                    }
+                    (s, false)
+                }
+                StructuredDiffKind::PortsDelta { added_listeners, removed_listeners, unchanged_count } => {
+                    let mut s = format!("Listening Ports Delta ({unchanged_count} unchanged):\n");
+                    for a in added_listeners {
+                        s.push_str(&format!("+ {a}\n"));
+                    }
+                    for r in removed_listeners {
+                        s.push_str(&format!("- {r}\n"));
+                    }
+                    (s, false)
+                }
+                StructuredDiffKind::Text { diff_lines } => {
+                    let mut s = String::new();
+                    for (line, tag) in diff_lines {
+                        let sign = match tag {
+                            ChangeType::Remove => "-",
+                            ChangeType::Add => "+",
+                            ChangeType::Equal => " ",
+                        };
+                        s.push_str(&format!("{sign}{line}\n"));
+                    }
+                    (s, false)
+                }
+            };
+
             let payload = json!({
                 "previous_block_id": prev_id,
                 "current_block_id": curr_id,
-                "identical": prev_blk.plain_output == curr_blk.plain_output,
-                "diff": diff_lines.join("\n"),
+                "identical": is_identical,
+                "structured_kind": match &report.kind {
+                    StructuredDiffKind::Identical { .. } => "identical",
+                    StructuredDiffKind::Json { .. } => "json",
+                    StructuredDiffKind::PortsDelta { .. } => "ports_delta",
+                    StructuredDiffKind::Text { .. } => "text",
+                },
+                "diff": diff_text,
             });
             McpToolCallResult::text(
                 serde_json::to_string_pretty(&payload).unwrap_or_default(),
@@ -1664,6 +1728,73 @@ pub async fn execute_mrt_mcp_tool(
             match inspect_dns(host).await {
                 Ok((_, plain, _)) => McpToolCallResult::text(plain, false),
                 Err(e) => McpToolCallResult::text(format!("DNS inspection error: {e}"), true),
+            }
+        }
+        "mrt_generate_bug_report" => {
+            let requested_id = args
+                .get("block_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| Uuid::parse_str(s.trim()).ok());
+            let tabs = state.tabs.lock().unwrap();
+            let mut target_blk = None;
+            let mut preceding = Vec::new();
+
+            if let Some(id) = requested_id {
+                for tab in tabs.iter() {
+                    if let Some(pos) = tab.blocks.iter().position(|b| b.id == id) {
+                        target_blk = Some(tab.blocks[pos].clone());
+                        preceding = tab.blocks[..pos].to_vec();
+                        break;
+                    }
+                }
+            } else {
+                // Find most recent failed block across tabs
+                for tab in tabs.iter() {
+                    if let Some(pos) = tab
+                        .blocks
+                        .iter()
+                        .rposition(|b| b.exit_code.map(|c| c != 0).unwrap_or(false))
+                    {
+                        target_blk = Some(tab.blocks[pos].clone());
+                        preceding = tab.blocks[..pos].to_vec();
+                        break;
+                    }
+                }
+                // Fallback to last block if no failed block
+                if target_blk.is_none() {
+                    if let Some(tab) = tabs.first() {
+                        if let Some(last) = tab.blocks.last() {
+                            target_blk = Some(last.clone());
+                            let count = tab.blocks.len().saturating_sub(1);
+                            preceding = tab.blocks[..count].to_vec();
+                        }
+                    }
+                }
+            }
+
+            let Some(target) = target_blk else {
+                return McpToolCallResult::text("No block found to generate report for", true);
+            };
+
+            let os_info = format!("{} ({})", std::env::consts::OS, std::env::consts::ARCH);
+            let report = generate_markdown_bug_report(&target, &preceding, &os_info, "0.1.0");
+            McpToolCallResult::text(report, false)
+        }
+        "mrt_inspect_ws" => {
+            let Some(url) = args.get("url").and_then(|v| v.as_str()) else {
+                return McpToolCallResult::text("Missing required 'url' parameter", true);
+            };
+            let mut cmd = format!(":ws {url}");
+            if let Some(msg) = args.get("message").and_then(|v| v.as_str()) {
+                cmd.push_str(&format!(" --send {msg}"));
+            }
+            if let Some(t) = args.get("timeout_ms").and_then(|v| v.as_u64()) {
+                cmd.push_str(&format!(" --timeout {t}"));
+            }
+
+            match inspect_websocket(&cmd).await {
+                Ok((_, plain, _)) => McpToolCallResult::text(plain, false),
+                Err(e) => McpToolCallResult::text(format!("WebSocket inspection error: {e}"), true),
             }
         }
         other => McpToolCallResult::text(format!("Unknown MCP tool: {other}"), true),

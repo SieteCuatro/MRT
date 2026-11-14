@@ -7,23 +7,44 @@ use crate::widgets::side_panels::{
     render_internet_side_panel, render_mcp_side_panel, SidePanelEvent, SidePanelState,
 };
 use egui::{Color32, Key, Modifiers, RichText};
-use mrt_ai::{diagnose_command_error, translate_nl_to_command, AiCommandProposal};
+use mrt_ai::{
+    diagnose_command_error_streaming, translate_nl_to_command,
+    AiCommandProposal,
+};
 use mrt_core::{
-    assess_command, discover_shells, execute_command_streaming, CommandBlock, RiskLevel,
-    SafetyAssessment, ShellProfile, StructuredOutput,
+    assess_command, discover_shells, execute_command_streaming, CommandBlock, InteractivePty,
+    RiskLevel, SafetyAssessment, ShellProfile, StructuredOutput,
 };
 use mrt_mcp::{
     start_gui_bridge_listener, GuiUiCommand, McpHostManager, McpTabSession, MrtMcpServerState,
 };
 use mrt_tools::{
-    execute_http_request, fetch_url_as_markdown, inspect_dns, inspect_listening_ports,
-    parse_http_command,
+    execute_http_request, fetch_url_as_markdown, generate_markdown_bug_report, inspect_dns,
+    inspect_listening_ports, inspect_websocket, parse_http_command,
 };
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use uuid::Uuid;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitDirection {
+    None,
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub struct SplitPane {
+    pub id: Uuid,
+    pub active_shell_idx: usize,
+    pub cwd: PathBuf,
+    pub blocks: Vec<CommandBlock>,
+    pub input_line: String,
+    pub table_filters: HashMap<Uuid, String>,
+}
 
 #[derive(Clone)]
 pub struct TerminalTab {
@@ -38,6 +59,9 @@ pub struct TerminalTab {
     pub history_cursor: Option<usize>,
     pub comparison: Option<(Uuid, Uuid)>,
     pub table_filters: HashMap<Uuid, String>,
+    pub split_direction: SplitDirection,
+    pub secondary_pane: Option<SplitPane>,
+    pub active_pane_idx: usize,
 }
 
 impl TerminalTab {
@@ -54,7 +78,30 @@ impl TerminalTab {
             history_cursor: None,
             comparison: None,
             table_filters: HashMap::new(),
+            split_direction: SplitDirection::None,
+            secondary_pane: None,
+            active_pane_idx: 0,
         }
+    }
+
+    pub fn split(&mut self, direction: SplitDirection, shells_count: usize) {
+        let shell_idx = self.active_shell_idx.min(shells_count.saturating_sub(1));
+        self.secondary_pane = Some(SplitPane {
+            id: Uuid::new_v4(),
+            active_shell_idx: shell_idx,
+            cwd: self.cwd.clone(),
+            blocks: Vec::new(),
+            input_line: String::new(),
+            table_filters: HashMap::new(),
+        });
+        self.split_direction = direction;
+        self.active_pane_idx = 1;
+    }
+
+    pub fn close_split(&mut self) {
+        self.split_direction = SplitDirection::None;
+        self.secondary_pane = None;
+        self.active_pane_idx = 0;
     }
 }
 
@@ -67,6 +114,13 @@ pub enum AsyncWorkerEvent {
     AiCommandReady {
         tab_id: Uuid,
         proposal: AiCommandProposal,
+    },
+    AiExplanationChunk {
+        tab_id: Uuid,
+        block_id: Uuid,
+        chunk: String,
+        suggested_fix: Option<String>,
+        is_final: bool,
     },
     ExplorerLoaded {
         path: PathBuf,
@@ -90,6 +144,13 @@ pub struct ActiveRunbookReplay {
     pub waiting_block_id: Option<Uuid>,
 }
 
+pub struct ActiveTuiSession {
+    pub pty: std::sync::Arc<InteractivePty>,
+    pub tab_id: Uuid,
+    pub command: String,
+    pub start_time: std::time::Instant,
+}
+
 pub struct MrtGuiApp {
     pub runtime: tokio::runtime::Runtime,
     pub shells: Vec<ShellProfile>,
@@ -106,6 +167,7 @@ pub struct MrtGuiApp {
     pub palette_query: String,
     pub busy_count: usize,
     pub focused_on_start: bool,
+    pub active_tui: Option<ActiveTuiSession>,
     history: Option<crate::history::HistoryWorker>,
     history_error: Option<String>,
     history_pending: usize,
@@ -191,6 +253,7 @@ impl MrtGuiApp {
             palette_query: String::new(),
             busy_count: 0,
             focused_on_start: false,
+            active_tui: None,
             history,
             history_error,
             history_pending: 0,
@@ -221,20 +284,67 @@ impl MrtGuiApp {
             }
             BlockAction::DiagnoseError(block_id) => {
                 if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    let tab_id = tab.id;
                     let shell = self
                         .shells
                         .get(tab.active_shell_idx)
                         .cloned()
                         .unwrap_or_else(|| self.shells[0].clone());
                     if let Some(blk) = tab.blocks.iter_mut().find(|b| b.id == block_id) {
-                        let triage = diagnose_command_error(
-                            &blk.command,
-                            &blk.plain_output,
-                            blk.exit_code.unwrap_or(1),
-                            &shell,
+                        blk.ai_explanation = Some(String::new());
+                        let cmd = blk.command.clone();
+                        let out = blk.plain_output.clone();
+                        let code = blk.exit_code.unwrap_or(1);
+                        let tx = self.tx.clone();
+
+                        self.busy_count += 1;
+                        self.runtime.spawn(async move {
+                            let tx_inner = tx.clone();
+                            let triage = diagnose_command_error_streaming(
+                                &cmd,
+                                &out,
+                                code,
+                                &shell,
+                                move |token| {
+                                    let _ = tx_inner.send(AsyncWorkerEvent::AiExplanationChunk {
+                                        tab_id,
+                                        block_id,
+                                        chunk: token.to_string(),
+                                        suggested_fix: None,
+                                        is_final: false,
+                                    });
+                                },
+                            )
+                            .await;
+
+                            let _ = tx.send(AsyncWorkerEvent::AiExplanationChunk {
+                                tab_id,
+                                block_id,
+                                chunk: String::new(),
+                                suggested_fix: triage.suggested_fix,
+                                is_final: true,
+                            });
+                        });
+                    }
+                }
+            }
+            BlockAction::CopyBugReport(block_id) => {
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    if let Some(idx) = tab.blocks.iter().position(|b| b.id == block_id) {
+                        let blk = &tab.blocks[idx];
+                        let history = &tab.blocks[..idx];
+                        let os_info = format!("{} ({})", std::env::consts::OS, std::env::consts::ARCH);
+                        let report = generate_markdown_bug_report(blk, history, &os_info, "0.1.0");
+                        let new_block = CommandBlock::new_structured(
+                            &format!(":report {}", blk.command),
+                            "mrt-report",
+                            tab.cwd.display().to_string(),
+                            report.clone(),
+                            StructuredOutput::Markdown(report),
+                            0,
+                            0,
                         );
-                        blk.ai_explanation = Some(triage.explanation);
-                        blk.ai_suggested_fix = triage.suggested_fix;
+                        tab.blocks.push(new_block);
                     }
                 }
             }
@@ -659,10 +769,16 @@ impl MrtGuiApp {
         for (block_id, (tab_id, output)) in &self.running_output {
             let chunk = output.lock().map(|mut pending| std::mem::take(&mut *pending)).unwrap_or_default();
             if chunk.is_empty() { continue; }
-            if let Some(block) = self.tabs.iter_mut().find(|tab| tab.id == *tab_id)
-                .and_then(|tab| tab.blocks.iter_mut().find(|block| block.id == *block_id)) {
+            let found_in_primary = self.tabs.iter_mut().find(|tab| tab.id == *tab_id)
+                .and_then(|tab| tab.blocks.iter_mut().find(|block| block.id == *block_id));
+            if let Some(block) = found_in_primary {
                 block.raw_output.push_str(&chunk);
                 (block.ansi_spans, block.plain_output) = mrt_core::parse_ansi_text(&block.raw_output);
+            } else if let Some(sec) = self.tabs.iter_mut().find(|tab| tab.id == *tab_id).and_then(|tab| tab.secondary_pane.as_mut()) {
+                if let Some(block) = sec.blocks.iter_mut().find(|block| block.id == *block_id) {
+                    block.raw_output.push_str(&chunk);
+                    (block.ansi_spans, block.plain_output) = mrt_core::parse_ansi_text(&block.raw_output);
+                }
             }
         }
         while let Ok(ev) = self.rx.try_recv() {
@@ -694,6 +810,12 @@ impl MrtGuiApp {
                             let pinned = running.pinned;
                             *running = block.clone();
                             running.pinned = pinned;
+                        } else if let Some(running) = tab.secondary_pane.as_mut().and_then(|s| s.blocks.iter_mut().find(|b| b.id == block.id)) {
+                            let pinned = running.pinned;
+                            *running = block.clone();
+                            running.pinned = pinned;
+                        } else if tab.active_pane_idx == 1 && tab.secondary_pane.is_some() {
+                            tab.secondary_pane.as_mut().unwrap().blocks.push(block.clone());
                         } else {
                             tab.blocks.push(block.clone());
                         }
@@ -707,6 +829,25 @@ impl MrtGuiApp {
                             tab.input_line = proposal.proposed_command.clone();
                         }
                         tab.ai_proposal = Some(proposal);
+                    }
+                }
+                AsyncWorkerEvent::AiExplanationChunk {
+                    tab_id,
+                    block_id,
+                    chunk,
+                    suggested_fix,
+                    is_final,
+                } => {
+                    if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+                        if let Some(blk) = tab.blocks.iter_mut().find(|b| b.id == block_id) {
+                            let exp = blk.ai_explanation.get_or_insert_with(String::new);
+                            exp.push_str(&chunk);
+                            if is_final {
+                                if let Some(fix) = suggested_fix {
+                                    blk.ai_suggested_fix = Some(fix);
+                                }
+                            }
+                        }
                     }
                 }
                 AsyncWorkerEvent::ExplorerLoaded { path, entries } => {
@@ -779,6 +920,23 @@ impl MrtGuiApp {
             return;
         }
 
+        if raw_input.eq_ignore_ascii_case(":split") || raw_input.eq_ignore_ascii_case(":split-h") {
+            let shells_count = self.shells.len();
+            tab.split(SplitDirection::Horizontal, shells_count);
+            return;
+        }
+
+        if raw_input.eq_ignore_ascii_case(":split-v") {
+            let shells_count = self.shells.len();
+            tab.split(SplitDirection::Vertical, shells_count);
+            return;
+        }
+
+        if raw_input.eq_ignore_ascii_case(":unsplit") {
+            tab.close_split();
+            return;
+        }
+
         if raw_input.starts_with(":ports") {
             self.spawn_port_scanner(tab_id, cwd);
             return;
@@ -786,6 +944,74 @@ impl MrtGuiApp {
 
         if raw_input.starts_with(":dns") {
             self.spawn_dns_command(tab_id, cwd, raw_input);
+            return;
+        }
+
+        if raw_input.starts_with(":ws") {
+            self.spawn_ws_command(tab_id, cwd, raw_input);
+            return;
+        }
+
+        if raw_input.eq_ignore_ascii_case(":report") || raw_input.eq_ignore_ascii_case(":bug") {
+            let last_failed_idx = tab
+                .blocks
+                .iter()
+                .rposition(|b| b.exit_code.map(|c| c != 0).unwrap_or(false))
+                .or_else(|| if !tab.blocks.is_empty() { Some(tab.blocks.len() - 1) } else { None });
+
+            if let Some(idx) = last_failed_idx {
+                let blk = &tab.blocks[idx];
+                let history = &tab.blocks[..idx];
+                let os_info = format!("{} ({})", std::env::consts::OS, std::env::consts::ARCH);
+                let report = generate_markdown_bug_report(blk, history, &os_info, "0.1.0");
+                let new_block = CommandBlock::new_structured(
+                    ":report",
+                    "mrt-report",
+                    cwd.display().to_string(),
+                    report.clone(),
+                    StructuredOutput::Markdown(report),
+                    0,
+                    0,
+                );
+                tab.blocks.push(new_block);
+            } else {
+                let new_block = CommandBlock::new_completed(
+                    ":report",
+                    "mrt-report",
+                    cwd.display().to_string(),
+                    "No commands in current tab history to report.".to_string(),
+                    1,
+                    0,
+                );
+                tab.blocks.push(new_block);
+            }
+            return;
+        }
+
+        if raw_input.starts_with(":diff") {
+            let parts: Vec<&str> = raw_input.split_whitespace().collect();
+            if parts.len() >= 3 {
+                if let (Ok(u1), Ok(u2)) = (Uuid::parse_str(parts[1]), Uuid::parse_str(parts[2])) {
+                    tab.comparison = Some((u1, u2));
+                    return;
+                }
+            }
+
+            if tab.blocks.len() >= 2 {
+                let curr_id = tab.blocks[tab.blocks.len() - 1].id;
+                let prev_id = tab.blocks[tab.blocks.len() - 2].id;
+                tab.comparison = Some((prev_id, curr_id));
+            } else {
+                let new_block = CommandBlock::new_completed(
+                    ":diff",
+                    "mrt-diff",
+                    cwd.display().to_string(),
+                    "Need at least 2 blocks in history to perform a diff comparison.".to_string(),
+                    1,
+                    0,
+                );
+                tab.blocks.push(new_block);
+            }
             return;
         }
 
@@ -811,6 +1037,53 @@ impl MrtGuiApp {
                 });
                 return;
             }
+        }
+
+        let is_tui_command = if let Some(cmd) = raw_input.strip_prefix(":tui ") {
+            Some(cmd.trim().to_string())
+        } else {
+            let first_token = raw_input
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_lowercase();
+            let base_token = std::path::Path::new(&first_token)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&first_token);
+            if matches!(
+                base_token,
+                "vim" | "vi" | "nvim" | "nano" | "htop" | "top" | "lazygit" | "lazydocker" | "less" | "man" | "fzf"
+            ) {
+                Some(raw_input.clone())
+            } else {
+                None
+            }
+        };
+
+        if let Some(tui_cmd) = is_tui_command {
+            match InteractivePty::spawn_with_command(&shell, &cwd, 120, 35, Some(&tui_cmd)) {
+                Ok(pty) => {
+                    self.active_tui = Some(ActiveTuiSession {
+                        pty: std::sync::Arc::new(pty),
+                        tab_id,
+                        command: tui_cmd,
+                        start_time: std::time::Instant::now(),
+                    });
+                }
+                Err(e) => {
+                    let err_block = CommandBlock::new_completed(
+                        raw_input,
+                        shell.name,
+                        cwd.display().to_string(),
+                        format!("Failed to launch TUI session: {e}"),
+                        1,
+                        0,
+                    );
+                    tab.blocks.push(err_block);
+                }
+            }
+            return;
         }
 
         self.spawn_shell_command(tab_id, shell, cwd, raw_input);
@@ -1069,6 +1342,39 @@ impl MrtGuiApp {
         });
     }
 
+    fn spawn_ws_command(&mut self, tab_id: Uuid, cwd: PathBuf, cmd_str: String) {
+        let tx = self.tx.clone();
+        self.busy_count += 1;
+        self.runtime.spawn(async move {
+            let start = std::time::Instant::now();
+            let cwd_str = cwd.display().to_string();
+            let block = match inspect_websocket(&cmd_str).await {
+                Ok((structured, plain, _)) => CommandBlock::new_structured(
+                    &cmd_str,
+                    "mrt-ws",
+                    cwd_str,
+                    plain,
+                    structured,
+                    0,
+                    start.elapsed().as_millis() as u64,
+                ),
+                Err(e) => CommandBlock::new_completed(
+                    &cmd_str,
+                    "mrt-ws",
+                    cwd_str,
+                    format!("WebSocket error: {e}"),
+                    1,
+                    start.elapsed().as_millis() as u64,
+                ),
+            };
+            let _ = tx.send(AsyncWorkerEvent::BlockCompleted {
+                tab_id,
+                block,
+                updated_cwd: None,
+            });
+        });
+    }
+
     fn spawn_http_command(&mut self, tab_id: Uuid, cwd: PathBuf, cmd_str: String) {
         let tx = self.tx.clone();
         self.busy_count += 1;
@@ -1251,7 +1557,149 @@ impl MrtGuiApp {
                 };
                 self.spawn_dns_command(tab_id, cwd, cmd);
             }
+            SidePanelEvent::RunWsInspector { url, msg } => {
+                let cmd = if msg.trim().is_empty() {
+                    format!(":ws {url}")
+                } else {
+                    format!(":ws {url} {}", msg.trim())
+                };
+                self.spawn_ws_command(tab_id, cwd, cmd);
+            }
         }
+    }
+
+    fn process_tui_session(&mut self, ctx: &egui::Context) {
+        let Some(ref session) = self.active_tui else {
+            return;
+        };
+
+        ctx.request_repaint_after(std::time::Duration::from_millis(30));
+
+        let mut close_session = false;
+        let mut exit_code = 0;
+
+        // Check if the process exited on its own
+        if let Ok(Some(code)) = session.pty.try_wait_exit() {
+            close_session = true;
+            exit_code = code as i32;
+        }
+
+        // Check for manual exit via Ctrl+Q or forward keys to PTY
+        let mut kill_requested = false;
+        ctx.input(|i| {
+            if i.modifiers.ctrl && i.key_pressed(Key::Q) {
+                kill_requested = true;
+                return;
+            }
+
+            for event in &i.events {
+                forward_egui_event_to_pty(event, &session.pty);
+            }
+        });
+
+        if kill_requested {
+            let _ = session.pty.kill();
+            close_session = true;
+            exit_code = 130;
+        }
+
+        if close_session {
+            if let Some(session) = self.active_tui.take() {
+                let transcript = session.pty.read_transcript();
+                let output = if transcript.is_empty() {
+                    session.pty.drain_output()
+                } else {
+                    transcript
+                };
+                let duration_ms = session.start_time.elapsed().as_millis() as u64;
+
+                if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == session.tab_id) {
+                    let shell_name = self
+                        .shells
+                        .get(tab.active_shell_idx)
+                        .map(|s| s.name.clone())
+                        .unwrap_or_else(|| "default".into());
+                    let block = CommandBlock::new_completed(
+                        session.command,
+                        shell_name,
+                        tab.cwd.display().to_string(),
+                        output,
+                        exit_code,
+                        duration_ms,
+                    );
+                    tab.blocks.push(block);
+                }
+            }
+        }
+    }
+
+    fn render_tui_overlay(&mut self, ctx: &egui::Context) {
+        let Some(ref session) = self.active_tui else {
+            return;
+        };
+
+        let screen_rect = ctx.screen_rect();
+        egui::Area::new(egui::Id::new("tui_overlay_modal"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::pos2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.painter().rect_filled(
+                    screen_rect,
+                    0.0,
+                    Color32::from_black_alpha(220),
+                );
+
+                let win_width = (screen_rect.width() * 0.94).max(300.0);
+                let win_height = (screen_rect.height() * 0.90).max(200.0);
+
+                egui::Window::new(format!("📺 Interactive TUI: {} (Ctrl+Q to exit)", session.command))
+                    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                    .fixed_size(egui::vec2(win_width, win_height))
+                    .collapsible(false)
+                    .resizable(false)
+                    .show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Alt-Screen PTY Running")
+                                    .monospace()
+                                    .color(Palette::ACCENT_BLUE),
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui
+                                    .button(
+                                        RichText::new("Exit Session (Ctrl+Q)")
+                                            .color(Palette::ACCENT_RED),
+                                    )
+                                    .clicked()
+                                {
+                                    let _ = session.pty.kill();
+                                }
+                            });
+                        });
+                        ui.separator();
+
+                        let transcript = session.pty.read_transcript();
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false; 2])
+                            .stick_to_bottom(true)
+                            .show(ui, |ui| {
+                                let content = if transcript.is_empty() {
+                                    "Starting terminal emulator session..."
+                                } else {
+                                    &transcript
+                                };
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(content)
+                                            .monospace()
+                                            .size(12.0)
+                                            .color(Palette::TEXT_PRIMARY),
+                                    )
+                                    .wrap(),
+                                );
+                            });
+                    });
+            });
     }
 }
 
@@ -1281,6 +1729,94 @@ fn read_directory(path: &std::path::Path) -> std::io::Result<Vec<(PathBuf, bool)
     Ok(entries)
 }
 
+fn forward_egui_event_to_pty(event: &egui::Event, pty: &InteractivePty) {
+    match event {
+        egui::Event::Text(text) => {
+            let _ = pty.send_input(text, false);
+        }
+        egui::Event::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } => {
+            if modifiers.ctrl && !modifiers.alt {
+                match key {
+                    Key::C => {
+                        let _ = pty.send_input("\x03", false);
+                    }
+                    Key::D => {
+                        let _ = pty.send_input("\x04", false);
+                    }
+                    Key::Z => {
+                        let _ = pty.send_input("\x1a", false);
+                    }
+                    Key::L => {
+                        let _ = pty.send_input("\x0c", false);
+                    }
+                    Key::A => {
+                        let _ = pty.send_input("\x01", false);
+                    }
+                    Key::E => {
+                        let _ = pty.send_input("\x05", false);
+                    }
+                    Key::U => {
+                        let _ = pty.send_input("\x15", false);
+                    }
+                    Key::W => {
+                        let _ = pty.send_input("\x17", false);
+                    }
+                    _ => {}
+                }
+            } else if !modifiers.ctrl && !modifiers.alt && !modifiers.command {
+                match key {
+                    Key::Enter => {
+                        let _ = pty.send_input(if cfg!(windows) { "\r\n" } else { "\n" }, false);
+                    }
+                    Key::Backspace => {
+                        let _ = pty.send_input("\x08", false);
+                    }
+                    Key::Tab => {
+                        let _ = pty.send_input("\t", false);
+                    }
+                    Key::Escape => {
+                        let _ = pty.send_input("\x1b", false);
+                    }
+                    Key::ArrowUp => {
+                        let _ = pty.send_input("\x1b[A", false);
+                    }
+                    Key::ArrowDown => {
+                        let _ = pty.send_input("\x1b[B", false);
+                    }
+                    Key::ArrowRight => {
+                        let _ = pty.send_input("\x1b[C", false);
+                    }
+                    Key::ArrowLeft => {
+                        let _ = pty.send_input("\x1b[D", false);
+                    }
+                    Key::PageUp => {
+                        let _ = pty.send_input("\x1b[5~", false);
+                    }
+                    Key::PageDown => {
+                        let _ = pty.send_input("\x1b[6~", false);
+                    }
+                    Key::Home => {
+                        let _ = pty.send_input("\x1b[H", false);
+                    }
+                    Key::End => {
+                        let _ = pty.send_input("\x1b[F", false);
+                    }
+                    Key::Delete => {
+                        let _ = pty.send_input("\x1b[3~", false);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 impl eframe::App for MrtGuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let first_frame = !self.focused_on_start;
@@ -1300,6 +1836,7 @@ impl eframe::App for MrtGuiApp {
         self.process_async_events();
         self.process_history_events();
         self.process_mcp_ui_commands();
+        self.process_tui_session(ctx);
 
         ctx.request_repaint_after(std::time::Duration::from_millis(if self.busy_count > 0 || self.history_pending > 0 {
             50
@@ -1335,6 +1872,24 @@ impl eframe::App for MrtGuiApp {
 
                 ui.toggle_value(&mut self.mosaic, "Mosaic");
                 ui.toggle_value(&mut self.show_explorer, "Explorer");
+
+                if !self.mosaic {
+                    if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                        let shells_len = self.shells.len();
+                        if tab.split_direction == SplitDirection::None {
+                            if ui.small_button("Split ◫").on_hover_text("Split tab horizontally into 2 panes").clicked() {
+                                tab.split(SplitDirection::Horizontal, shells_len);
+                            }
+                            if ui.small_button("Split ⊟").on_hover_text("Split tab vertically into 2 panes").clicked() {
+                                tab.split(SplitDirection::Vertical, shells_len);
+                            }
+                        } else {
+                            if ui.small_button("Close Split ✕").on_hover_text("Close secondary split pane").clicked() {
+                                tab.close_split();
+                            }
+                        }
+                    }
+                }
 
                 // Render Tabs
                 let mut tab_to_close = None;
@@ -1715,10 +2270,10 @@ impl eframe::App for MrtGuiApp {
                             })
                             .desired_width((ui.available_width() - 72.0).max(32.0)),
                     );
-                    if focus_prompt && !self.show_command_palette && self.pending_safety.is_none() {
+                    if focus_prompt && !self.show_command_palette && self.pending_safety.is_none() && self.active_tui.is_none() {
                         response.request_focus();
                     }
-                    if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                    if self.active_tui.is_none() && response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                         should_submit = true;
                         response.request_focus();
                     }
@@ -1775,30 +2330,155 @@ impl eframe::App for MrtGuiApp {
             let mut pending_block_action = None;
 
             if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        let mut previous_runs = HashMap::new();
-                        for block in &mut tab.blocks {
-                            let key = (block.command.clone(), block.shell_name.clone(), block.cwd.clone());
-                            let previous_id = previous_runs.insert(key, block.id);
-                            let filter = tab.table_filters.entry(block.id).or_default();
-                            if let Some(action) = render_command_block(ui, block, filter, previous_id) {
-                                pending_block_action = Some(action);
+                if tab.split_direction == SplitDirection::Horizontal && tab.secondary_pane.is_some() {
+                    ui.columns(2, |cols| {
+                        // Left column: Primary pane
+                        cols[0].group(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Pane 1 (Primary)").strong().color(
+                                    if tab.active_pane_idx == 0 { Palette::ACCENT_BLUE } else { Palette::TEXT_MUTED }
+                                ));
+                                if tab.active_pane_idx != 0 && ui.small_button("Focus").clicked() {
+                                    tab.active_pane_idx = 0;
+                                }
+                            });
+                            egui::ScrollArea::vertical()
+                                .id_salt("split_pane_primary")
+                                .auto_shrink([false, false])
+                                .stick_to_bottom(true)
+                                .show(ui, |ui| {
+                                    let mut previous_runs = HashMap::new();
+                                    for block in &mut tab.blocks {
+                                        let key = (block.command.clone(), block.shell_name.clone(), block.cwd.clone());
+                                        let previous_id = previous_runs.insert(key, block.id);
+                                        let filter = tab.table_filters.entry(block.id).or_default();
+                                        if let Some(action) = render_command_block(ui, block, filter, previous_id) {
+                                            pending_block_action = Some(action);
+                                        }
+                                        ui.add_space(8.0);
+                                    }
+                                });
+                        });
+
+                        // Right column: Secondary pane
+                        cols[1].group(|ui| {
+                            let sec = tab.secondary_pane.as_mut().unwrap();
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Pane 2 (Split)").strong().color(
+                                    if tab.active_pane_idx == 1 { Palette::ACCENT_GREEN } else { Palette::TEXT_MUTED }
+                                ));
+                                if tab.active_pane_idx != 1 && ui.small_button("Focus").clicked() {
+                                    tab.active_pane_idx = 1;
+                                }
+                            });
+                            egui::ScrollArea::vertical()
+                                .id_salt("split_pane_secondary")
+                                .auto_shrink([false, false])
+                                .stick_to_bottom(true)
+                                .show(ui, |ui| {
+                                    if sec.blocks.is_empty() {
+                                        ui.label(RichText::new("Secondary pane active. Commands run here when focused.").italics().color(Palette::TEXT_MUTED));
+                                    }
+                                    let mut previous_runs = HashMap::new();
+                                    for block in &mut sec.blocks {
+                                        let key = (block.command.clone(), block.shell_name.clone(), block.cwd.clone());
+                                        let previous_id = previous_runs.insert(key, block.id);
+                                        let filter = sec.table_filters.entry(block.id).or_default();
+                                        if let Some(action) = render_command_block(ui, block, filter, previous_id) {
+                                            pending_block_action = Some(action);
+                                        }
+                                        ui.add_space(8.0);
+                                    }
+                                });
+                        });
+                    });
+                } else if tab.split_direction == SplitDirection::Vertical && tab.secondary_pane.is_some() {
+                    let half_h = (ui.available_height() / 2.0 - 10.0).max(100.0);
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Pane 1 (Top)").strong().color(
+                                if tab.active_pane_idx == 0 { Palette::ACCENT_BLUE } else { Palette::TEXT_MUTED }
+                            ));
+                            if tab.active_pane_idx != 0 && ui.small_button("Focus").clicked() {
+                                tab.active_pane_idx = 0;
                             }
-                            ui.add_space(10.0);
-                        }
-                        if let Some((previous_id, current_id)) = tab.comparison {
-                            let previous = tab.blocks.iter().find(|block| block.id == previous_id);
-                            let current = tab.blocks.iter().find(|block| block.id == current_id);
-                            if let (Some(previous), Some(current)) = (previous, current) {
-                                if crate::widgets::block_view::render_comparison(ui, previous, current) {
-                                    tab.comparison = None;
+                        });
+                        egui::ScrollArea::vertical()
+                            .id_salt("split_v_primary")
+                            .max_height(half_h)
+                            .stick_to_bottom(true)
+                            .show(ui, |ui| {
+                                let mut previous_runs = HashMap::new();
+                                for block in &mut tab.blocks {
+                                    let key = (block.command.clone(), block.shell_name.clone(), block.cwd.clone());
+                                    let previous_id = previous_runs.insert(key, block.id);
+                                    let filter = tab.table_filters.entry(block.id).or_default();
+                                    if let Some(action) = render_command_block(ui, block, filter, previous_id) {
+                                        pending_block_action = Some(action);
+                                    }
+                                    ui.add_space(6.0);
+                                }
+                            });
+                    });
+
+                    ui.separator();
+
+                    ui.group(|ui| {
+                        let sec = tab.secondary_pane.as_mut().unwrap();
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Pane 2 (Bottom)").strong().color(
+                                if tab.active_pane_idx == 1 { Palette::ACCENT_GREEN } else { Palette::TEXT_MUTED }
+                            ));
+                            if tab.active_pane_idx != 1 && ui.small_button("Focus").clicked() {
+                                tab.active_pane_idx = 1;
+                            }
+                        });
+                        egui::ScrollArea::vertical()
+                            .id_salt("split_v_secondary")
+                            .max_height(half_h)
+                            .stick_to_bottom(true)
+                            .show(ui, |ui| {
+                                if sec.blocks.is_empty() {
+                                    ui.label(RichText::new("Secondary pane active. Commands run here when focused.").italics().color(Palette::TEXT_MUTED));
+                                }
+                                let mut previous_runs = HashMap::new();
+                                for block in &mut sec.blocks {
+                                    let key = (block.command.clone(), block.shell_name.clone(), block.cwd.clone());
+                                    let previous_id = previous_runs.insert(key, block.id);
+                                    let filter = sec.table_filters.entry(block.id).or_default();
+                                    if let Some(action) = render_command_block(ui, block, filter, previous_id) {
+                                        pending_block_action = Some(action);
+                                    }
+                                    ui.add_space(6.0);
+                                }
+                            });
+                    });
+                } else {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            let mut previous_runs = HashMap::new();
+                            for block in &mut tab.blocks {
+                                let key = (block.command.clone(), block.shell_name.clone(), block.cwd.clone());
+                                let previous_id = previous_runs.insert(key, block.id);
+                                let filter = tab.table_filters.entry(block.id).or_default();
+                                if let Some(action) = render_command_block(ui, block, filter, previous_id) {
+                                    pending_block_action = Some(action);
+                                }
+                                ui.add_space(10.0);
+                            }
+                            if let Some((previous_id, current_id)) = tab.comparison {
+                                let previous = tab.blocks.iter().find(|block| block.id == previous_id);
+                                let current = tab.blocks.iter().find(|block| block.id == current_id);
+                                if let (Some(previous), Some(current)) = (previous, current) {
+                                    if crate::widgets::block_view::render_comparison(ui, previous, current) {
+                                        tab.comparison = None;
+                                    }
                                 }
                             }
-                        }
-                    });
+                        });
+                }
             }
 
             if let Some(action) = pending_block_action {
@@ -2026,6 +2706,7 @@ impl eframe::App for MrtGuiApp {
             }
         }
 
+        self.render_tui_overlay(ctx);
         self.sync_mcp_from_gui();
     }
 }
@@ -2409,5 +3090,57 @@ mod tests {
         assert_eq!(block.exit_code, Some(0));
         assert!(block.structured.is_structured());
         assert!(block.plain_output.contains("127.0.0.1"));
+    }
+
+    #[test]
+    fn split_and_unsplit_tab_lifecycle() {
+        let mut app = MrtGuiApp::new();
+        assert_eq!(app.tabs[0].split_direction, SplitDirection::None);
+        assert!(app.tabs[0].secondary_pane.is_none());
+
+        // Split horizontal
+        app.submit_input(Some(":split-h".to_string()), false);
+        assert_eq!(app.tabs[0].split_direction, SplitDirection::Horizontal);
+        assert!(app.tabs[0].secondary_pane.is_some());
+
+        // Split vertical
+        app.submit_input(Some(":split-v".to_string()), false);
+        assert_eq!(app.tabs[0].split_direction, SplitDirection::Vertical);
+        assert!(app.tabs[0].secondary_pane.is_some());
+
+        // Unsplit
+        app.submit_input(Some(":unsplit".to_string()), false);
+        assert_eq!(app.tabs[0].split_direction, SplitDirection::None);
+        assert!(app.tabs[0].secondary_pane.is_none());
+    }
+
+    #[test]
+    fn tui_session_spawns_and_closes_into_block() {
+        let mut app = MrtGuiApp::new();
+        assert!(app.active_tui.is_none());
+
+        // Launch TUI command
+        app.submit_input(Some(":tui echo interactive_tui_test".to_string()), false);
+        assert!(app.active_tui.is_some());
+
+        let ctx = egui::Context::default();
+
+        // Run process_tui_session until child completes or kill it
+        let start = std::time::Instant::now();
+        while app.active_tui.is_some() && start.elapsed() < std::time::Duration::from_secs(5) {
+            app.process_tui_session(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+
+        // If still alive, terminate cleanly
+        if let Some(ref session) = app.active_tui {
+            let _ = session.pty.kill();
+            app.process_tui_session(&ctx);
+        }
+
+        assert!(app.active_tui.is_none());
+        assert!(!app.tabs[0].blocks.is_empty());
+        let last_blk = app.tabs[0].blocks.last().unwrap();
+        assert!(last_blk.command.contains("interactive_tui_test"));
     }
 }

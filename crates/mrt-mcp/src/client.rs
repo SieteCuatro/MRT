@@ -568,4 +568,49 @@ mod tests {
         assert!(!res.is_error);
         assert!(res.content[0].text.contains("127.0.0.1"));
     }
+
+    #[tokio::test]
+    async fn test_mcp_generate_bug_report_tool() {
+        let state = MrtMcpServerState::default();
+        let host = McpHostManager::new(state);
+
+        // Run a failing command
+        let _ = host
+            .call_tool(
+                "mrt-native-mcp",
+                "mrt_run_command",
+                json!({ "command": "exit 42" }),
+            )
+            .await
+            .unwrap();
+
+        let res = host
+            .call_tool(
+                "mrt-native-mcp",
+                "mrt_generate_bug_report",
+                json!({}),
+            )
+            .await
+            .unwrap();
+        assert!(!res.is_error);
+        let text = &res.content[0].text;
+        assert!(text.contains("## Bug Report:"));
+        assert!(text.contains("exit 42") || text.contains("exit"));
+    }
+
+    #[tokio::test]
+    async fn test_mcp_inspect_ws_tool_validation() {
+        let state = MrtMcpServerState::default();
+        let host = McpHostManager::new(state);
+
+        let res = host
+            .call_tool(
+                "mrt-native-mcp",
+                "mrt_inspect_ws",
+                json!({}),
+            )
+            .await
+            .unwrap();
+        assert!(res.is_error);
+    }
 }

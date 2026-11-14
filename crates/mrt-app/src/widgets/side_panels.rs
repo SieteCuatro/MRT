@@ -26,6 +26,10 @@ pub enum SidePanelEvent {
     RunDnsTrace {
         host: String,
     },
+    RunWsInspector {
+        url: String,
+        msg: String,
+    },
 }
 
 pub struct SidePanelState {
@@ -40,6 +44,8 @@ pub struct SidePanelState {
     pub http_body: String,
     pub web_url: String,
     pub dns_host: String,
+    pub ws_url: String,
+    pub ws_msg: String,
 }
 
 impl Default for SidePanelState {
@@ -56,6 +62,8 @@ impl Default for SidePanelState {
             http_body: String::new(),
             web_url: "https://www.rust-lang.org".to_string(),
             dns_host: "google.com".to_string(),
+            ws_url: "wss://echo.websocket.events".to_string(),
+            ws_msg: "Hello from MRT!".to_string(),
         }
     }
 }
@@ -223,6 +231,31 @@ pub fn render_mcp_side_panel(
         ui.add_space(8.0);
         ui.separator();
         ui.label(
+            RichText::new("Server Presets")
+                .size(12.0)
+                .strong()
+                .color(Palette::TEXT_SECONDARY),
+        );
+        ui.horizontal_wrapped(|ui| {
+            let presets = [
+                ("Filesystem", "npx", "-y @modelcontextprotocol/server-filesystem ."),
+                ("Git", "npx", "-y @modelcontextprotocol/server-git"),
+                ("Memory", "npx", "-y @modelcontextprotocol/server-memory"),
+                ("SQLite", "npx", "-y @modelcontextprotocol/server-sqlite --db ./mrt.db"),
+                ("Fetch", "uvx", "mcp-server-fetch"),
+            ];
+            for (name, cmd, args) in presets {
+                if ui.small_button(name).on_hover_text(format!("Load preset: {cmd} {args}")).clicked() {
+                    state.new_mcp_name = format!("{name}-server").to_lowercase();
+                    state.new_mcp_cmd = cmd.to_string();
+                    state.new_mcp_args = args.to_string();
+                }
+            }
+        });
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label(
             RichText::new("Connect External Stdio Server")
                 .size(12.0)
                 .strong()
@@ -371,6 +404,36 @@ pub fn render_internet_side_panel(
     if ui.button("Trace Host").clicked() {
         event = Some(SidePanelEvent::RunDnsTrace {
             host: state.dns_host.clone(),
+        });
+    }
+
+    ui.add_space(10.0);
+    ui.separator();
+    ui.label(
+        RichText::new("WebSocket Inspector (:ws)")
+            .size(12.0)
+            .strong()
+            .color(Palette::ACCENT_BLUE),
+    );
+    ui.label(
+        RichText::new("Inspects live WebSocket streams and sends probe frames.")
+            .size(11.5)
+            .color(Palette::TEXT_SECONDARY),
+    );
+    ui.add(
+        egui::TextEdit::singleline(&mut state.ws_url)
+            .hint_text("wss://echo.websocket.events")
+            .desired_width(f32::INFINITY),
+    );
+    ui.add(
+        egui::TextEdit::singleline(&mut state.ws_msg)
+            .hint_text("Optional message to send...")
+            .desired_width(f32::INFINITY),
+    );
+    if ui.button("Inspect WebSocket").clicked() {
+        event = Some(SidePanelEvent::RunWsInspector {
+            url: state.ws_url.clone(),
+            msg: state.ws_msg.clone(),
         });
     }
 

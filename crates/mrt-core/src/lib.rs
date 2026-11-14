@@ -2,6 +2,7 @@ pub mod block;
 pub mod platform;
 pub mod pty;
 pub mod safety;
+pub mod shell_integration;
 pub mod vt;
 
 pub use block::{
@@ -12,4 +13,7 @@ pub use pty::{
     discover_shells, execute_command_in_shell, execute_command_streaming, InteractivePty, ShellKind, ShellProfile,
 };
 pub use safety::{assess_command, RiskLevel, SafetyAssessment};
+pub use shell_integration::{
+    generate_shell_integration_script, parse_osc133_markers, Osc133Event, Osc133Kind,
+};
 pub use vt::{parse_ansi_text, AnsiColor, AnsiSpan, VtParserState};

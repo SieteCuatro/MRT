@@ -502,6 +502,26 @@ pub fn diagnose_command_error(
     }
 }
 
+/// Streams tokens of an AI error triage progressively via an async callback.
+pub async fn diagnose_command_error_streaming<F>(
+    command: &str,
+    output: &str,
+    exit_code: i32,
+    shell: &ShellProfile,
+    mut on_chunk: F,
+) -> AiErrorTriage
+where
+    F: FnMut(&str) + Send,
+{
+    let triage = diagnose_command_error(command, output, exit_code, shell);
+    let words: Vec<&str> = triage.explanation.split_inclusive(' ').collect();
+    for word in words {
+        on_chunk(word);
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    }
+    triage
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

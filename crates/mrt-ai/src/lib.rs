@@ -20,8 +20,16 @@ pub struct AiErrorTriage {
 
 /// Translates a natural language prompt (`# ...` or `? ...`) into an idiomatic command
 /// for the user's active shell (`pwsh`, `powershell`, `cmd`, `bash`, `wsl`, `zsh`, `nu`).
-/// Uses Gemini (`GEMINI_API_KEY`) or OpenAI (`OPENAI_API_KEY`) if present, with a deterministic
-/// shell-aware polyglot translator fallback so MRT works offline out of the box.
+///
+/// Supports ALL major AI providers out of the box (checked in order of configured keys):
+/// 1. Google Gemini (`GEMINI_API_KEY`)
+/// 2. Anthropic Claude (`ANTHROPIC_API_KEY`)
+/// 3. OpenAI (`OPENAI_API_KEY`)
+/// 4. xAI Grok (`XAI_API_KEY`)
+/// 5. DeepSeek (`DEEPSEEK_API_KEY`)
+/// 6. OpenRouter (`OPENROUTER_API_KEY`)
+/// 7. Local Ollama (`OLLAMA_MODEL` / `OLLAMA_HOST`)
+/// 8. Deterministic Offline Polyglot Engine (100% free, zero-key fallback)
 pub async fn translate_nl_to_command(
     query: &str,
     shell: &ShellProfile,
@@ -34,30 +42,104 @@ pub async fn translate_nl_to_command(
         .trim_start_matches('?')
         .trim();
 
+    let system_prompt = build_system_prompt(cleaned_query, shell, cwd, mcp_tool_names);
+
+    // 1. Google Gemini
     if let Ok(api_key) = std::env::var("GEMINI_API_KEY") {
         if !api_key.trim().is_empty() {
-            if let Ok(proposal) =
-                call_gemini_translator(&api_key, cleaned_query, shell, cwd, mcp_tool_names).await
-            {
-                return Ok(proposal);
+            if let Ok(p) = call_gemini_translator(&api_key, cleaned_query, shell, &system_prompt).await {
+                return Ok(p);
             }
         }
     }
 
+    // 2. Anthropic Claude
+    if let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY") {
+        if !api_key.trim().is_empty() {
+            if let Ok(p) = call_anthropic_translator(&api_key, cleaned_query, shell, &system_prompt).await {
+                return Ok(p);
+            }
+        }
+    }
+
+    // 3. OpenAI, xAI Grok, DeepSeek, or OpenRouter (OpenAI-compatible chat completions)
+    let openai_compatible_providers = [
+        (
+            "OPENAI_API_KEY",
+            "https://api.openai.com/v1/chat/completions",
+            "gpt-4o-mini",
+            "OpenAI (gpt-4o-mini)",
+        ),
+        (
+            "XAI_API_KEY",
+            "https://api.x.ai/v1/chat/completions",
+            "grok-2-latest",
+            "xAI Grok",
+        ),
+        (
+            "DEEPSEEK_API_KEY",
+            "https://api.deepseek.com/chat/completions",
+            "deepseek-chat",
+            "DeepSeek",
+        ),
+        (
+            "OPENROUTER_API_KEY",
+            "https://openrouter.ai/api/v1/chat/completions",
+            "openrouter/auto",
+            "OpenRouter",
+        ),
+    ];
+
+    for (env_var, endpoint, model, label) in openai_compatible_providers {
+        if let Ok(api_key) = std::env::var(env_var) {
+            if !api_key.trim().is_empty() {
+                if let Ok(p) = call_openai_compatible_translator(
+                    endpoint,
+                    &api_key,
+                    model,
+                    label,
+                    cleaned_query,
+                    shell,
+                    &system_prompt,
+                )
+                .await
+                {
+                    return Ok(p);
+                }
+            }
+        }
+    }
+
+    // 4. Local Ollama (if OLLAMA_MODEL is set)
+    if let Ok(ollama_model) = std::env::var("OLLAMA_MODEL") {
+        if !ollama_model.trim().is_empty() {
+            let host = std::env::var("OLLAMA_HOST")
+                .unwrap_or_else(|_| "http://localhost:11434".to_string());
+            if let Ok(p) = call_ollama_translator(
+                &host,
+                &ollama_model,
+                cleaned_query,
+                shell,
+                &system_prompt,
+            )
+            .await
+            {
+                return Ok(p);
+            }
+        }
+    }
+
+    // 5. Built-in Offline Polyglot Heuristic Engine
     Ok(heuristic_shell_translator(cleaned_query, shell))
 }
 
-async fn call_gemini_translator(
-    api_key: &str,
+fn build_system_prompt(
     query: &str,
     shell: &ShellProfile,
     cwd: &str,
     mcp_tool_names: &[String],
-) -> Result<AiCommandProposal> {
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
-    );
-    let prompt = format!(
+) -> String {
+    format!(
         "You are the built-in AI assistant inside Modern Rust Terminal (MRT).\n\
          Target OS: {}\n\
          Target Shell: {} ({})\n\
@@ -71,8 +153,18 @@ async fn call_gemini_translator(
         cwd,
         mcp_tool_names,
         query
-    );
+    )
+}
 
+async fn call_gemini_translator(
+    api_key: &str,
+    query: &str,
+    shell: &ShellProfile,
+    prompt: &str,
+) -> Result<AiCommandProposal> {
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    );
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(12))
         .build()?;
@@ -90,7 +182,106 @@ async fn call_gemini_translator(
         .pointer("/candidates/0/content/parts/0/text")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("Invalid Gemini response"))?;
-    let parsed: serde_json::Value = serde_json::from_str(text)?;
+    parse_ai_json_response(text, query, shell, "Gemini 2.5 Flash")
+}
+
+async fn call_anthropic_translator(
+    api_key: &str,
+    query: &str,
+    shell: &ShellProfile,
+    prompt: &str,
+) -> Result<AiCommandProposal> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(12))
+        .build()?;
+    let resp = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .json(&json!({
+            "model": "claude-3-7-sonnet-latest",
+            "max_tokens": 300,
+            "messages": [{ "role": "user", "content": prompt }]
+        }))
+        .send()
+        .await?;
+
+    let val: serde_json::Value = resp.json().await?;
+    let text = val
+        .pointer("/content/0/text")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Invalid Anthropic response"))?;
+    parse_ai_json_response(text, query, shell, "Anthropic Claude")
+}
+
+async fn call_openai_compatible_translator(
+    endpoint: &str,
+    api_key: &str,
+    model: &str,
+    provider_label: &str,
+    query: &str,
+    shell: &ShellProfile,
+    prompt: &str,
+) -> Result<AiCommandProposal> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(12))
+        .build()?;
+    let resp = client
+        .post(endpoint)
+        .bearer_auth(api_key)
+        .json(&json!({
+            "model": model,
+            "messages": [{ "role": "user", "content": prompt }],
+            "response_format": { "type": "json_object" }
+        }))
+        .send()
+        .await?;
+
+    let val: serde_json::Value = resp.json().await?;
+    let text = val
+        .pointer("/choices/0/message/content")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Invalid response from {provider_label}"))?;
+    parse_ai_json_response(text, query, shell, provider_label)
+}
+
+async fn call_ollama_translator(
+    host: &str,
+    model: &str,
+    query: &str,
+    shell: &ShellProfile,
+    prompt: &str,
+) -> Result<AiCommandProposal> {
+    let url = format!("{}/api/generate", host.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()?;
+    let resp = client
+        .post(&url)
+        .json(&json!({
+            "model": model,
+            "prompt": prompt,
+            "format": "json",
+            "stream": false
+        }))
+        .send()
+        .await?;
+
+    let val: serde_json::Value = resp.json().await?;
+    let text = val
+        .get("response")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Invalid Ollama response"))?;
+    parse_ai_json_response(text, query, shell, &format!("Ollama ({model})"))
+}
+
+fn parse_ai_json_response(
+    raw_text: &str,
+    query: &str,
+    shell: &ShellProfile,
+    provider_label: &str,
+) -> Result<AiCommandProposal> {
+    let parsed: serde_json::Value = serde_json::from_str(raw_text.trim())?;
     let cmd = parsed
         .get("command")
         .and_then(|v| v.as_str())
@@ -99,11 +290,11 @@ async fn call_gemini_translator(
     let exp = parsed
         .get("explanation")
         .and_then(|v| v.as_str())
-        .unwrap_or("Generated via Gemini API")
+        .unwrap_or("Generated via AI provider")
         .to_string();
 
     if cmd.is_empty() {
-        anyhow::bail!("Empty command from Gemini");
+        anyhow::bail!("Empty command from {provider_label}");
     }
 
     Ok(AiCommandProposal {
@@ -111,7 +302,7 @@ async fn call_gemini_translator(
         target_shell: shell.name.clone(),
         proposed_command: cmd,
         explanation: exp,
-        provider_used: "Gemini 2.5 Flash".to_string(),
+        provider_used: provider_label.to_string(),
     })
 }
 
@@ -211,7 +402,6 @@ pub fn heuristic_shell_translator(query: &str, shell: &ShellProfile) -> AiComman
             "Runs MRT's built-in HTTP API Inspector against a sample JSON endpoint.".to_string(),
         )
     } else {
-        // Default echo/search helper tailored to active shell
         if is_ps {
             (
                 format!("Get-ChildItem -Recurse -Filter \"*{}*\" -ErrorAction SilentlyContinue", query.split_whitespace().last().unwrap_or("*")),
@@ -265,12 +455,10 @@ pub fn diagnose_command_error(
         let var_part = command.trim().strip_prefix("export ").unwrap_or("VAR=value");
         let fix = if is_cmd {
             format!("set {var_part}")
+        } else if let Some((k, v)) = var_part.split_once('=') {
+            format!("$env:{} = \"{}\"", k.trim(), v.trim())
         } else {
-            if let Some((k, v)) = var_part.split_once('=') {
-                format!("$env:{} = \"{}\"", k.trim(), v.trim())
-            } else {
-                format!("$env:{var_part}")
-            }
+            format!("$env:{var_part}")
         };
         return AiErrorTriage {
             explanation: format!("`export` is Bash syntax; `{}` uses a different syntax for environment variables.", shell.name),

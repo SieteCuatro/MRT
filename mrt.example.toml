@@ -1,8 +1,9 @@
 # Modern Rust Terminal (MRT) Configuration Example
+# 100% Free for All — No Restrictions.
 # Copy to ~/.config/mrt/config.toml or .mrt.toml in your workspace
 
 [terminal]
-default_shell = "auto" # "auto", "pwsh", "powershell", "cmd", "bash", "wsl", "zsh", "fish", "nu"
+default_shell = "auto" # "auto", "pwsh", "powershell", "cmd", "bash", "git-bash", "wsl", "zsh", "fish", "nu"
 font_size = 14.0
 scrollback_blocks = 500
 auto_detect_structured_output = true
@@ -17,9 +18,15 @@ blocked_patterns = [
 ]
 
 [ai]
-provider = "gemini" # "gemini", "openai", "anthropic", "ollama", or "offline"
-model = "gemini-2.5-flash"
-# Set GEMINI_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY in your environment
+# MRT supports ALL AI providers! Set any of these environment variables:
+# - GEMINI_API_KEY       (Google Gemini)
+# - ANTHROPIC_API_KEY    (Anthropic Claude)
+# - OPENAI_API_KEY       (OpenAI)
+# - XAI_API_KEY          (xAI Grok)
+# - DEEPSEEK_API_KEY     (DeepSeek)
+# - OPENROUTER_API_KEY   (OpenRouter — access 200+ models)
+# - OLLAMA_MODEL         (Local free models via Ollama, e.g., "qwen2.5-coder" or "llama3.2")
+provider = "auto"
 ollama_endpoint = "http://localhost:11434"
 
 [[mcp.servers]]

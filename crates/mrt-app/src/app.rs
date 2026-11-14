@@ -32,35 +32,13 @@ pub struct TerminalTab {
 }
 
 impl TerminalTab {
-    pub fn new(title: String, shell_idx: usize, shell: &ShellProfile, cwd: PathBuf) -> Self {
-        let welcome_md = format!(
-            "# Welcome to Modern Rust Terminal (MRT)\n\
-             - **Active Shell**: `{}` (`{}`)\n\
-             - **Multi-Shell Support**: Switch between **PowerShell (`pwsh`/`powershell`)**, **CMD / Batch (`cmd.exe`)**, **Bash / Git Bash**, **WSL**, or **Zsh** anytime using the shell selector in the top bar.\n\
-             - **Smart Input Modes**:\n\
-             * Standard commands run in your selected shell and auto-format **JSON**, **CSV Tables**, and **Markdown**.\n\
-             * Prefix with `# ` or `? ` for **AI Natural Language to Command** (e.g. `# list all files` or `# show running processes`).\n\
-             * Type `:ports` to inspect local listening TCP/UDP ports in an interactive table.\n\
-             * Type `:http GET https://httpbin.org/json` to inspect live REST APIs inline.\n\
-             * Type `:web https://example.com` to fetch and read web pages as clean Markdown.",
-            shell.name, shell.program
-        );
-        let welcome_block = CommandBlock::new_structured(
-            "mrt --welcome",
-            &shell.name,
-            cwd.display().to_string(),
-            &welcome_md,
-            StructuredOutput::Markdown(welcome_md.clone()),
-            0,
-            1,
-        );
-
+    pub fn new(title: String, shell_idx: usize, cwd: PathBuf) -> Self {
         Self {
             id: Uuid::new_v4(),
             title,
             active_shell_idx: shell_idx,
             cwd,
-            blocks: vec![welcome_block],
+            blocks: Vec::new(),
             input_line: String::new(),
             ai_proposal: None,
             command_history: Vec::new(),
@@ -119,7 +97,6 @@ impl MrtGuiApp {
         let first_tab = TerminalTab::new(
             format!("Tab 1 ({})", first_shell.kind.short_label()),
             0,
-            first_shell,
             initial_cwd,
         );
 
@@ -517,7 +494,11 @@ impl MrtGuiApp {
 
 impl eframe::App for MrtGuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if !self.focused_on_start {
+        let first_frame = !self.focused_on_start;
+        let mut focus_prompt = first_frame;
+        let palette_was_open = self.show_command_palette;
+        let previous_tab = self.tabs[self.active_tab].id;
+        if first_frame {
             self.focused_on_start = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -540,10 +521,12 @@ impl eframe::App for MrtGuiApp {
         }
 
         // Top Navigation Bar: Tabs, Shell Switcher, and Side Panel Toggles
-        egui::TopBottomPanel::top("mrt_top_bar").show(ctx, |ui| {
+        egui::TopBottomPanel::top("mrt_top_bar")
+            .frame(egui::Frame::none().fill(Color32::from_rgb(27, 33, 40)).inner_margin(egui::Margin::symmetric(14.0, 9.0)))
+            .show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(
-                    RichText::new("⚡ MRT")
+                    RichText::new("MRT")
                         .size(16.0)
                         .strong()
                         .color(Color32::from_rgb(120, 200, 255)),
@@ -583,7 +566,7 @@ impl eframe::App for MrtGuiApp {
                 }
 
                 // New Tab dropdown per discovered shell
-                egui::menu::menu_button(ui, "➕ New Shell Tab", |ui| {
+                egui::menu::menu_button(ui, "+ New tab", |ui| {
                     for (s_idx, shell) in self.shells.iter().enumerate() {
                         if ui
                             .button(format!("{} ({})", shell.name, shell.program))
@@ -594,7 +577,6 @@ impl eframe::App for MrtGuiApp {
                             self.tabs.push(TerminalTab::new(
                                 format!("Tab {n} ({})", shell.kind.short_label()),
                                 s_idx,
-                                shell,
                                 cwd,
                             ));
                             self.active_tab = self.tabs.len() - 1;
@@ -613,7 +595,7 @@ impl eframe::App for MrtGuiApp {
                         .map(|s| s.name.clone())
                         .unwrap_or_else(|| "Shell".into());
 
-                    ui.label(RichText::new("Active Shell:").size(12.0).color(Color32::GRAY));
+                    ui.label(RichText::new("Shell").size(12.0).color(Color32::GRAY));
                     egui::ComboBox::from_id_salt("active_shell_selector")
                         .selected_text(RichText::new(current_shell_name).strong())
                         .show_ui(ui, |ui| {
@@ -637,9 +619,9 @@ impl eframe::App for MrtGuiApp {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.toggle_value(&mut self.side_state.show_mcp_panel, "🔌 MCP Hub");
-                    ui.toggle_value(&mut self.side_state.show_internet_panel, "🌐 Internet Studio");
-                    if ui.button("⌘ Palette (Ctrl+K)").clicked() {
+                    ui.toggle_value(&mut self.side_state.show_mcp_panel, "MCP Hub");
+                    ui.toggle_value(&mut self.side_state.show_internet_panel, "Internet Studio");
+                    if ui.button("Palette  Ctrl+K").clicked() {
                         self.show_command_palette = !self.show_command_palette;
                     }
                 });
@@ -674,8 +656,12 @@ impl eframe::App for MrtGuiApp {
             self.handle_side_panel_event(ev);
         }
 
+        focus_prompt |= previous_tab != self.tabs[self.active_tab].id || (palette_was_open && !self.show_command_palette);
+
         // Bottom Smart Prompt Bar
-        egui::TopBottomPanel::bottom("mrt_bottom_prompt").show(ctx, |ui| {
+        egui::TopBottomPanel::bottom("mrt_bottom_prompt")
+            .frame(egui::Frame::none().fill(Color32::from_rgb(29, 37, 45)).inner_margin(egui::Margin::symmetric(18.0, 12.0)))
+            .show(ctx, |ui| {
             // Optional AI Command Proposal Banner
             let mut run_ai_cmd = None;
             let mut dismiss_ai = false;
@@ -724,54 +710,29 @@ impl eframe::App for MrtGuiApp {
                 self.submit_input(Some(c), false);
             }
 
-            // Quick Action Chips
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new("Quick Actions:")
-                        .size(11.0)
-                        .color(Color32::GRAY),
-                );
-                for (label, sample_cmd) in [
-                    ("🔍 :ports", ":ports"),
-                    ("🌐 :http JSON", ":http GET https://httpbin.org/json"),
-                    ("📖 :web example.com", ":web https://example.com"),
-                    ("🤖 # system info", "# show system info"),
-                    ("🤖 # list files", "# list all files in directory"),
-                    ("🤖 # top processes", "# show running processes"),
-                    ("🛡 Test Safety Gate", "rm -rf ./important_production_data"),
-                ] {
-                    if ui.small_button(label).clicked() {
-                        self.submit_input(Some(sample_cmd.to_string()), false);
-                    }
-                }
-            });
-
-            ui.add_space(3.0);
-
-            // Prompt Line
             let mut should_submit = false;
             if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-                let shell_short = self
-                    .shells
-                    .get(tab.active_shell_idx)
-                    .map(|s| s.kind.short_label())
-                    .unwrap_or("shell");
-
+                ui.add(egui::Label::new(RichText::new(tab.cwd.display().to_string())
+                    .monospace().color(Color32::from_rgb(175, 189, 202))).truncate())
+                    .on_hover_text(tab.cwd.display().to_string());
+                ui.add_space(5.0);
                 ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(format!("[{shell_short}] {} ❯", tab.cwd.display()))
-                            .monospace()
-                            .strong()
-                            .color(Color32::from_rgb(115, 220, 165)),
-                    );
-
+                    ui.label(RichText::new("❯").size(21.0).color(Color32::from_rgb(132, 224, 188)));
                     let response = ui.add(
                         egui::TextEdit::singleline(&mut tab.input_line)
-                            .font(egui::TextStyle::Monospace)
-                            .hint_text("Type a shell command, '# <AI request>', ':http <url>', ':web <url>', or ':ports'...")
-                            .desired_width(ui.available_width() - 90.0),
+                            .id(egui::Id::new(("command_input", tab.id)))
+                            .font(egui::FontId::monospace(18.0))
+                            .margin(egui::Margin::symmetric(10.0, 8.0))
+                            .hint_text(if tab.blocks.is_empty() {
+                                "Type a command. Press Ctrl+K for tools."
+                            } else {
+                                "Type a command"
+                            })
+                            .desired_width((ui.available_width() - 84.0).max(32.0)),
                     );
-
+                    if focus_prompt && !self.show_command_palette && self.pending_safety.is_none() {
+                        response.request_focus();
+                    }
                     if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                         should_submit = true;
                         response.request_focus();
@@ -802,7 +763,8 @@ impl eframe::App for MrtGuiApp {
                         }
                     }
 
-                    if ui.button("▶ Run").clicked() {
+                    if ui.add_enabled(!tab.input_line.trim().is_empty(), egui::Button::new("Run").min_size(egui::vec2(52.0, 36.0))).clicked() {
+                        response.request_focus();
                         should_submit = true;
                     }
                 });
@@ -814,7 +776,7 @@ impl eframe::App for MrtGuiApp {
         });
 
         // Central Terminal Block Stream
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::none().fill(Color32::from_rgb(19, 24, 30)).inner_margin(egui::Margin::same(14.0))).show(ctx, |ui| {
             let mut pending_block_action = None;
 
             if let Some(tab) = self.tabs.get_mut(self.active_tab) {
@@ -937,19 +899,20 @@ impl eframe::App for MrtGuiApp {
             let mut cmd_to_run = None;
             let mut switch_shell_idx = None;
 
-            egui::Window::new("⌘ Universal Command Palette")
+            egui::Window::new("Command palette")
                 .collapsible(false)
                 .resizable(false)
                 .default_width(480.0)
                 .anchor(egui::Align2::CENTER_TOP, [0.0, 60.0])
                 .show(ctx, |ui| {
-                    ui.add(
+                    let search = ui.add(
                         egui::TextEdit::singleline(&mut self.palette_query)
-                            .hint_text("Search shells, built-in tools, MCP tools...")
+                            .hint_text("Search commands and shells")
                             .desired_width(f32::INFINITY),
                     );
                     ui.separator();
 
+                    if !palette_was_open { search.request_focus(); }
                     let q = self.palette_query.trim().to_lowercase();
                     egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
                         ui.label(RichText::new("Switch Active Shell Profile").size(11.5).color(Color32::GRAY));
@@ -970,9 +933,13 @@ impl eframe::App for MrtGuiApp {
                             ("🌐 HTTP GET Sample JSON API", ":http GET https://httpbin.org/json"),
                             ("📖 Fetch Rust Homepage as Markdown", ":web https://www.rust-lang.org"),
                             ("🤖 AI: Show System Info in Active Shell", "# show system info"),
-                            ("🧹 Clear Terminal Blocks", ":clear"),
+                            ("Read example.com", ":web https://example.com"),
+                            ("AI: List files", "# list all files in directory"),
+                            ("AI: Show running processes", "# show running processes"),
+                            ("Test Safety Gate", "rm -rf ./important_production_data"),
+                            ("Clear terminal blocks", ":clear"),
                         ] {
-                            if q.is_empty() || title.to_lowercase().contains(&q) {
+                            if q.is_empty() || title.to_lowercase().contains(&q) || cmd.to_lowercase().contains(&q) {
                                 if ui.button(title).clicked() {
                                     cmd_to_run = Some(cmd.to_string());
                                     close_palette = true;
@@ -1002,6 +969,9 @@ impl eframe::App for MrtGuiApp {
             }
             if close_palette || ctx.input(|i| i.key_pressed(Key::Escape)) {
                 self.show_command_palette = false;
+                if self.pending_safety.is_none() {
+                    ctx.memory_mut(|m| m.request_focus(egui::Id::new(("command_input", self.tabs[self.active_tab].id))));
+                }
             }
         }
     }
@@ -1033,7 +1003,6 @@ mod tests {
         app.tabs.push(TerminalTab::new(
             "Second".into(),
             0,
-            &app.shells[0],
             second_dir,
         ));
         app.active_tab = 1;

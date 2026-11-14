@@ -40,7 +40,7 @@ pub struct SidePanelState {
 impl Default for SidePanelState {
     fn default() -> Self {
         Self {
-            show_mcp_panel: true,
+            show_mcp_panel: false,
             show_internet_panel: false,
             new_mcp_name: "custom-mcp".to_string(),
             new_mcp_cmd: "mrt".to_string(),

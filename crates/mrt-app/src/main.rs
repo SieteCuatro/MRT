@@ -46,8 +46,9 @@ fn main() -> Result<()> {
         .init();
 
     let native_options = eframe::NativeOptions {
+        centered: true,
         viewport: egui::ViewportBuilder::default()
-            .with_title("Modern Rust Terminal (MRT) — Polyglot Shell • Blocks • Internet Tools • MCP")
+            .with_title("Modern Rust Terminal")
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([860.0, 520.0])
             .with_visible(true)

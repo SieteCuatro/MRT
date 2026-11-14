@@ -268,7 +268,7 @@ pub async fn execute_command_in_shell(
     let trimmed = command.trim();
 
     // Handle pure directory change commands (`cd <path>` or `Set-Location <path>`)
-    if let Some(target_dir) = parse_cd_command(trimmed) {
+    if let Some(target_dir) = parse_cd_command(trimmed, &shell.kind) {
         let resolved = if target_dir == "~" {
             dirs_home().unwrap_or_else(|| cwd.to_path_buf())
         } else {
@@ -347,7 +347,10 @@ pub async fn execute_command_in_shell(
     })
 }
 
-fn parse_cd_command(cmd: &str) -> Option<String> {
+fn parse_cd_command(cmd: &str, kind: &ShellKind) -> Option<String> {
+    if *kind == ShellKind::CmdBatch && cmd.eq_ignore_ascii_case("cd") {
+        return None;
+    }
     if cmd == "cd" {
         return Some("~".to_string());
     }
@@ -443,5 +446,18 @@ impl InteractivePty {
         } else {
             String::new()
         }
+    }
+}
+
+#[cfg(test)]
+mod directory_tests {
+    use super::*;
+
+    #[test]
+    fn bare_cd_preserves_cmd_semantics() {
+        assert_eq!(parse_cd_command("cd", &ShellKind::CmdBatch), None);
+        assert_eq!(parse_cd_command("CD", &ShellKind::CmdBatch), None);
+        assert_eq!(parse_cd_command("cd", &ShellKind::Bash), Some("~".into()));
+        assert_eq!(parse_cd_command("cd /d project", &ShellKind::CmdBatch), Some("project".into()));
     }
 }

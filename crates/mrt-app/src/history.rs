@@ -1,7 +1,25 @@
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use mrt_core::CommandBlock;
 use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
 use std::path::Path;
+use uuid::Uuid;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunbookStep {
+    pub command: String,
+    pub shell_name: String,
+    pub cwd: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Runbook {
+    pub id: Uuid,
+    pub name: String,
+    pub steps: Vec<RunbookStep>,
+    pub updated_at: DateTime<Utc>,
+}
 
 pub struct HistoryStore(Connection);
 
@@ -19,6 +37,12 @@ impl HistoryStore {
                  id TEXT NOT NULL UNIQUE,
                  command TEXT NOT NULL,
                  output TEXT NOT NULL,
+                 payload TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS runbooks (
+                 id TEXT PRIMARY KEY,
+                 name TEXT NOT NULL,
+                 updated_at TEXT NOT NULL,
                  payload TEXT NOT NULL
              );",
         )?;
@@ -81,6 +105,37 @@ impl HistoryStore {
         payloads
             .map(|payload| Ok(serde_json::from_str(&payload?)?))
             .collect()
+    }
+
+    pub fn save_runbook(&self, runbook: &Runbook) -> Result<()> {
+        self.0.execute(
+            "INSERT INTO runbooks (id, name, updated_at, payload) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET name=excluded.name,
+                 updated_at=excluded.updated_at, payload=excluded.payload",
+            params![
+                runbook.id.to_string(),
+                runbook.name,
+                runbook.updated_at.to_rfc3339(),
+                serde_json::to_string(runbook)?
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_runbooks(&self) -> Result<Vec<Runbook>> {
+        let mut statement = self
+            .0
+            .prepare("SELECT payload FROM runbooks ORDER BY updated_at DESC, name ASC")?;
+        let payloads = statement.query_map([], |row| row.get::<_, String>(0))?;
+        payloads
+            .map(|payload| Ok(serde_json::from_str(&payload?)?))
+            .collect()
+    }
+
+    pub fn delete_runbook(&self, id: Uuid) -> Result<()> {
+        self.0
+            .execute("DELETE FROM runbooks WHERE id = ?1", [id.to_string()])?;
+        Ok(())
     }
 }
 
@@ -159,16 +214,78 @@ mod tests {
         }
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
+
+    #[test]
+    fn runbooks_persist_update_and_delete_offline() {
+        let path = std::env::temp_dir()
+            .join(format!("mrt-runbooks-{}", Uuid::new_v4()))
+            .join("history.sqlite");
+        let runbook_id = Uuid::new_v4();
+        let initial = Runbook {
+            id: runbook_id,
+            name: "Check this project".into(),
+            steps: vec![
+                RunbookStep {
+                    command: "cargo fmt --check".into(),
+                    shell_name: "pwsh".into(),
+                    cwd: ".".into(),
+                },
+                RunbookStep {
+                    command: "cargo test".into(),
+                    shell_name: "pwsh".into(),
+                    cwd: ".".into(),
+                },
+            ],
+            updated_at: Utc::now(),
+        };
+        {
+            let store = HistoryStore::open(&path).unwrap();
+            store.save_runbook(&initial).unwrap();
+        }
+        {
+            let store = HistoryStore::open(&path).unwrap();
+            let loaded = store.list_runbooks().unwrap();
+            assert_eq!(loaded, vec![initial.clone()]);
+
+            let mut updated = initial;
+            updated.name = "Check & Clippy".into();
+            updated.steps.insert(
+                1,
+                RunbookStep {
+                    command: "cargo clippy".into(),
+                    shell_name: "pwsh".into(),
+                    cwd: ".".into(),
+                },
+            );
+            updated.updated_at = Utc::now();
+            store.save_runbook(&updated).unwrap();
+
+            let loaded = store.list_runbooks().unwrap();
+            assert_eq!(loaded.len(), 1);
+            assert_eq!(loaded[0].name, "Check & Clippy");
+            assert_eq!(loaded[0].steps.len(), 3);
+
+            store.delete_runbook(runbook_id).unwrap();
+            assert!(store.list_runbooks().unwrap().is_empty());
+        }
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
 }
 
 pub enum HistoryRequest {
     Save(CommandBlock),
     Search(String),
+    SaveRunbook(Runbook),
+    ListRunbooks,
+    DeleteRunbook(Uuid),
 }
 
 pub enum HistoryResponse {
     Saved(Result<(), String>),
     Loaded(String, Result<Vec<CommandBlock>, String>),
+    RunbookSaved(Result<(), String>),
+    RunbooksLoaded(Result<Vec<Runbook>, String>),
+    RunbookDeleted(Result<(), String>),
 }
 
 pub struct HistoryWorker {
@@ -196,6 +313,22 @@ impl HistoryWorker {
                         });
                         HistoryResponse::Loaded(query, result)
                     }
+                    HistoryRequest::SaveRunbook(runbook) => HistoryResponse::RunbookSaved(
+                        store.as_ref().map_err(Clone::clone).and_then(|store| {
+                            store.save_runbook(&runbook).map_err(|error| error.to_string())
+                        }),
+                    ),
+                    HistoryRequest::ListRunbooks => HistoryResponse::RunbooksLoaded(
+                        store
+                            .as_ref()
+                            .map_err(Clone::clone)
+                            .and_then(|store| store.list_runbooks().map_err(|error| error.to_string())),
+                    ),
+                    HistoryRequest::DeleteRunbook(id) => HistoryResponse::RunbookDeleted(
+                        store.as_ref().map_err(Clone::clone).and_then(|store| {
+                            store.delete_runbook(id).map_err(|error| error.to_string())
+                        }),
+                    ),
                 };
                 if results.send(response).is_err() {
                     break;

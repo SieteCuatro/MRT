@@ -1,5 +1,8 @@
 use crate::theme::{apply_mrt_theme, Palette};
 use crate::widgets::block_view::{render_command_block, BlockAction};
+use crate::widgets::runbooks::{
+    render_runbooks_panel, ReplayStatusView, RunbookAction, RunbooksUiState,
+};
 use crate::widgets::side_panels::{
     render_internet_side_panel, render_mcp_side_panel, SidePanelEvent, SidePanelState,
 };
@@ -78,6 +81,14 @@ pub struct PendingSafetyApproval {
     pub cwd: PathBuf,
 }
 
+pub struct ActiveRunbookReplay {
+    pub runbook_name: String,
+    pub tab_id: Uuid,
+    pub steps: Vec<crate::history::RunbookStep>,
+    pub next_step_idx: usize,
+    pub waiting_block_id: Option<Uuid>,
+}
+
 pub struct MrtGuiApp {
     pub runtime: tokio::runtime::Runtime,
     pub shells: Vec<ShellProfile>,
@@ -100,6 +111,8 @@ pub struct MrtGuiApp {
     show_history: bool,
     history_query: String,
     history_results: Vec<CommandBlock>,
+    runbooks_state: RunbooksUiState,
+    active_replay: Option<ActiveRunbookReplay>,
     running_output: HashMap<Uuid, (Uuid, std::sync::Arc<std::sync::Mutex<String>>)>,
     mosaic: bool,
     mosaic_columns: usize,
@@ -183,6 +196,8 @@ impl MrtGuiApp {
             show_history: false,
             history_query: String::new(),
             history_results: Vec::new(),
+            runbooks_state: RunbooksUiState::default(),
+            active_replay: None,
             running_output: HashMap::new(),
             mosaic: false,
             mosaic_columns: 2,
@@ -257,6 +272,13 @@ impl MrtGuiApp {
             .is_some_and(|pending| pending.tab_id == id)
         {
             self.pending_safety = None;
+        }
+        if self
+            .active_replay
+            .as_ref()
+            .is_some_and(|replay| replay.tab_id == id)
+        {
+            self.stop_runbook_replay(Some("Runbook stopped because its target tab was closed.".into()));
         }
     }
 
@@ -463,8 +485,17 @@ impl MrtGuiApp {
         }
     }
 
+    fn refresh_runbooks(&mut self) {
+        if let Some(worker) = &self.history {
+            if worker.send(crate::history::HistoryRequest::ListRunbooks) {
+                self.history_pending += 1;
+            }
+        }
+    }
+
     fn process_history_events(&mut self) {
         let mut refresh = false;
+        let mut refresh_runbooks = false;
         if let Some(worker) = &self.history {
             while let Ok(response) = worker.responses.try_recv() {
                 self.history_pending = self.history_pending.saturating_sub(1);
@@ -479,10 +510,27 @@ impl MrtGuiApp {
                             }
                         }
                     }
+                    crate::history::HistoryResponse::RunbookSaved(Ok(()))
+                    | crate::history::HistoryResponse::RunbookDeleted(Ok(())) => {
+                        refresh_runbooks = true;
+                    }
+                    crate::history::HistoryResponse::RunbookSaved(Err(error))
+                    | crate::history::HistoryResponse::RunbookDeleted(Err(error)) => {
+                        self.history_error = Some(error);
+                    }
+                    crate::history::HistoryResponse::RunbooksLoaded(result) => match result {
+                        Ok(runbooks) => self.runbooks_state.runbooks = runbooks,
+                        Err(error) => self.history_error = Some(error),
+                    },
                 }
             }
         }
-        if refresh { self.refresh_history(); }
+        if refresh {
+            self.refresh_history();
+        }
+        if refresh_runbooks {
+            self.refresh_runbooks();
+        }
     }
 
     pub fn sync_mcp_from_gui(&self) {
@@ -643,13 +691,14 @@ impl MrtGuiApp {
                         }
                         if let Some(running) = tab.blocks.iter_mut().find(|running| running.id == block.id) {
                             let pinned = running.pinned;
-                            *running = block;
+                            *running = block.clone();
                             running.pinned = pinned;
                         } else {
-                            tab.blocks.push(block);
+                            tab.blocks.push(block.clone());
                         }
                     }
                     self.sync_mcp_from_gui();
+                    self.on_runbook_block_completed(&block);
                 }
                 AsyncWorkerEvent::AiCommandReady { tab_id, proposal } => {
                     if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
@@ -764,12 +813,135 @@ impl MrtGuiApp {
     fn approve_pending_command(&mut self) {
         if let Some(pending) = self.pending_safety.take() {
             if self.tabs.iter().any(|tab| tab.id == pending.tab_id) {
-                self.spawn_shell_command(pending.tab_id, pending.shell, pending.cwd, pending.assessment.command);
+                let block_id = self.spawn_shell_command(
+                    pending.tab_id,
+                    pending.shell,
+                    pending.cwd,
+                    pending.assessment.command,
+                );
+                if let Some(replay) = self.active_replay.as_mut() {
+                    if replay.tab_id == pending.tab_id && replay.waiting_block_id.is_none() {
+                        replay.waiting_block_id = Some(block_id);
+                    }
+                }
             }
         }
     }
 
-    fn spawn_shell_command(&mut self, tab_id: Uuid, shell: ShellProfile, cwd: PathBuf, raw_input: String) {
+    fn start_runbook_replay(&mut self, runbook: crate::history::Runbook) {
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return;
+        };
+        if runbook.steps.is_empty() {
+            return;
+        }
+        self.runbooks_state.replay_notice = None;
+        self.active_replay = Some(ActiveRunbookReplay {
+            runbook_name: runbook.name,
+            tab_id: tab.id,
+            steps: runbook.steps,
+            next_step_idx: 0,
+            waiting_block_id: None,
+        });
+        self.advance_runbook_replay();
+    }
+
+    fn stop_runbook_replay(&mut self, notice: Option<String>) {
+        self.active_replay = None;
+        if let Some(msg) = notice {
+            self.runbooks_state.replay_notice = Some(msg);
+        }
+    }
+
+    fn on_runbook_block_completed(&mut self, block: &CommandBlock) {
+        let Some(replay) = self.active_replay.as_mut() else {
+            return;
+        };
+        if replay.waiting_block_id != Some(block.id) {
+            return;
+        }
+        replay.waiting_block_id = None;
+        let step_num = replay.next_step_idx;
+        let total_steps = replay.steps.len();
+        let runbook_name = replay.runbook_name.clone();
+        if block.exit_code == Some(0) {
+            self.advance_runbook_replay();
+        } else {
+            let code_label = block
+                .exit_code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "unknown".into());
+            self.stop_runbook_replay(Some(format!(
+                "Runbook '{runbook_name}' stopped at step {step_num}/{total_steps}: '{}' exited with code {code_label}.",
+                block.command
+            )));
+        }
+    }
+
+    fn advance_runbook_replay(&mut self) {
+        if self.pending_safety.is_some() {
+            return;
+        }
+        let Some(replay) = self.active_replay.as_mut() else {
+            return;
+        };
+        if replay.waiting_block_id.is_some() {
+            return;
+        }
+        let tab_id = replay.tab_id;
+        let Some(tab_cwd) = self
+            .tabs
+            .iter()
+            .find(|t| t.id == tab_id)
+            .map(|t| t.cwd.clone())
+        else {
+            self.stop_runbook_replay(Some(
+                "Runbook stopped because its target tab was closed.".into(),
+            ));
+            return;
+        };
+        if replay.next_step_idx >= replay.steps.len() {
+            let name = replay.runbook_name.clone();
+            let total = replay.steps.len();
+            self.stop_runbook_replay(Some(format!(
+                "Runbook '{name}' completed ({total}/{total} steps)."
+            )));
+            return;
+        }
+
+        let step = replay.steps[replay.next_step_idx].clone();
+        replay.next_step_idx += 1;
+
+        let shell = self
+            .shells
+            .iter()
+            .find(|s| s.kind.short_label() == step.shell_name)
+            .cloned()
+            .unwrap_or_else(|| self.shells[0].clone());
+        let cwd = if step.cwd.trim().is_empty() {
+            tab_cwd
+        } else {
+            PathBuf::from(&step.cwd)
+        };
+
+        let assessment = assess_command(&step.command);
+        if assessment.requires_approval || assessment.risk == RiskLevel::Critical {
+            self.pending_safety = Some(PendingSafetyApproval {
+                tab_id,
+                assessment,
+                shell,
+                cwd,
+            });
+            return;
+        }
+
+        let block_id = self.spawn_shell_command(tab_id, shell, cwd, step.command);
+        if let Some(replay) = self.active_replay.as_mut() {
+            replay.waiting_block_id = Some(block_id);
+        }
+    }
+
+    fn spawn_shell_command(&mut self, tab_id: Uuid, shell: ShellProfile, cwd: PathBuf, raw_input: String) -> Uuid {
         let mut running = CommandBlock::new_completed(&raw_input, shell.kind.short_label(), cwd.display().to_string(), "", 0, 0);
         running.exit_code = None;
         let block_id = running.id;
@@ -822,6 +994,7 @@ impl MrtGuiApp {
                 }
             }
         });
+        block_id
     }
 
     fn spawn_port_scanner(&mut self, tab_id: Uuid, cwd: PathBuf) {
@@ -1214,6 +1387,14 @@ impl eframe::App for MrtGuiApp {
                     if ui.toggle_value(&mut self.show_history, "History").changed() && self.show_history {
                         self.refresh_history();
                     }
+                    if ui
+                        .toggle_value(&mut self.runbooks_state.show_panel, "Runbooks")
+                        .changed()
+                        && self.runbooks_state.show_panel
+                    {
+                        self.refresh_runbooks();
+                        self.refresh_history();
+                    }
                 });
             });
         });
@@ -1224,6 +1405,7 @@ impl eframe::App for MrtGuiApp {
 
         if self.show_history {
             let mut restore = None;
+            let mut add_to_runbook: Option<crate::history::RunbookStep> = None;
             egui::SidePanel::right("history_panel").default_width(360.0).resizable(true).show(ctx, |ui| {
                 ui.heading("Command history");
                 if ui.add(egui::TextEdit::singleline(&mut self.history_query).hint_text("Search commands and output")).on_hover_text("Search commands and output").changed() {
@@ -1242,11 +1424,37 @@ impl eframe::App for MrtGuiApp {
                         ui.group(|ui| {
                             ui.monospace(&block.command);
                             ui.small(format!("{} · {} · {}", block.timestamp.format("%Y-%m-%d %H:%M"), block.shell_name, block.cwd));
-                            if ui.button("View output").clicked() { restore = Some(block.clone()); }
+                            ui.horizontal(|ui| {
+                                if ui.button("View output").clicked() {
+                                    restore = Some(block.clone());
+                                }
+                                if ui.button("+ Runbook").clicked() {
+                                    add_to_runbook = Some(crate::history::RunbookStep {
+                                        command: block.command.clone(),
+                                        shell_name: block.shell_name.clone(),
+                                        cwd: block.cwd.clone(),
+                                    });
+                                }
+                            });
                         });
                     }
                 });
             });
+            if let Some(step) = add_to_runbook {
+                self.runbooks_state.show_panel = true;
+                self.refresh_runbooks();
+                if let Some(draft) = self.runbooks_state.editing.as_mut() {
+                    draft.steps.push(step);
+                } else {
+                    self.runbooks_state.validation_error = None;
+                    self.runbooks_state.editing = Some(crate::history::Runbook {
+                        id: Uuid::new_v4(),
+                        name: String::new(),
+                        steps: vec![step],
+                        updated_at: chrono::Utc::now(),
+                    });
+                }
+            }
             if let Some(block) = restore {
                 let shell_idx = self.shells.iter().position(|shell| shell.kind.short_label() == block.shell_name).unwrap_or(0);
                 let mut tab = TerminalTab::new("History".into(), shell_idx, PathBuf::from(&block.cwd));
@@ -1254,6 +1462,71 @@ impl eframe::App for MrtGuiApp {
                 tab.blocks.push(block);
                 self.tabs.push(tab);
                 self.active_tab = self.tabs.len() - 1;
+            }
+        }
+
+        if self.runbooks_state.show_panel {
+            let available_shells: Vec<String> = self
+                .shells
+                .iter()
+                .map(|s| s.kind.short_label().to_string())
+                .collect();
+            let active_tab = self.tabs.get(self.active_tab);
+            let default_shell = active_tab
+                .and_then(|t| self.shells.get(t.active_shell_idx))
+                .map(|s| s.kind.short_label().to_string())
+                .unwrap_or_else(|| {
+                    available_shells
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "sh".into())
+                });
+            let default_cwd = active_tab
+                .map(|t| t.cwd.display().to_string())
+                .unwrap_or_else(|| ".".into());
+            let mut runbook_action = None;
+            egui::SidePanel::right("runbooks_panel")
+                .default_width(380.0)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    let replay_status = self.active_replay.as_ref().map(|r| ReplayStatusView {
+                        runbook_name: &r.runbook_name,
+                        current_step: r.next_step_idx.min(r.steps.len()),
+                        total_steps: r.steps.len(),
+                    });
+                    runbook_action = render_runbooks_panel(
+                        ui,
+                        &mut self.runbooks_state,
+                        replay_status,
+                        &mut self.history_query,
+                        &self.history_results,
+                        &available_shells,
+                        &default_shell,
+                        &default_cwd,
+                    );
+                });
+            if let Some(action) = runbook_action {
+                match action {
+                    RunbookAction::StartReplay(runbook) => self.start_runbook_replay(runbook),
+                    RunbookAction::StopReplay => {
+                        self.stop_runbook_replay(Some("Runbook replay stopped by user.".into()));
+                    }
+                    RunbookAction::SaveRunbook(runbook) => {
+                        if let Some(worker) = &self.history {
+                            if worker.send(crate::history::HistoryRequest::SaveRunbook(runbook)) {
+                                self.history_pending += 1;
+                            }
+                        }
+                    }
+                    RunbookAction::DeleteRunbook(id) => {
+                        if let Some(worker) = &self.history {
+                            if worker.send(crate::history::HistoryRequest::DeleteRunbook(id)) {
+                                self.history_pending += 1;
+                            }
+                        }
+                    }
+                    RunbookAction::SearchHistory => self.refresh_history(),
+                }
             }
         }
 
@@ -1573,7 +1846,18 @@ impl eframe::App for MrtGuiApp {
             if approve {
                 self.approve_pending_command();
             } else if cancel {
+                let cancelled_tab = self.pending_safety.as_ref().map(|p| p.tab_id);
                 self.pending_safety = None;
+                if let Some(replay) = &self.active_replay {
+                    if Some(replay.tab_id) == cancelled_tab && replay.waiting_block_id.is_none() {
+                        let name = replay.runbook_name.clone();
+                        let step = replay.next_step_idx;
+                        let total = replay.steps.len();
+                        self.stop_runbook_replay(Some(format!(
+                            "Runbook '{name}' stopped at step {step}/{total}: cancelled at Safety Gate."
+                        )));
+                    }
+                }
             }
         }
 
@@ -1975,5 +2259,87 @@ mod tests {
         assert_eq!(app.mosaic_columns, 3);
         assert!(app.show_explorer);
         assert_eq!(app.tabs[app.active_tab].input_line, "echo drafted_by_agent");
+    }
+
+    #[test]
+    fn runbook_replay_advances_and_stops_on_first_failure() {
+        let mut app = MrtGuiApp::new();
+        let shell_name = app.shells[0].kind.short_label().to_string();
+        let cwd = app.tabs[0].cwd.display().to_string();
+        let runbook = crate::history::Runbook {
+            id: Uuid::new_v4(),
+            name: "Test sequence".into(),
+            steps: vec![
+                crate::history::RunbookStep {
+                    command: "echo step-one".into(),
+                    shell_name: shell_name.clone(),
+                    cwd: cwd.clone(),
+                },
+                crate::history::RunbookStep {
+                    command: "exit 2".into(),
+                    shell_name: shell_name.clone(),
+                    cwd: cwd.clone(),
+                },
+                crate::history::RunbookStep {
+                    command: "echo step-three".into(),
+                    shell_name,
+                    cwd,
+                },
+            ],
+            updated_at: chrono::Utc::now(),
+        };
+
+        app.start_runbook_replay(runbook);
+        assert!(app.active_replay.is_some());
+
+        // Wait for step 1 to complete
+        let start = std::time::Instant::now();
+        while app.tabs[0].blocks.is_empty()
+            || app.tabs[0].blocks[0].exit_code.is_none()
+        {
+            app.process_async_events();
+            assert!(start.elapsed() < std::time::Duration::from_secs(15), "Step 1 timed out");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(app.tabs[0].blocks[0].exit_code, Some(0));
+        assert!(app.tabs[0].blocks[0].plain_output.contains("step-one"));
+
+        // Wait for step 2 to fail and stop the replay
+        let start = std::time::Instant::now();
+        while app.active_replay.is_some() {
+            app.process_async_events();
+            assert!(start.elapsed() < std::time::Duration::from_secs(15), "Step 2 timed out");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        assert_eq!(app.tabs[0].blocks.len(), 2);
+        assert_ne!(app.tabs[0].blocks[1].exit_code, Some(0));
+        let notice = app.runbooks_state.replay_notice.as_deref().unwrap_or("");
+        assert!(notice.contains("stopped at step 2/3"));
+    }
+
+    #[test]
+    fn runbook_replay_passes_through_safety_gate() {
+        let mut app = MrtGuiApp::new();
+        let shell_name = app.shells[0].kind.short_label().to_string();
+        let cwd = app.tabs[0].cwd.display().to_string();
+        let runbook = crate::history::Runbook {
+            id: Uuid::new_v4(),
+            name: "Dangerous sequence".into(),
+            steps: vec![crate::history::RunbookStep {
+                command: "rm -rf /tmp/mrt-nonexistent-test".into(),
+                shell_name,
+                cwd,
+            }],
+            updated_at: chrono::Utc::now(),
+        };
+
+        app.start_runbook_replay(runbook);
+        assert!(app.pending_safety.is_some());
+        assert_eq!(app.busy_count, 0);
+        assert!(app
+            .active_replay
+            .as_ref()
+            .is_some_and(|r| r.waiting_block_id.is_none()));
     }
 }

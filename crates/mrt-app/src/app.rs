@@ -205,7 +205,9 @@ impl MrtGuiApp {
                 }
                 AsyncWorkerEvent::AiCommandReady { tab_id, proposal } => {
                     if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
-                        tab.input_line = proposal.proposed_command.clone();
+                        if tab.input_line.is_empty() {
+                            tab.input_line = proposal.proposed_command.clone();
+                        }
                         tab.ai_proposal = Some(proposal);
                     }
                 }
@@ -1200,6 +1202,11 @@ mod tests {
     fn delayed_ai_replies_follow_the_requesting_tab() {
         let mut app = MrtGuiApp::new();
         let first_id = app.tabs[0].id;
+        app.tabs[0].input_line = "echo my draft".into();
+        deliver_proposal(&mut app, first_id, "echo suggestion");
+        assert_eq!(app.tabs[0].input_line, "echo my draft");
+        assert_eq!(app.tabs[0].ai_proposal.as_ref().unwrap().proposed_command, "echo suggestion");
+        app.tabs[0].input_line.clear();
         let second_dir = app.tabs[0].cwd.join("second-project");
         app.tabs.push(TerminalTab::new(
             "Second".into(),

@@ -89,6 +89,7 @@ cargo test --workspace
 
 ## 📚 Documentation Index
 
+- **[Roadmap and project ideas](ROADMAP.md)** — Proposed features, first milestones, and ideas for contributors.
 - **[Architecture Overview (`docs/ARCHITECTURE.md`)](docs/ARCHITECTURE.md)** — High-level system diagram and 5-crate overview.
 - **[In-Depth MCP Guide (`docs/MCP_GUIDE.md`)](docs/MCP_GUIDE.md)** — Complete JSON-RPC 2.0 tool schemas, resources, client configs (Antigravity, Claude, Cursor), and MCP Host/Server internals.
 - **[Core & Polyglot Shells Guide (`docs/CORE_AND_SHELLS.md`)](docs/CORE_AND_SHELLS.md)** — Multi-shell discovery (`pwsh`, `cmd`/Batch, `bash`, `wsl`, `zsh`), ANSI/VT100 parser, Command Blocks, and Safety Gate rules.

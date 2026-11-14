@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mrt-core",
+    "crates/mrt-tools",
+    "crates/mrt-mcp",
+    "crates/mrt-ai",
+    "crates/mrt-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Modern Rust Terminal Team"]
+
+[workspace.dependencies]
+anyhow = "1.0"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+tokio = { version = "1.39", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+portable-pty = "0.8"
+vte = "0.13"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.10", features = ["v4", "serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+eframe = "0.29"
+egui = "0.29"
+egui_extras = { version = "0.29", features = ["all_loaders"] }

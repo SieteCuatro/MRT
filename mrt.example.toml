@@ -1,0 +1,37 @@
+# Modern Rust Terminal (MRT) Configuration Example
+# Copy to ~/.config/mrt/config.toml or .mrt.toml in your workspace
+
+[terminal]
+default_shell = "auto" # "auto", "pwsh", "powershell", "cmd", "bash", "wsl", "zsh", "fish", "nu"
+font_size = 14.0
+scrollback_blocks = 500
+auto_detect_structured_output = true
+
+[safety]
+enabled = true
+require_approval_for_moderate = false
+require_approval_for_critical = true
+blocked_patterns = [
+    "rm -rf /",
+    "format c:",
+]
+
+[ai]
+provider = "gemini" # "gemini", "openai", "anthropic", "ollama", or "offline"
+model = "gemini-2.5-flash"
+# Set GEMINI_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY in your environment
+ollama_endpoint = "http://localhost:11434"
+
+[[mcp.servers]]
+name = "filesystem"
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+enabled = false
+
+[[mcp.servers]]
+name = "mrt-loopback"
+transport = "stdio"
+command = "mrt"
+args = ["--mcp-server"]
+enabled = true

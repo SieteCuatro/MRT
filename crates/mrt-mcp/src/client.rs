@@ -1,0 +1,343 @@
+use crate::protocol::{JsonRpcRequest, JsonRpcResponse, McpResource, McpTool, McpToolCallResult};
+use crate::server::{handle_mcp_jsonrpc, MrtMcpServerState};
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Command;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub builtin_loopback: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerStatus {
+    pub config: McpServerConfig,
+    pub connected: bool,
+    pub server_version: String,
+    pub tools: Vec<McpTool>,
+    pub resources: Vec<McpResource>,
+    pub last_error: Option<String>,
+}
+
+/// Manages MCP servers connected to Modern Rust Terminal (MRT as MCP Host).
+#[derive(Clone)]
+pub struct McpHostManager {
+    pub local_server_state: MrtMcpServerState,
+    pub servers: Vec<McpServerStatus>,
+}
+
+impl McpHostManager {
+    pub fn new(local_server_state: MrtMcpServerState) -> Self {
+        let builtin_tools = MrtMcpServerState::built_in_tools();
+        let builtin_resources = MrtMcpServerState::built_in_resources();
+
+        let builtin_status = McpServerStatus {
+            config: McpServerConfig {
+                name: "mrt-native-mcp".to_string(),
+                command: "mrt --mcp-server (in-process)".to_string(),
+                args: vec!["--mcp-server".to_string()],
+                builtin_loopback: true,
+            },
+            connected: true,
+            server_version: "0.1.0".to_string(),
+            tools: builtin_tools,
+            resources: builtin_resources,
+            last_error: None,
+        };
+
+        Self {
+            local_server_state,
+            servers: vec![builtin_status],
+        }
+    }
+
+    pub fn all_tools(&self) -> Vec<(String, McpTool)> {
+        let mut list = Vec::new();
+        for srv in &self.servers {
+            if srv.connected {
+                for tool in &srv.tools {
+                    list.push((srv.config.name.clone(), tool.clone()));
+                }
+            }
+        }
+        list
+    }
+
+    /// Invokes a tool on either the built-in MRT MCP server or an external stdio MCP server.
+    pub async fn call_tool(
+        &self,
+        server_name: &str,
+        tool_name: &str,
+        arguments: Value,
+    ) -> Result<McpToolCallResult> {
+        let srv = self
+            .servers
+            .iter()
+            .find(|s| s.config.name == server_name)
+            .or_else(|| self.servers.first())
+            .context("No MCP server available")?;
+
+        if srv.config.builtin_loopback {
+            let req = JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: Some(json!(1)),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": tool_name,
+                    "arguments": arguments
+                })),
+            };
+            let resp = handle_mcp_jsonrpc(&self.local_server_state, req)
+                .await
+                .context("No response from local MCP server")?;
+            if let Some(err) = resp.error {
+                anyhow::bail!("MCP Error {}: {}", err.code, err.message);
+            }
+            let result_val = resp.result.unwrap_or_else(|| json!({}));
+            let parsed: McpToolCallResult = serde_json::from_value(result_val)?;
+            return Ok(parsed);
+        }
+
+        call_external_stdio_tool(&srv.config, tool_name, arguments).await
+    }
+
+    /// Connects to an external stdio MCP server, runs `initialize` + `tools/list`, and registers its tools.
+    pub async fn connect_external_stdio_server(
+        &mut self,
+        name: String,
+        command: String,
+        args: Vec<String>,
+    ) -> Result<McpServerStatus> {
+        let config = McpServerConfig {
+            name,
+            command,
+            args,
+            builtin_loopback: false,
+        };
+
+        let status = match probe_external_stdio_server(&config).await {
+            Ok((version, tools, resources)) => McpServerStatus {
+                config,
+                connected: true,
+                server_version: version,
+                tools,
+                resources,
+                last_error: None,
+            },
+            Err(e) => McpServerStatus {
+                config,
+                connected: false,
+                server_version: "unreachable".to_string(),
+                tools: Vec::new(),
+                resources: Vec::new(),
+                last_error: Some(e.to_string()),
+            },
+        };
+
+        self.servers.retain(|s| s.config.name != status.config.name);
+        self.servers.push(status.clone());
+        Ok(status)
+    }
+}
+
+async fn probe_external_stdio_server(
+    config: &McpServerConfig,
+) -> Result<(String, Vec<McpTool>, Vec<McpResource>)> {
+    let mut cmd = Command::new(&config.command);
+    cmd.args(&config.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("Failed to launch MCP server '{}'", config.command))?;
+
+    let mut stdin = child.stdin.take().context("Failed to open MCP stdin")?;
+    let stdout = child.stdout.take().context("Failed to open MCP stdout")?;
+    let mut reader = BufReader::new(stdout).lines();
+
+    // 1. Send initialize
+    let init_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(1)),
+        method: "initialize".into(),
+        params: Some(json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "ModernRustTerminal", "version": "0.1.0" }
+        })),
+    };
+    let mut line = serde_json::to_string(&init_req)? + "\n";
+    stdin.write_all(line.as_bytes()).await?;
+    stdin.flush().await?;
+
+    let init_resp_str = reader
+        .next_line()
+        .await?
+        .context("MCP server closed stream during initialize")?;
+    let init_resp: JsonRpcResponse = serde_json::from_str(&init_resp_str)?;
+    let version = init_resp
+        .result
+        .as_ref()
+        .and_then(|r| r.get("serverInfo"))
+        .and_then(|s| s.get("version"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("1.0")
+        .to_string();
+
+    // 2. Send initialized notification & tools/list
+    let notif = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+    line = serde_json::to_string(&notif)? + "\n";
+    stdin.write_all(line.as_bytes()).await?;
+
+    let tools_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(2)),
+        method: "tools/list".into(),
+        params: Some(json!({})),
+    };
+    line = serde_json::to_string(&tools_req)? + "\n";
+    stdin.write_all(line.as_bytes()).await?;
+    stdin.flush().await?;
+
+    let tools_resp_str = reader
+        .next_line()
+        .await?
+        .context("MCP server closed stream during tools/list")?;
+    let tools_resp: JsonRpcResponse = serde_json::from_str(&tools_resp_str)?;
+    let tools: Vec<McpTool> = tools_resp
+        .result
+        .and_then(|r| r.get("tools").cloned())
+        .and_then(|t| serde_json::from_value(t).ok())
+        .unwrap_or_default();
+
+    let _ = child.kill().await;
+    Ok((version, tools, Vec::new()))
+}
+
+async fn call_external_stdio_tool(
+    config: &McpServerConfig,
+    tool_name: &str,
+    arguments: Value,
+) -> Result<McpToolCallResult> {
+    let mut cmd = Command::new(&config.command);
+    cmd.args(&config.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd.spawn()?;
+
+    let mut stdin = child.stdin.take().context("Failed to open MCP stdin")?;
+    let stdout = child.stdout.take().context("Failed to open MCP stdout")?;
+    let mut reader = BufReader::new(stdout).lines();
+
+    let init_req = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "ModernRustTerminal", "version": "0.1.0" }
+        }
+    });
+    stdin
+        .write_all(format!("{}\n", serde_json::to_string(&init_req)?).as_bytes())
+        .await?;
+    let _ = reader.next_line().await?;
+
+    let call_req = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": tool_name,
+            "arguments": arguments
+        }
+    });
+    stdin
+        .write_all(format!("{}\n", serde_json::to_string(&call_req)?).as_bytes())
+        .await?;
+    stdin.flush().await?;
+
+    let resp_line = reader
+        .next_line()
+        .await?
+        .context("MCP server closed stream before returning tool result")?;
+    let resp: JsonRpcResponse = serde_json::from_str(&resp_line)?;
+    let _ = child.kill().await;
+
+    if let Some(err) = resp.error {
+        anyhow::bail!("MCP tool error ({}): {}", err.code, err.message);
+    }
+    let val = resp.result.unwrap_or_else(|| json!({}));
+    Ok(serde_json::from_value(val)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_mcp_server_initialize_and_tools() {
+        let state = MrtMcpServerState::default();
+
+        let init_req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!(1)),
+            method: "initialize".into(),
+            params: None,
+        };
+        let resp = handle_mcp_jsonrpc(&state, init_req).await.unwrap();
+        assert!(resp.error.is_none());
+
+        let list_req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!(2)),
+            method: "tools/list".into(),
+            params: None,
+        };
+        let list_resp = handle_mcp_jsonrpc(&state, list_req).await.unwrap();
+        let tools = list_resp
+            .result
+            .unwrap()
+            .get("tools")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len();
+        assert!(tools >= 5);
+    }
+
+    #[tokio::test]
+    async fn test_mcp_safety_gate_blocks_critical_command() {
+        let state = MrtMcpServerState::default();
+        let host = McpHostManager::new(state);
+        let res = host
+            .call_tool(
+                "mrt-native-mcp",
+                "mrt_run_command",
+                json!({ "command": "rm -rf /important_data" }),
+            )
+            .await
+            .unwrap();
+        assert!(res.is_error);
+        assert!(res.content[0].text.contains("BLOCKED BY MRT SAFETY GATE"));
+    }
+}

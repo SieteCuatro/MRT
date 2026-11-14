@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Modern Rust Terminal
+GenericName=Terminal Emulator
+Comment=Cross-platform GPU-accelerated terminal with Blocks, Internet Tools, and MCP
+Exec=mrt
+Icon=utilities-terminal
+Terminal=false
+Type=Application
+Categories=System;TerminalEmulator;Development;
+Keywords=terminal;shell;prompt;command;mcp;rust;
+StartupWMClass=mrt

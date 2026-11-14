@@ -2259,7 +2259,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "mrt-core",
- "mrt-mcp",
  "reqwest",
  "serde",
  "serde_json",
@@ -2312,12 +2311,16 @@ name = "mrt-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "directories",
+ "mrt-ai",
  "mrt-core",
  "mrt-tools",
  "serde",
  "serde_json",
+ "similar",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

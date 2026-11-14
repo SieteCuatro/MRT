@@ -492,12 +492,31 @@ fn strip_windows_unc_prefix(path: PathBuf) -> PathBuf {
 
 /// Interactive cross-platform PTY wrapper using `portable-pty` for live streaming sessions.
 pub struct InteractivePty {
+    pub id: uuid::Uuid,
+    pub shell_id: String,
+    pub shell_name: String,
+    pub cwd: PathBuf,
+    pub cols: u16,
+    pub rows: u16,
+    master: Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
+    child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     output_buffer: Arc<Mutex<String>>,
+    full_transcript: Arc<Mutex<String>>,
 }
 
 impl InteractivePty {
     pub fn spawn(shell: &ShellProfile, cwd: &Path, cols: u16, rows: u16) -> Result<Self> {
+        Self::spawn_with_command(shell, cwd, cols, rows, None)
+    }
+
+    pub fn spawn_with_command(
+        shell: &ShellProfile,
+        cwd: &Path,
+        cols: u16,
+        rows: u16,
+        initial_command: Option<&str>,
+    ) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
             rows,
@@ -507,17 +526,25 @@ impl InteractivePty {
         })?;
 
         let mut cmd = CommandBuilder::new(&shell.program);
-        for arg in &shell.interactive_args {
-            cmd.arg(arg);
+        if let Some(exec_cmd) = initial_command {
+            for arg in shell.build_exec_args(exec_cmd) {
+                cmd.arg(arg);
+            }
+        } else {
+            for arg in &shell.interactive_args {
+                cmd.arg(arg);
+            }
         }
         cmd.cwd(cwd);
 
-        let _child = pair.slave.spawn_command(cmd)?;
+        let child = pair.slave.spawn_command(cmd)?;
         let mut reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
 
         let output_buffer = Arc::new(Mutex::new(String::new()));
+        let full_transcript = Arc::new(Mutex::new(String::new()));
         let buf_clone = Arc::clone(&output_buffer);
+        let transcript_clone = Arc::clone(&full_transcript);
 
         std::thread::spawn(move || {
             let mut temp = [0u8; 4096];
@@ -529,23 +556,45 @@ impl InteractivePty {
                 if let Ok(mut guard) = buf_clone.lock() {
                     guard.push_str(&text);
                 }
+                if let Ok(mut guard) = transcript_clone.lock() {
+                    guard.push_str(&text);
+                }
             }
         });
 
         Ok(Self {
+            id: uuid::Uuid::new_v4(),
+            shell_id: shell.id.clone(),
+            shell_name: shell.name.clone(),
+            cwd: cwd.to_path_buf(),
+            cols,
+            rows,
+            master: Arc::new(Mutex::new(pair.master)),
+            child: Arc::new(Mutex::new(child)),
             writer: Arc::new(Mutex::new(writer)),
             output_buffer,
+            full_transcript,
         })
     }
 
-    pub fn send_line(&self, input: &str) -> Result<()> {
+    pub fn send_input(&self, input: &str, append_newline: bool) -> Result<()> {
         let mut guard = self
             .writer
             .lock()
             .map_err(|_| anyhow::anyhow!("PTY writer mutex poisoned"))?;
-        writeln!(guard, "{input}")?;
+        write!(guard, "{input}")?;
+        if append_newline {
+            #[cfg(target_os = "windows")]
+            write!(guard, "\r\n")?;
+            #[cfg(not(target_os = "windows"))]
+            write!(guard, "\n")?;
+        }
         guard.flush()?;
         Ok(())
+    }
+
+    pub fn send_line(&self, input: &str) -> Result<()> {
+        self.send_input(input, true)
     }
 
     pub fn drain_output(&self) -> String {
@@ -556,6 +605,49 @@ impl InteractivePty {
         } else {
             String::new()
         }
+    }
+
+    pub fn read_transcript(&self) -> String {
+        if let Ok(guard) = self.full_transcript.lock() {
+            guard.clone()
+        } else {
+            String::new()
+        }
+    }
+
+    pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        let guard = self
+            .master
+            .lock()
+            .map_err(|_| anyhow::anyhow!("PTY master mutex poisoned"))?;
+        guard.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })?;
+        Ok(())
+    }
+
+    pub fn try_wait_exit(&self) -> Result<Option<u32>> {
+        let mut guard = self
+            .child
+            .lock()
+            .map_err(|_| anyhow::anyhow!("PTY child mutex poisoned"))?;
+        if let Some(status) = guard.try_wait()? {
+            Ok(Some(status.exit_code()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn kill(&self) -> Result<()> {
+        let mut guard = self
+            .child
+            .lock()
+            .map_err(|_| anyhow::anyhow!("PTY child mutex poisoned"))?;
+        guard.kill()?;
+        Ok(())
     }
 }
 

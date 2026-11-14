@@ -1,3 +1,4 @@
+use crate::theme::Palette;
 use egui::{Color32, RichText, Ui};
 use mrt_core::{CommandBlock, HttpExchangeSummary, StructuredOutput, ViewMode};
 use serde_json::Value;
@@ -18,94 +19,70 @@ pub fn render_command_block(
 ) -> Option<BlockAction> {
     let mut triggered_action = None;
 
-    let border_color = match block.exit_code {
-        Some(0) => Color32::from_rgb(55, 95, 72),
-        Some(_) => Color32::from_rgb(135, 58, 64),
-        None => Color32::from_rgb(70, 80, 95),
+    let accent_color = match block.exit_code {
+        Some(0) => Palette::ACCENT_GREEN,
+        Some(_) => Palette::ACCENT_RED,
+        None => Palette::ACCENT_BLUE,
     };
 
-    let frame = egui::Frame::group(ui.style())
-        .fill(Color32::from_rgb(22, 25, 32))
-        .stroke(egui::Stroke::new(1.2_f32, border_color))
-        .rounding(egui::Rounding::same(6.0))
-        .inner_margin(egui::Margin::same(10.0));
+    let frame = egui::Frame::none()
+        .fill(Palette::BG_SURFACE)
+        .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_SUBTLE))
+        .rounding(egui::Rounding::same(8.0))
+        .inner_margin(egui::Margin::symmetric(14.0, 12.0));
 
-    frame.show(ui, |ui| {
+    let resp = frame.show(ui, |ui| {
         // Block Header Row
         ui.horizontal_wrapped(|ui| {
             // Shell Badge
-            let shell_badge = egui::Frame::none()
-                .fill(Color32::from_rgb(38, 52, 74))
+            egui::Frame::none()
+                .fill(Palette::BG_OVERLAY)
+                .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_SUBTLE))
                 .rounding(egui::Rounding::same(4.0))
-                .inner_margin(egui::Margin::symmetric(6.0, 2.0));
-            shell_badge.show(ui, |ui| {
-                ui.label(
-                    RichText::new(&block.shell_name)
-                        .size(11.5)
-                        .strong()
-                        .color(Color32::from_rgb(130, 195, 255)),
-                );
-            });
+                .inner_margin(egui::Margin::symmetric(7.0, 2.0))
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(&block.shell_name)
+                            .size(11.0)
+                            .monospace()
+                            .strong()
+                            .color(Palette::ACCENT_BLUE),
+                    );
+                });
 
             // Command Text
             ui.label(
-                RichText::new(format!("$ {}", block.command))
+                RichText::new(&block.command)
                     .monospace()
                     .strong()
                     .size(13.5)
-                    .color(Color32::from_rgb(235, 240, 248)),
+                    .color(Palette::TEXT_PRIMARY),
             );
 
-            ui.horizontal_wrapped(|ui| {
-                // Exit code badge
-                if let Some(code) = block.exit_code {
-                    let (bg, fg, text) = if code == 0 {
-                        (
-                            Color32::from_rgb(32, 78, 50),
-                            Color32::from_rgb(130, 235, 165),
-                            format!("✓ 0 ({}ms)", block.duration_ms),
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Action buttons (right-aligned for clean scanning)
+                if matches!(block.exit_code, Some(c) if c != 0) && block.ai_explanation.is_none() {
+                    if ui
+                        .small_button(
+                            RichText::new("Diagnose")
+                                .size(11.5)
+                                .color(Palette::ACCENT_AMBER),
                         )
-                    } else {
-                        (
-                            Color32::from_rgb(95, 34, 40),
-                            Color32::from_rgb(255, 150, 155),
-                            format!("✗ exit {} ({}ms)", code, block.duration_ms),
-                        )
-                    };
-                    egui::Frame::none()
-                        .fill(bg)
-                        .rounding(egui::Rounding::same(4.0))
-                        .inner_margin(egui::Margin::symmetric(6.0, 2.0))
-                        .show(ui, |ui| {
-                            ui.label(RichText::new(text).size(11.5).strong().color(fg));
-                        });
-                }
-
-                if block.exit_code.is_none() {
-                    ui.spinner();
-                    ui.label("Running");
-                }
-
-                if let Some(previous_id) = previous_id.filter(|_| block.exit_code.is_some()) {
-                    if ui.small_button("Compare with previous run").clicked() {
-                        triggered_action = Some(BlockAction::Compare(previous_id, block.id));
+                        .clicked()
+                    {
+                        triggered_action = Some(BlockAction::DiagnoseError(block.id));
                     }
-                }
-                // Action buttons
-                if ui.small_button("↻ Rerun").clicked() {
-                    triggered_action = Some(BlockAction::Rerun(block.command.clone()));
-                }
-
-                if ui.small_button("📋 Copy").clicked() {
-                    ui.output_mut(|o| o.copied_text = block.plain_output.clone());
                 }
 
                 if block.structured.is_structured() {
                     let toggle_label = match block.view_mode {
-                        ViewMode::Structured => format!("⇄ Raw ANSI ({})", block.structured.badge_label()),
-                        ViewMode::RawAnsi => format!("⇄ {}", block.structured.badge_label()),
+                        ViewMode::Structured => "Raw",
+                        ViewMode::RawAnsi => block.structured.badge_label(),
                     };
-                    if ui.small_button(toggle_label).clicked() {
+                    if ui
+                        .small_button(RichText::new(toggle_label).size(11.5))
+                        .clicked()
+                    {
                         block.view_mode = match block.view_mode {
                             ViewMode::Structured => ViewMode::RawAnsi,
                             ViewMode::RawAnsi => ViewMode::Structured,
@@ -113,36 +90,62 @@ pub fn render_command_block(
                     }
                 }
 
-                if matches!(block.exit_code, Some(c) if c != 0) && block.ai_explanation.is_none() {
-                    if ui
-                        .small_button(
-                            RichText::new("✨ Diagnose Error")
-                                .color(Color32::from_rgb(255, 200, 110)),
-                        )
-                        .clicked()
-                    {
-                        triggered_action = Some(BlockAction::DiagnoseError(block.id));
+                if ui.small_button(RichText::new("Copy").size(11.5)).clicked() {
+                    ui.output_mut(|o| o.copied_text = block.plain_output.clone());
+                }
+
+                if ui.small_button(RichText::new("Rerun").size(11.5)).clicked() {
+                    triggered_action = Some(BlockAction::Rerun(block.command.clone()));
+                }
+
+                if let Some(previous_id) = previous_id.filter(|_| block.exit_code.is_some()) {
+                    if ui.small_button(RichText::new("Diff").size(11.5)).clicked() {
+                        triggered_action = Some(BlockAction::Compare(previous_id, block.id));
                     }
+                }
+
+                // Exit code pill
+                if let Some(code) = block.exit_code {
+                    let (bg, fg, text) = if code == 0 {
+                        (
+                            Color32::from_rgba_unmultiplied(63, 185, 80, 28),
+                            Palette::ACCENT_GREEN,
+                            format!("0 · {}ms", block.duration_ms),
+                        )
+                    } else {
+                        (
+                            Color32::from_rgba_unmultiplied(248, 81, 73, 28),
+                            Palette::ACCENT_RED,
+                            format!("exit {code} · {}ms", block.duration_ms),
+                        )
+                    };
+                    egui::Frame::none()
+                        .fill(bg)
+                        .rounding(egui::Rounding::same(4.0))
+                        .inner_margin(egui::Margin::symmetric(7.0, 2.0))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new(text).size(11.0).monospace().strong().color(fg));
+                        });
+                } else {
+                    ui.spinner();
+                    ui.label(RichText::new("running").size(11.0).color(Palette::ACCENT_BLUE));
                 }
             });
         });
 
         // Subtle metadata line (CWD & Timestamp)
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(format!(
-                    "📁 {}  •  🕒 {}",
-                    block.cwd,
-                    block.timestamp.format("%H:%M:%S")
-                ))
-                .size(11.0)
-                .color(Color32::from_rgb(130, 138, 152)),
-            );
-        });
+        ui.label(
+            RichText::new(format!(
+                "{}  ·  {}",
+                block.cwd,
+                block.timestamp.format("%H:%M:%S")
+            ))
+            .size(11.0)
+            .monospace()
+            .color(Palette::TEXT_MUTED),
+        );
 
-        ui.add_space(4.0);
-        ui.separator();
-        ui.add_space(4.0);
+        ui.add_space(6.0);
 
         // Body Content
         match (&block.view_mode, &block.structured) {
@@ -171,29 +174,36 @@ pub fn render_command_block(
 
         // AI Error Triage Box if present
         if let Some(ref explanation) = block.ai_explanation {
-            ui.add_space(6.0);
+            ui.add_space(8.0);
             egui::Frame::none()
-                .fill(Color32::from_rgb(48, 38, 24))
-                .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(210, 155, 65)))
-                .rounding(egui::Rounding::same(5.0))
-                .inner_margin(egui::Margin::same(8.0))
+                .fill(Color32::from_rgba_unmultiplied(210, 153, 34, 20))
+                .stroke(egui::Stroke::new(1.0_f32, Palette::ACCENT_AMBER))
+                .rounding(egui::Rounding::same(6.0))
+                .inner_margin(egui::Margin::symmetric(10.0, 8.0))
                 .show(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(
-                            RichText::new("🤖 AI Error Triage:")
+                            RichText::new("AI Triage")
+                                .size(11.5)
                                 .strong()
-                                .color(Color32::from_rgb(255, 210, 120)),
+                                .color(Palette::ACCENT_AMBER),
                         );
-                        ui.label(RichText::new(explanation).color(Color32::from_rgb(235, 225, 210)));
+                        ui.label(
+                            RichText::new(explanation)
+                                .size(12.0)
+                                .color(Palette::TEXT_PRIMARY),
+                        );
                     });
                     if let Some(ref fix_cmd) = block.ai_suggested_fix {
+                        ui.add_space(4.0);
                         ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new(format!("Suggested Fix: `{fix_cmd}`"))
+                                RichText::new(fix_cmd)
                                     .monospace()
-                                    .color(Color32::from_rgb(150, 235, 175)),
+                                    .size(12.0)
+                                    .color(Palette::ACCENT_GREEN),
                             );
-                            if ui.small_button("▶ Run Fix").clicked() {
+                            if ui.small_button("Run Fix").clicked() {
                                 triggered_action =
                                     Some(BlockAction::ApplySuggestedFix(fix_cmd.clone()));
                             }
@@ -202,6 +212,14 @@ pub fn render_command_block(
                 });
         }
     });
+
+    // Crisp 3px left status accent bar
+    let rect = resp.response.rect;
+    let bar_rect = egui::Rect::from_min_max(
+        egui::pos2(rect.min.x, rect.min.y + 4.0),
+        egui::pos2(rect.min.x + 3.0, rect.max.y - 4.0),
+    );
+    ui.painter().rect_filled(bar_rect, 2.0, accent_color);
 
     triggered_action
 }

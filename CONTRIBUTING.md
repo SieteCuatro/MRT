@@ -33,12 +33,12 @@ Here are areas where human contributors and AI token donors can immediately add 
    - Split panes (horizontal & vertical pane splitting inside a tab).
    - Full interactive TUI screen buffer mode (for apps like `vim`, `htop`, `lazygit`) alongside Command Block mode.
    - Shell integration scripts (OSC 133 prompt markers for Bash, Zsh, Fish, PowerShell, and CMD).
-2. **Persistent Storage & Search**:
-   - Local SQLite / DuckDB session store for time-travel command block search across restarts.
+2. **Persistent Session & Config**:
+   - Workspace/tab session restoration across restarts and loading `~/.config/mrt/config.toml` / `.mrt.toml` (SQLite + FTS5 trigram command block history is already implemented in `crates/mrt-app/src/history.rs`).
 3. **Internet & Developer Tools (`crates/mrt-tools`)**:
    - Built-in `:dns` lookup & latency trace tool.
    - Built-in `:ws` WebSocket inspector block.
-   - Built-in `:diff` side-by-side block output comparator.
+   - Built-in `:diff` inline CLI command (GUI block diff comparison and `mrt_compare_blocks` are already implemented).
 4. **MCP Ecosystem (`crates/mrt-mcp`)**:
    - HTTP/SSE MCP client transport (in addition to `stdio`).
    - One-click MCP Server marketplace/presets in the GUI side panel.

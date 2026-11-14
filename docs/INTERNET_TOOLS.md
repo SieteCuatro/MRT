@@ -1,4 +1,4 @@
-# 🌐 In-Depth Internet & Network Tools Guide (`mrt-tools`)
+# In-Depth Internet & Network Tools Guide (`mrt-tools`)
 
 [`crates/mrt-tools`](../crates/mrt-tools) gives **Modern Rust Terminal (MRT)** native internet and network awareness so you don't have to switch to Postman, a browser, or external GUI utilities for common developer workflows.
 
@@ -53,8 +53,9 @@ Invoked via `:web <url>`, the **Internet Studio** side panel, or the `mrt_web_fe
 Invoked via `:ports`, the **Internet Studio** side panel, or the `mrt_inspect_ports` MCP tool.
 
 ### Cross-Platform Implementation
-- **Windows**: Runs `netstat -ano` (with `CREATE_NO_WINDOW`) and parses active `TCP` `LISTENING` sockets via `parse_windows_netstat`, splitting the local endpoint into `Local Address` and `Port` alongside `Protocol`, `State`, and `PID`.
-- **Linux / macOS / Unix**: Runs `ss -tulnp` and parses active sockets via `parse_unix_ss`.
+- **Windows**: Runs `netstat -ano` (with `CREATE_NO_WINDOW`) and parses active TCP and UDP sockets via `parse_windows_netstat` (including localized listening state names), splitting the local endpoint into `Local Address` and `Port` alongside `Protocol`, `State`, and `PID`.
+- **macOS**: Runs `/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -iUDP -F pPTn` and parses active sockets via `parse_lsof`.
+- **Linux / other Unix**: Runs `ss -tulnp` and parses active sockets via `parse_unix_ss`.
 - **Output**: Returns both a `StructuredOutput::Table` (rendered as a striped, live-filterable table in the GUI) and a raw CSV string (so you can copy the port list or consume it via MCP).
 
 ---

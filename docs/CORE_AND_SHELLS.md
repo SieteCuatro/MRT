@@ -1,4 +1,4 @@
-# 🐚 In-Depth Core & Polyglot Shells Guide (`mrt-core`)
+# In-Depth Core & Polyglot Shells Guide (`mrt-core`)
 
 [`crates/mrt-core`](../crates/mrt-core) is the foundational library of **Modern Rust Terminal (MRT)**. It has zero GUI dependencies so it can power both the GPU desktop application (`mrt-app`) and the headless MCP server (`mrt --mcp-server`).
 
@@ -8,7 +8,7 @@
 
 | Module | File | Responsibility |
 | :--- | :--- | :--- |
-| **`pty`** | [`src/pty.rs`](../crates/mrt-core/src/pty.rs) | Multi-shell discovery (`ShellProfile`), per-command shell execution (`execute_command_in_shell`), and streaming `portable-pty` sessions (`InteractivePty`). |
+| **`pty`** | [`src/pty.rs`](../crates/mrt-core/src/pty.rs) | Multi-shell discovery (`ShellProfile`), per-command & streaming shell execution (`execute_command_in_shell`, `execute_command_streaming`), and streaming `portable-pty` sessions (`InteractivePty`). |
 | **`vt`** | [`src/vt.rs`](../crates/mrt-core/src/vt.rs) | ANSI / VT100 escape sequence state machine powered by `vte`, producing styled `AnsiSpan` vectors and stripped plain text. |
 | **`block`** | [`src/block.rs`](../crates/mrt-core/src/block.rs) | `CommandBlock` data model and automatic `StructuredOutput` detector (JSON, CSV/TSV Tables, Markdown, HTTP results). |
 | **`safety`** | [`src/safety.rs`](../crates/mrt-core/src/safety.rs) | Cross-shell destructive command classifier (`RiskLevel::Safe`, `Moderate`, `Critical`) powering the MRT Safety Approval Gate. |

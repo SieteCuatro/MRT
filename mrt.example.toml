@@ -1,6 +1,7 @@
 # Modern Rust Terminal (MRT) Configuration Example
 # 100% Free for All — No Restrictions.
-# Copy to ~/.config/mrt/config.toml or .mrt.toml in your workspace
+# Note: TOML config loading (~/.config/mrt/config.toml or .mrt.toml) is a planned
+# reference schema; MRT currently reads settings from environment variables and GUI controls.
 
 [terminal]
 default_shell = "auto" # "auto", "pwsh", "powershell", "cmd", "bash", "git-bash", "wsl", "zsh", "fish", "nu"

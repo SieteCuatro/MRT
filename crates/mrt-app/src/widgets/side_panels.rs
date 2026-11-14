@@ -1,4 +1,5 @@
-use egui::{Color32, RichText, Ui};
+use crate::theme::Palette;
+use egui::{RichText, Ui};
 use mrt_mcp::McpHostManager;
 use serde_json::Value;
 
@@ -58,75 +59,135 @@ pub fn render_mcp_side_panel(
     ui: &mut Ui,
     state: &mut SidePanelState,
     mcp_host: &McpHostManager,
+    bridge_port: Option<u16>,
 ) -> Option<SidePanelEvent> {
     let mut event = None;
 
-    ui.heading(
-        RichText::new("🔌 Model Context Protocol (MCP) Hub")
+    ui.label(
+        RichText::new("MCP Hub")
             .size(15.0)
             .strong()
-            .color(Color32::from_rgb(140, 205, 255)),
+            .color(Palette::TEXT_PRIMARY),
     );
     ui.label(
-        RichText::new("MRT acts as both an MCP Host (connecting external tool servers) and an MCP Server (`mrt --mcp-server`).")
+        RichText::new("Dual-mode MCP Host & Server (mrt --mcp-server)")
             .size(11.5)
-            .color(Color32::from_rgb(165, 175, 190)),
+            .color(Palette::TEXT_SECONDARY),
     );
+    if let Some(port) = bridge_port {
+        ui.add_space(4.0);
+        egui::Frame::none()
+            .fill(Palette::BG_ELEVATED)
+            .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_SUBTLE))
+            .rounding(egui::Rounding::same(6.0))
+            .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new("●")
+                            .size(11.0)
+                            .color(Palette::ACCENT_GREEN),
+                    );
+                    ui.label(
+                        RichText::new(format!("GUI Bridge 127.0.0.1:{port}"))
+                            .size(11.5)
+                            .monospace()
+                            .color(Palette::TEXT_PRIMARY),
+                    );
+                    if ui.small_button("Copy Config").clicked() {
+                        let exe = std::env::current_exe()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|_| "mrt".to_string());
+                        let cfg = serde_json::json!({
+                            "mcpServers": {
+                                "modern-rust-terminal": {
+                                    "command": exe,
+                                    "args": ["--mcp-server"]
+                                }
+                            }
+                        });
+                        ui.output_mut(|o| {
+                            o.copied_text = serde_json::to_string_pretty(&cfg).unwrap_or_default()
+                        });
+                    }
+                });
+            });
+    }
+    ui.add_space(4.0);
     ui.separator();
 
     egui::ScrollArea::vertical().show(ui, |ui| {
-        ui.label(RichText::new("Connected MCP Servers").strong());
+        ui.label(
+            RichText::new("Connected Servers")
+                .size(12.0)
+                .strong()
+                .color(Palette::TEXT_SECONDARY),
+        );
+        ui.add_space(4.0);
         for srv in &mcp_host.servers {
-            egui::Frame::group(ui.style())
-                .fill(Color32::from_rgb(24, 28, 36))
-                .inner_margin(egui::Margin::same(8.0))
+            egui::Frame::none()
+                .fill(Palette::BG_SURFACE)
+                .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_SUBTLE))
+                .rounding(egui::Rounding::same(6.0))
+                .inner_margin(egui::Margin::same(10.0))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         let dot_color = if srv.connected {
-                            Color32::from_rgb(110, 235, 150)
+                            Palette::ACCENT_GREEN
                         } else {
-                            Color32::from_rgb(245, 110, 120)
+                            Palette::ACCENT_RED
                         };
-                        ui.label(RichText::new("●").color(dot_color));
-                        ui.label(RichText::new(&srv.config.name).strong());
+                        ui.label(RichText::new("●").size(11.0).color(dot_color));
+                        ui.label(
+                            RichText::new(&srv.config.name)
+                                .strong()
+                                .color(Palette::TEXT_PRIMARY),
+                        );
                         ui.label(
                             RichText::new(format!("v{}", srv.server_version))
                                 .size(11.0)
-                                .color(Color32::GRAY),
+                                .monospace()
+                                .color(Palette::TEXT_MUTED),
                         );
                     });
                     ui.label(
-                        RichText::new(format!("Transport: {}", srv.config.command))
+                        RichText::new(&srv.config.command)
                             .size(11.0)
                             .monospace()
-                            .color(Color32::from_rgb(145, 155, 170)),
+                            .color(Palette::TEXT_SECONDARY),
                     );
                     if let Some(ref err) = srv.last_error {
                         ui.label(
                             RichText::new(format!("Error: {err}"))
                                 .size(11.0)
-                                .color(Color32::from_rgb(255, 140, 140)),
+                                .color(Palette::ACCENT_RED),
                         );
                     }
 
                     ui.add_space(4.0);
                     ui.label(
-                        RichText::new(format!("Available Tools ({})", srv.tools.len()))
+                        RichText::new(format!("Tools ({})", srv.tools.len()))
                             .size(11.5)
                             .strong()
-                            .color(Color32::from_rgb(150, 205, 250)),
+                            .color(Palette::ACCENT_BLUE),
                     );
 
                     for tool in &srv.tools {
                         egui::CollapsingHeader::new(
                             RichText::new(&tool.name)
+                                .size(12.0)
                                 .monospace()
-                                .color(Color32::from_rgb(175, 235, 185)),
+                                .color(Palette::TEXT_PRIMARY),
                         )
                         .default_open(false)
                         .show(ui, |ui| {
-                            ui.label(RichText::new(&tool.description).size(11.5));
-                            if ui.small_button("▶ Invoke Tool").clicked() {
+                            ui.label(
+                                RichText::new(&tool.description)
+                                    .size(11.5)
+                                    .color(Palette::TEXT_SECONDARY),
+                            );
+                            ui.add_space(4.0);
+                            if ui.small_button("Invoke").clicked() {
                                 let default_args = default_args_for_tool(&tool.name);
                                 event = Some(SidePanelEvent::InvokeMcpTool {
                                     server_name: srv.config.name.clone(),
@@ -141,7 +202,12 @@ pub fn render_mcp_side_panel(
         }
 
         ui.separator();
-        ui.label(RichText::new("Custom Tool Arguments (JSON)").strong());
+        ui.label(
+            RichText::new("Tool Arguments (JSON)")
+                .size(12.0)
+                .strong()
+                .color(Palette::TEXT_SECONDARY),
+        );
         ui.add(
             egui::TextEdit::multiline(&mut state.mcp_tool_args_input)
                 .font(egui::TextStyle::Monospace)
@@ -151,20 +217,26 @@ pub fn render_mcp_side_panel(
 
         ui.add_space(8.0);
         ui.separator();
-        ui.label(RichText::new("Add External Stdio MCP Server").strong());
+        ui.label(
+            RichText::new("Connect External Stdio Server")
+                .size(12.0)
+                .strong()
+                .color(Palette::TEXT_SECONDARY),
+        );
         ui.horizontal(|ui| {
-            ui.label("Name:");
+            ui.label(RichText::new("Name").size(11.5).color(Palette::TEXT_MUTED));
             ui.text_edit_singleline(&mut state.new_mcp_name);
         });
         ui.horizontal(|ui| {
-            ui.label("Command:");
+            ui.label(RichText::new("Cmd").size(11.5).color(Palette::TEXT_MUTED));
             ui.text_edit_singleline(&mut state.new_mcp_cmd);
         });
         ui.horizontal(|ui| {
-            ui.label("Args:");
+            ui.label(RichText::new("Args").size(11.5).color(Palette::TEXT_MUTED));
             ui.text_edit_singleline(&mut state.new_mcp_args);
         });
-        if ui.button("➕ Connect MCP Server").clicked() {
+        ui.add_space(4.0);
+        if ui.button("Connect Server").clicked() {
             event = Some(SidePanelEvent::ConnectExternalMcp {
                 name: state.new_mcp_name.clone(),
                 command: state.new_mcp_cmd.clone(),
@@ -182,15 +254,25 @@ pub fn render_internet_side_panel(
 ) -> Option<SidePanelEvent> {
     let mut event = None;
 
-    ui.heading(
-        RichText::new("🌐 Internet & Network Tools Studio")
+    ui.label(
+        RichText::new("Internet & Network")
             .size(15.0)
             .strong()
-            .color(Color32::from_rgb(130, 225, 195)),
+            .color(Palette::TEXT_PRIMARY),
+    );
+    ui.label(
+        RichText::new("Built-in HTTP client, web reader, and port scanner")
+            .size(11.5)
+            .color(Palette::TEXT_SECONDARY),
     );
     ui.separator();
 
-    ui.label(RichText::new("1. Inline HTTP / REST API Inspector (`:http`)").strong());
+    ui.label(
+        RichText::new("HTTP Inspector (:http)")
+            .size(12.0)
+            .strong()
+            .color(Palette::ACCENT_BLUE),
+    );
     ui.horizontal(|ui| {
         egui::ComboBox::from_id_salt("http_method_combo")
             .selected_text(&state.http_method)
@@ -207,7 +289,11 @@ pub fn render_internet_side_panel(
         );
     });
     if state.http_method != "GET" {
-        ui.label(RichText::new("Request JSON Body:").size(11.5));
+        ui.label(
+            RichText::new("Request Body (JSON)")
+                .size(11.5)
+                .color(Palette::TEXT_SECONDARY),
+        );
         ui.add(
             egui::TextEdit::multiline(&mut state.http_body)
                 .font(egui::TextStyle::Monospace)
@@ -215,7 +301,7 @@ pub fn render_internet_side_panel(
                 .desired_width(f32::INFINITY),
         );
     }
-    if ui.button("🚀 Send HTTP Request to Terminal Block").clicked() {
+    if ui.button("Send Request").clicked() {
         event = Some(SidePanelEvent::RunHttpInspector {
             method: state.http_method.clone(),
             url: state.http_url.clone(),
@@ -223,29 +309,39 @@ pub fn render_internet_side_panel(
         });
     }
 
-    ui.add_space(12.0);
+    ui.add_space(10.0);
     ui.separator();
-    ui.label(RichText::new("2. Readable Web Page Extractor (`:web`)").strong());
+    ui.label(
+        RichText::new("Web Reader (:web)")
+            .size(12.0)
+            .strong()
+            .color(Palette::ACCENT_BLUE),
+    );
     ui.add(
         egui::TextEdit::singleline(&mut state.web_url)
             .hint_text("https://www.rust-lang.org")
             .desired_width(f32::INFINITY),
     );
-    if ui.button("📖 Fetch & Render Webpage as Markdown").clicked() {
+    if ui.button("Fetch as Markdown").clicked() {
         event = Some(SidePanelEvent::RunWebReader {
             url: state.web_url.clone(),
         });
     }
 
-    ui.add_space(12.0);
+    ui.add_space(10.0);
     ui.separator();
-    ui.label(RichText::new("3. Local Network & Listening Ports (`:ports`)").strong());
     ui.label(
-        RichText::new("Scans active local TCP/UDP listening sockets and PIDs into a sortable table block.")
-            .size(11.5)
-            .color(Color32::GRAY),
+        RichText::new("Listening Ports (:ports)")
+            .size(12.0)
+            .strong()
+            .color(Palette::ACCENT_BLUE),
     );
-    if ui.button("🔍 Scan Active Listening Ports").clicked() {
+    ui.label(
+        RichText::new("Scans active local TCP/UDP listening sockets and PIDs.")
+            .size(11.5)
+            .color(Palette::TEXT_SECONDARY),
+    );
+    if ui.button("Scan Ports").clicked() {
         event = Some(SidePanelEvent::RunPortScanner);
     }
 
@@ -256,6 +352,24 @@ fn default_args_for_tool(tool_name: &str) -> String {
     match tool_name {
         "mrt_run_command" => serde_json::to_string(&Value::Object(
             [("command".to_string(), Value::String("echo Hello from MRT MCP".to_string()))]
+                .into_iter()
+                .collect(),
+        ))
+        .unwrap_or_else(|_| "{}".into()),
+        "mrt_create_tab" => serde_json::to_string(&Value::Object(
+            [("title".to_string(), Value::String("Agent Workspace".to_string()))]
+                .into_iter()
+                .collect(),
+        ))
+        .unwrap_or_else(|_| "{}".into()),
+        "mrt_pty_spawn" => serde_json::to_string(&Value::Object(
+            [("command".to_string(), Value::String("echo Interactive PTY ready".to_string()))]
+                .into_iter()
+                .collect(),
+        ))
+        .unwrap_or_else(|_| "{}".into()),
+        "mrt_ai_translate" => serde_json::to_string(&Value::Object(
+            [("query".to_string(), Value::String("list all files".to_string()))]
                 .into_iter()
                 .collect(),
         ))

@@ -7,8 +7,12 @@ license.workspace = true
 [dependencies]
 mrt-core = { path = "../mrt-core" }
 mrt-tools = { path = "../mrt-tools" }
+mrt-ai = { path = "../mrt-ai" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+uuid.workspace = true
+similar = "2"
+directories = "6"

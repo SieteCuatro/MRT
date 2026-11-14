@@ -1,3 +1,4 @@
+use crate::theme::{apply_mrt_theme, Palette};
 use crate::widgets::block_view::{render_command_block, BlockAction};
 use crate::widgets::side_panels::{
     render_internet_side_panel, render_mcp_side_panel, SidePanelEvent, SidePanelState,
@@ -8,7 +9,9 @@ use mrt_core::{
     assess_command, discover_shells, execute_command_streaming, CommandBlock, RiskLevel,
     SafetyAssessment, ShellProfile, StructuredOutput,
 };
-use mrt_mcp::{McpHostManager, MrtMcpServerState};
+use mrt_mcp::{
+    start_gui_bridge_listener, GuiUiCommand, McpHostManager, McpTabSession, MrtMcpServerState,
+};
 use mrt_tools::{
     execute_http_request, fetch_url_as_markdown, inspect_listening_ports, parse_http_command,
 };
@@ -18,6 +21,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use uuid::Uuid;
 
+#[derive(Clone)]
 pub struct TerminalTab {
     pub id: Uuid,
     pub title: String,
@@ -81,6 +85,8 @@ pub struct MrtGuiApp {
     pub active_tab: usize,
     pub side_state: SidePanelState,
     pub mcp_host: McpHostManager,
+    pub gui_cmd_rx: Receiver<GuiUiCommand>,
+    pub bridge_port: Option<u16>,
     pub tx: Sender<AsyncWorkerEvent>,
     pub rx: Receiver<AsyncWorkerEvent>,
     pub pending_safety: Option<PendingSafetyApproval>,
@@ -108,8 +114,9 @@ impl MrtGuiApp {
         let shells = discover_shells();
         let initial_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-        let mcp_state = MrtMcpServerState::default();
-        let mcp_host = McpHostManager::new(mcp_state);
+        let (gui_cmd_tx, gui_cmd_rx) = channel();
+        let mut mcp_state = MrtMcpServerState::default();
+        mcp_state.gui_tx = Some(gui_cmd_tx);
 
         let first_shell = &shells[0];
         let first_tab = TerminalTab::new(
@@ -117,6 +124,28 @@ impl MrtGuiApp {
             0,
             initial_cwd,
         );
+        if let Ok(mut tabs_guard) = mcp_state.tabs.lock() {
+            *tabs_guard = vec![McpTabSession {
+                id: first_tab.id,
+                title: first_tab.title.clone(),
+                shell_id: first_shell.id.clone(),
+                shell_name: first_shell.kind.short_label().to_string(),
+                cwd: first_tab.cwd.clone(),
+                blocks: Vec::new(),
+            }];
+        }
+        if let Ok(mut active_guard) = mcp_state.active_tab_id.lock() {
+            *active_guard = first_tab.id;
+        }
+
+        let bridge_state = mcp_state.clone();
+        let write_discovery = !cfg!(test);
+        let bridge_port = runtime
+            .block_on(async move { start_gui_bridge_listener(bridge_state, 0, write_discovery).await })
+            .ok()
+            .map(|addr| addr.port());
+
+        let mcp_host = McpHostManager::new(mcp_state);
 
         let (tx, rx) = channel();
         // Unit tests use isolated stores and never read or write the user's history.
@@ -139,6 +168,8 @@ impl MrtGuiApp {
             active_tab: 0,
             side_state: SidePanelState::default(),
             mcp_host,
+            gui_cmd_rx,
+            bridge_port,
             tx,
             rx,
             pending_safety: None,
@@ -454,6 +485,127 @@ impl MrtGuiApp {
         if refresh { self.refresh_history(); }
     }
 
+    pub fn sync_mcp_from_gui(&self) {
+        let state = &self.mcp_host.local_server_state;
+        if let Some(active) = self.tabs.get(self.active_tab) {
+            if let Ok(mut guard) = state.active_tab_id.lock() {
+                *guard = active.id;
+            }
+            if let Ok(mut guard) = state.cwd.lock() {
+                *guard = active.cwd.clone();
+            }
+        }
+        if let Ok(mut tabs_guard) = state.tabs.lock() {
+            *tabs_guard = self
+                .tabs
+                .iter()
+                .map(|t| {
+                    let shell = self
+                        .shells
+                        .get(t.active_shell_idx)
+                        .unwrap_or(&self.shells[0]);
+                    McpTabSession {
+                        id: t.id,
+                        title: t.title.clone(),
+                        shell_id: shell.id.clone(),
+                        shell_name: shell.kind.short_label().to_string(),
+                        cwd: t.cwd.clone(),
+                        blocks: t.blocks.clone(),
+                    }
+                })
+                .collect();
+        }
+    }
+
+    pub fn process_mcp_ui_commands(&mut self) {
+        let mut pending_submit = None;
+        while let Ok(cmd) = self.gui_cmd_rx.try_recv() {
+            match cmd {
+                GuiUiCommand::SyncFromMcp => {
+                    let state = &self.mcp_host.local_server_state;
+                    let mcp_tabs = state.tabs.lock().map(|g| g.clone()).unwrap_or_default();
+                    let active_id = state.active_tab_id.lock().map(|g| *g).ok();
+                    if !mcp_tabs.is_empty() {
+                        let mut rebuilt = Vec::with_capacity(mcp_tabs.len());
+                        for mt in mcp_tabs {
+                            let shell_idx = self
+                                .shells
+                                .iter()
+                                .position(|s| {
+                                    s.id.eq_ignore_ascii_case(&mt.shell_id)
+                                        || s.kind.short_label().eq_ignore_ascii_case(&mt.shell_name)
+                                })
+                                .unwrap_or(0);
+                            if let Some(mut existing) =
+                                self.tabs.iter().find(|t| t.id == mt.id).cloned()
+                            {
+                                existing.title = mt.title;
+                                existing.active_shell_idx = shell_idx;
+                                existing.cwd = mt.cwd;
+                                existing.blocks = mt.blocks;
+                                rebuilt.push(existing);
+                            } else {
+                                let mut new_tab = TerminalTab::new(mt.title, shell_idx, mt.cwd);
+                                new_tab.id = mt.id;
+                                new_tab.blocks = mt.blocks;
+                                rebuilt.push(new_tab);
+                            }
+                        }
+                        self.tabs = rebuilt;
+                        if let Some(aid) = active_id {
+                            if let Some(pos) = self.tabs.iter().position(|t| t.id == aid) {
+                                self.active_tab = pos;
+                            }
+                        }
+                        if self.active_tab >= self.tabs.len() {
+                            self.active_tab = self.tabs.len().saturating_sub(1);
+                        }
+                    }
+                }
+                GuiUiCommand::SetInputDraft {
+                    tab_id,
+                    text,
+                    submit,
+                } => {
+                    let target_idx = tab_id
+                        .and_then(|id| self.tabs.iter().position(|t| t.id == id))
+                        .unwrap_or(self.active_tab);
+                    if let Some(tab) = self.tabs.get_mut(target_idx) {
+                        tab.input_line = text.clone();
+                        if submit {
+                            self.active_tab = target_idx;
+                            pending_submit = Some(text);
+                        }
+                    }
+                }
+                GuiUiCommand::SetMosaic { enabled, columns } => {
+                    self.mosaic = enabled;
+                    if let Some(c) = columns {
+                        self.mosaic_columns = c.clamp(1, 6);
+                    }
+                }
+                GuiUiCommand::SetExplorer { visible } => {
+                    self.show_explorer = visible;
+                }
+                GuiUiCommand::SetComparison {
+                    tab_id,
+                    previous_block_id,
+                    current_block_id,
+                } => {
+                    let target_idx = tab_id
+                        .and_then(|id| self.tabs.iter().position(|t| t.id == id))
+                        .unwrap_or(self.active_tab);
+                    if let Some(tab) = self.tabs.get_mut(target_idx) {
+                        tab.comparison = Some((previous_block_id, current_block_id));
+                    }
+                }
+            }
+        }
+        if let Some(cmd_text) = pending_submit {
+            self.submit_input(Some(cmd_text), false);
+        }
+    }
+
     fn process_async_events(&mut self) {
         for (block_id, (tab_id, output)) in &self.running_output {
             let chunk = output.lock().map(|mut pending| std::mem::take(&mut *pending)).unwrap_or_default();
@@ -497,6 +649,7 @@ impl MrtGuiApp {
                             tab.blocks.push(block);
                         }
                     }
+                    self.sync_mcp_from_gui();
                 }
                 AsyncWorkerEvent::AiCommandReady { tab_id, proposal } => {
                     if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
@@ -916,6 +1069,7 @@ impl eframe::App for MrtGuiApp {
         let previous_tab = self.tabs[self.active_tab].id;
         if first_frame {
             self.focused_on_start = true;
+            apply_mrt_theme(ctx);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
@@ -925,10 +1079,13 @@ impl eframe::App for MrtGuiApp {
 
         self.process_async_events();
         self.process_history_events();
+        self.process_mcp_ui_commands();
 
-        if self.busy_count > 0 || self.history_pending > 0 {
-            ctx.request_repaint_after(std::time::Duration::from_millis(50));
-        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(if self.busy_count > 0 || self.history_pending > 0 {
+            50
+        } else {
+            250
+        }));
 
         // Keyboard shortcut for Command Palette (Ctrl+K or Ctrl+P)
         if ctx.input_mut(|i| {
@@ -939,14 +1096,20 @@ impl eframe::App for MrtGuiApp {
 
         // Top Navigation Bar: Tabs, Shell Switcher, and Side Panel Toggles
         egui::TopBottomPanel::top("mrt_top_bar")
-            .frame(egui::Frame::none().fill(Color32::from_rgb(27, 33, 40)).inner_margin(egui::Margin::symmetric(14.0, 9.0)))
+            .frame(
+                egui::Frame::none()
+                    .fill(Palette::BG_SURFACE)
+                    .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_SUBTLE))
+                    .inner_margin(egui::Margin::symmetric(14.0, 8.0)),
+            )
             .show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(
                     RichText::new("MRT")
-                        .size(16.0)
+                        .size(14.0)
+                        .monospace()
                         .strong()
-                        .color(Color32::from_rgb(120, 200, 255)),
+                        .color(Palette::ACCENT_BLUE),
                 );
                 ui.separator();
 
@@ -959,16 +1122,23 @@ impl eframe::App for MrtGuiApp {
                     let is_active = idx == self.active_tab;
                     let title = self.tabs[idx].title.clone();
                     let btn = egui::Button::new(
-                        RichText::new(&title).color(if is_active {
-                            Color32::from_rgb(140, 220, 255)
-                        } else {
-                            Color32::GRAY
-                        }),
+                        RichText::new(&title)
+                            .size(12.0)
+                            .color(if is_active {
+                                Palette::TEXT_PRIMARY
+                            } else {
+                                Palette::TEXT_SECONDARY
+                            }),
                     )
                     .fill(if is_active {
-                        Color32::from_rgb(35, 45, 62)
+                        Palette::BG_OVERLAY
                     } else {
                         Color32::TRANSPARENT
+                    })
+                    .stroke(if is_active {
+                        egui::Stroke::new(1.0_f32, Palette::BORDER_SUBTLE)
+                    } else {
+                        egui::Stroke::NONE
                     });
 
                     if ui.add(btn).clicked() {
@@ -984,7 +1154,7 @@ impl eframe::App for MrtGuiApp {
                 }
 
                 // New Tab dropdown per discovered shell
-                egui::menu::menu_button(ui, "+ New tab", |ui| {
+                egui::menu::menu_button(ui, "+ Tab", |ui| {
                     for (s_idx, shell) in self.shells.iter().enumerate() {
                         if ui
                             .button(format!("{} ({})", shell.name, shell.program))
@@ -1005,17 +1175,16 @@ impl eframe::App for MrtGuiApp {
 
                 ui.separator();
 
-                // Active Tab Shell Profile Switcher (PowerShell, CMD/Batch, Bash/Git Bash, WSL, etc.)
+                // Active Tab Shell Profile Switcher
                 if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                     let current_shell_name = self
                         .shells
                         .get(tab.active_shell_idx)
-                        .map(|s| s.name.clone())
-                        .unwrap_or_else(|| "Shell".into());
+                        .map(|s| s.kind.short_label().to_string())
+                        .unwrap_or_else(|| "shell".into());
 
-                    ui.label(RichText::new("Shell").size(12.0).color(Color32::GRAY));
                     egui::ComboBox::from_id_salt("active_shell_selector")
-                        .selected_text(RichText::new(current_shell_name).strong())
+                        .selected_text(RichText::new(current_shell_name).monospace().size(12.0))
                         .show_ui(ui, |ui| {
                             for (idx, s) in self.shells.iter().enumerate() {
                                 if ui
@@ -1037,13 +1206,13 @@ impl eframe::App for MrtGuiApp {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Ctrl+K").clicked() {
+                        self.show_command_palette = !self.show_command_palette;
+                    }
+                    ui.toggle_value(&mut self.side_state.show_internet_panel, "Net");
+                    ui.toggle_value(&mut self.side_state.show_mcp_panel, "MCP");
                     if ui.toggle_value(&mut self.show_history, "History").changed() && self.show_history {
                         self.refresh_history();
-                    }
-                    ui.toggle_value(&mut self.side_state.show_mcp_panel, "MCP Hub");
-                    ui.toggle_value(&mut self.side_state.show_internet_panel, "Internet Studio");
-                    if ui.button("Palette  Ctrl+K").clicked() {
-                        self.show_command_palette = !self.show_command_palette;
                     }
                 });
             });
@@ -1095,9 +1264,12 @@ impl eframe::App for MrtGuiApp {
                 .default_width(330.0)
                 .resizable(true)
                 .show(ctx, |ui| {
-                    if let Some(ev) =
-                        render_mcp_side_panel(ui, &mut self.side_state, &self.mcp_host)
-                    {
+                    if let Some(ev) = render_mcp_side_panel(
+                        ui,
+                        &mut self.side_state,
+                        &self.mcp_host,
+                        self.bridge_port,
+                    ) {
                         panel_event = Some(ev);
                     }
                 });
@@ -1120,15 +1292,24 @@ impl eframe::App for MrtGuiApp {
 
         // Bottom Smart Prompt Bar
         egui::TopBottomPanel::bottom("mrt_bottom_prompt")
-            .frame(egui::Frame::none().fill(Color32::from_rgb(29, 37, 45)).inner_margin(egui::Margin::symmetric(18.0, 12.0)))
+            .frame(
+                egui::Frame::none()
+                    .fill(Palette::BG_SURFACE)
+                    .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_SUBTLE))
+                    .inner_margin(egui::Margin::symmetric(16.0, 12.0)),
+            )
             .show(ctx, |ui| {
             if !self.show_history {
                 if let Some(error) = &self.history_error {
-                    ui.colored_label(Color32::LIGHT_RED, error);
+                    ui.colored_label(Palette::ACCENT_RED, error);
                 }
             }
             if self.mosaic {
-                ui.small(format!("Selected terminal · {}", self.tabs[self.active_tab].title));
+                ui.label(
+                    RichText::new(format!("Active · {}", self.tabs[self.active_tab].title))
+                        .size(11.0)
+                        .color(Palette::TEXT_MUTED),
+                );
             }
             // Optional AI Command Proposal Banner
             let mut run_ai_cmd = None;
@@ -1139,28 +1320,31 @@ impl eframe::App for MrtGuiApp {
                 let explanation = &proposal.explanation;
                 let provider = &proposal.provider_used;
                 egui::Frame::none()
-                    .fill(Color32::from_rgb(30, 46, 68))
-                    .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(95, 165, 245)))
-                    .rounding(egui::Rounding::same(5.0))
-                    .inner_margin(egui::Margin::same(8.0))
+                    .fill(Color32::from_rgba_unmultiplied(88, 166, 255, 18))
+                    .stroke(egui::Stroke::new(1.0_f32, Palette::ACCENT_BLUE))
+                    .rounding(egui::Rounding::same(6.0))
+                    .inner_margin(egui::Margin::symmetric(10.0, 8.0))
                     .show(ui, |ui| {
                         ui.horizontal_wrapped(|ui| {
                             ui.label(
-                                RichText::new(format!("✨ AI ({provider}):"))
+                                RichText::new(format!("AI · {provider}"))
+                                    .size(11.5)
                                     .strong()
-                                    .color(Color32::from_rgb(135, 210, 255)),
+                                    .color(Palette::ACCENT_BLUE),
                             );
                             ui.label(
-                                RichText::new(format!("`{cmd}`"))
+                                RichText::new(cmd)
                                     .monospace()
+                                    .size(12.5)
                                     .strong()
-                                    .color(Color32::WHITE),
+                                    .color(Palette::TEXT_PRIMARY),
                             );
                             ui.label(
                                 RichText::new(format!("— {explanation}"))
-                                    .color(Color32::from_rgb(195, 210, 230)),
+                                    .size(12.0)
+                                    .color(Palette::TEXT_SECONDARY),
                             );
-                            if ui.small_button("▶ Execute Now").clicked() {
+                            if ui.small_button("Run").clicked() {
                                 run_ai_cmd = Some(cmd.clone());
                                 dismiss_ai = true;
                             }
@@ -1169,7 +1353,7 @@ impl eframe::App for MrtGuiApp {
                             }
                         });
                     });
-                ui.add_space(4.0);
+                ui.add_space(6.0);
             }
             if dismiss_ai {
                 tab.ai_proposal = None;
@@ -1180,23 +1364,36 @@ impl eframe::App for MrtGuiApp {
 
             let mut should_submit = false;
             if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-                ui.add(egui::Label::new(RichText::new(tab.cwd.display().to_string())
-                    .monospace().color(Color32::from_rgb(175, 189, 202))).truncate())
-                    .on_hover_text(tab.cwd.display().to_string());
-                ui.add_space(5.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(tab.cwd.display().to_string())
+                            .size(11.5)
+                            .monospace()
+                            .color(Palette::TEXT_MUTED),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(tab.cwd.display().to_string());
+                ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(">").size(21.0).color(Color32::from_rgb(132, 224, 188)));
+                    ui.label(
+                        RichText::new("›")
+                            .size(20.0)
+                            .monospace()
+                            .strong()
+                            .color(Palette::ACCENT_GREEN),
+                    );
                     let response = ui.add(
                         egui::TextEdit::singleline(&mut tab.input_line)
                             .id(egui::Id::new(("command_input", tab.id)))
-                            .font(egui::FontId::monospace(18.0))
+                            .font(egui::FontId::monospace(14.5))
                             .margin(egui::Margin::symmetric(10.0, 8.0))
                             .hint_text(if tab.blocks.is_empty() {
-                                "Type a command. Press Ctrl+K for tools."
+                                "Enter a command, # for AI, or Ctrl+K for palette"
                             } else {
-                                "Type a command"
+                                "Enter a command..."
                             })
-                            .desired_width((ui.available_width() - 84.0).max(32.0)),
+                            .desired_width((ui.available_width() - 72.0).max(32.0)),
                     );
                     if focus_prompt && !self.show_command_palette && self.pending_safety.is_none() {
                         response.request_focus();
@@ -1231,7 +1428,7 @@ impl eframe::App for MrtGuiApp {
                         }
                     }
 
-                    if ui.add_enabled(!tab.input_line.trim().is_empty(), egui::Button::new("Run").min_size(egui::vec2(52.0, 36.0))).clicked() {
+                    if ui.add_enabled(!tab.input_line.trim().is_empty(), egui::Button::new("Run").min_size(egui::vec2(52.0, 34.0))).clicked() {
                         response.request_focus();
                         should_submit = true;
                     }
@@ -1244,7 +1441,13 @@ impl eframe::App for MrtGuiApp {
         });
 
         // Central Terminal Block Stream
-        egui::CentralPanel::default().frame(egui::Frame::none().fill(Color32::from_rgb(19, 24, 30)).inner_margin(egui::Margin::same(14.0))).show(ctx, |ui| {
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::none()
+                    .fill(Palette::BG_BASE)
+                    .inner_margin(egui::Margin::same(16.0)),
+            )
+            .show(ctx, |ui| {
             if self.mosaic {
                 self.render_mosaic(ui);
                 return;
@@ -1264,7 +1467,7 @@ impl eframe::App for MrtGuiApp {
                             if let Some(action) = render_command_block(ui, block, filter, previous_id) {
                                 pending_block_action = Some(action);
                             }
-                            ui.add_space(8.0);
+                            ui.add_space(10.0);
                         }
                         if let Some((previous_id, current_id)) = tab.comparison {
                             let previous = tab.blocks.iter().find(|block| block.id == previous_id);
@@ -1283,59 +1486,84 @@ impl eframe::App for MrtGuiApp {
             }
         });
 
-        // Safety Gate Modal Window
+        // Safety Gate Modal Overlay
         if self.pending_safety.is_some() {
             let mut approve = false;
             let mut cancel = false;
 
+            egui::Area::new(egui::Id::new("safety_backdrop"))
+                .fixed_pos(egui::Pos2::ZERO)
+                .order(egui::Order::Middle)
+                .show(ctx, |ui| {
+                    let screen = ctx.screen_rect();
+                    ui.painter().rect_filled(
+                        screen,
+                        0.0,
+                        Color32::from_black_alpha(140),
+                    );
+                });
+
             if let Some(ref pending) = self.pending_safety {
-                egui::Window::new("🛡 MRT Safety Approval Gate")
+                egui::Window::new("MRT Safety Gate")
+                    .title_bar(false)
                     .collapsible(false)
                     .resizable(false)
+                    .default_width(460.0)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                     .show(ctx, |ui| {
                         ui.label(
                             RichText::new("Destructive Command Intercepted")
-                                .size(15.5)
+                                .size(15.0)
                                 .strong()
-                                .color(Color32::from_rgb(255, 130, 130)),
+                                .color(Palette::ACCENT_RED),
                         );
                         ui.add_space(4.0);
-                        ui.label(format!(
-                            "Risk Classification: {}",
-                            pending.assessment.risk.label()
-                        ));
-                        ui.label(format!("Reason: {}", pending.assessment.reason));
-                        ui.label(format!(
-                            "Target Shell: {} (Tab {}, in {})",
-                            pending.shell.name,
-                            pending.tab_id,
-                            pending.cwd.display()
-                        ));
-                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new(format!(
+                                "{} · {}",
+                                pending.assessment.risk.label(),
+                                pending.assessment.reason
+                            ))
+                            .size(12.0)
+                            .color(Palette::TEXT_SECONDARY),
+                        );
+                        ui.label(
+                            RichText::new(format!(
+                                "{} · {}",
+                                pending.shell.name,
+                                pending.cwd.display()
+                            ))
+                            .size(11.5)
+                            .monospace()
+                            .color(Palette::TEXT_MUTED),
+                        );
+                        ui.add_space(8.0);
                         egui::Frame::none()
-                            .fill(Color32::from_rgb(35, 20, 24))
-                            .inner_margin(egui::Margin::same(8.0))
+                            .fill(Color32::from_rgba_unmultiplied(248, 81, 73, 20))
+                            .stroke(egui::Stroke::new(1.0_f32, Palette::ACCENT_RED))
+                            .rounding(egui::Rounding::same(6.0))
+                            .inner_margin(egui::Margin::same(10.0))
                             .show(ui, |ui| {
                                 ui.label(
                                     RichText::new(&pending.assessment.command)
                                         .monospace()
+                                        .size(13.0)
                                         .strong()
-                                        .color(Color32::from_rgb(255, 195, 195)),
+                                        .color(Palette::TEXT_PRIMARY),
                                 );
                             });
-                        ui.add_space(8.0);
+                        ui.add_space(10.0);
                         ui.horizontal(|ui| {
                             if ui
                                 .button(
-                                    RichText::new("✓ Approve & Execute")
-                                        .color(Color32::from_rgb(255, 150, 150)),
+                                    RichText::new("Approve & Execute")
+                                        .color(Palette::ACCENT_RED),
                                 )
                                 .clicked()
                             {
                                 approve = true;
                             }
-                            if ui.button("✗ Cancel Command").clicked() {
+                            if ui.button("Cancel").clicked() {
                                 cancel = true;
                             }
                         });
@@ -1355,25 +1583,46 @@ impl eframe::App for MrtGuiApp {
             let mut cmd_to_run = None;
             let mut switch_shell_idx = None;
 
+            egui::Area::new(egui::Id::new("palette_backdrop"))
+                .fixed_pos(egui::Pos2::ZERO)
+                .order(egui::Order::Middle)
+                .show(ctx, |ui| {
+                    let screen = ctx.screen_rect();
+                    ui.painter().rect_filled(
+                        screen,
+                        0.0,
+                        Color32::from_black_alpha(130),
+                    );
+                });
+
             egui::Window::new("Command palette")
+                .title_bar(false)
                 .collapsible(false)
                 .resizable(false)
-                .default_width(480.0)
-                .anchor(egui::Align2::CENTER_TOP, [0.0, 60.0])
+                .default_width(500.0)
+                .anchor(egui::Align2::CENTER_TOP, [0.0, 64.0])
                 .show(ctx, |ui| {
                     let search = ui.add(
                         egui::TextEdit::singleline(&mut self.palette_query)
-                            .hint_text("Search commands and shells")
+                            .font(egui::FontId::proportional(14.0))
+                            .margin(egui::Margin::symmetric(10.0, 8.0))
+                            .hint_text("Type a command or switch shell...")
                             .desired_width(f32::INFINITY),
                     );
+                    ui.add_space(4.0);
                     ui.separator();
 
                     if !palette_was_open { search.request_focus(); }
                     let q = self.palette_query.trim().to_lowercase();
-                    egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
-                        ui.label(RichText::new("Switch Active Shell Profile").size(11.5).color(Color32::GRAY));
+                    egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
+                        ui.label(
+                            RichText::new("Shell Profiles")
+                                .size(11.0)
+                                .strong()
+                                .color(Palette::TEXT_MUTED),
+                        );
                         for (idx, s) in self.shells.iter().enumerate() {
-                            let label = format!("🐚 Switch Shell: {} ({})", s.name, s.program);
+                            let label = format!("Switch Shell: {} ({})", s.name, s.program);
                             if q.is_empty() || label.to_lowercase().contains(&q) {
                                 if ui.button(label).clicked() {
                                     switch_shell_idx = Some(idx);
@@ -1382,14 +1631,19 @@ impl eframe::App for MrtGuiApp {
                             }
                         }
 
-                        ui.add_space(4.0);
-                        ui.label(RichText::new("Built-in Internet & AI Tools").size(11.5).color(Color32::GRAY));
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new("Tools & Actions")
+                                .size(11.0)
+                                .strong()
+                                .color(Palette::TEXT_MUTED),
+                        );
                         for (title, cmd) in [
-                            ("🔍 Scan Active Listening TCP/UDP Ports", ":ports"),
-                            ("🌐 HTTP GET Sample JSON API", ":http GET https://httpbin.org/json"),
-                            ("📖 Fetch Rust Homepage as Markdown", ":web https://www.rust-lang.org"),
-                            ("🤖 AI: Show System Info in Active Shell", "# show system info"),
-                            ("Read example.com", ":web https://example.com"),
+                            ("Scan Listening TCP/UDP Ports", ":ports"),
+                            ("HTTP GET Sample JSON API", ":http GET https://httpbin.org/json"),
+                            ("Fetch Rust Homepage as Markdown", ":web https://www.rust-lang.org"),
+                            ("AI: Show System Info in Active Shell", "# show system info"),
+                            ("Fetch example.com as Markdown", ":web https://example.com"),
                             ("AI: List files", "# list all files in directory"),
                             ("AI: Show running processes", "# show running processes"),
                             ("Test Safety Gate", "rm -rf ./important_production_data"),
@@ -1405,9 +1659,18 @@ impl eframe::App for MrtGuiApp {
                     });
 
                     ui.separator();
-                    if ui.small_button("Close (Esc)").clicked() {
-                        close_palette = true;
-                    }
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("Esc to close")
+                                .size(11.0)
+                                .color(Palette::TEXT_MUTED),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("Close").clicked() {
+                                close_palette = true;
+                            }
+                        });
+                    });
                 });
 
             if let Some(s_idx) = switch_shell_idx {
@@ -1430,6 +1693,8 @@ impl eframe::App for MrtGuiApp {
                 }
             }
         }
+
+        self.sync_mcp_from_gui();
     }
 }
 
@@ -1668,5 +1933,47 @@ mod tests {
             remaining.ai_proposal.as_ref().unwrap().proposed_command,
             "echo second"
         );
+    }
+
+    #[test]
+    fn mcp_tools_synchronize_live_gui_tabs_and_layout() {
+        let mut app = MrtGuiApp::new();
+        let host = app.mcp_host.clone();
+
+        // Agent creates a tab via MCP
+        app.runtime.block_on(async {
+            host.call_tool(
+                "mrt-native-mcp",
+                "mrt_create_tab",
+                json!({ "title": "MCP Controlled Tab", "activate": true }),
+            )
+            .await
+            .unwrap();
+        });
+        app.process_mcp_ui_commands();
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.tabs[app.active_tab].title, "MCP Controlled Tab");
+
+        // Agent toggles Mosaic & Explorer and sets input draft via mrt_control_gui
+        app.runtime.block_on(async {
+            host.call_tool(
+                "mrt-native-mcp",
+                "mrt_control_gui",
+                json!({
+                    "input_text": "echo drafted_by_agent",
+                    "submit_input": false,
+                    "mosaic": true,
+                    "mosaic_columns": 3,
+                    "explorer": true
+                }),
+            )
+            .await
+            .unwrap();
+        });
+        app.process_mcp_ui_commands();
+        assert!(app.mosaic);
+        assert_eq!(app.mosaic_columns, 3);
+        assert!(app.show_explorer);
+        assert_eq!(app.tabs[app.active_tab].input_line, "echo drafted_by_agent");
     }
 }

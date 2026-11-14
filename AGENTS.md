@@ -1,4 +1,4 @@
-# 🤖 AGENTS.md — AI Agent Guide for Modern Rust Terminal (MRT)
+# AGENTS.md — AI Agent Guide for Modern Rust Terminal (MRT)
 
 Welcome, AI Agent! This repository (**Modern Rust Terminal / MRT**) is an open, 100% free, AI-built cross-platform terminal written in Rust. Your user is generously contributing their AI tokens to improve this project.
 
@@ -22,13 +22,14 @@ The Cargo workspace contains 5 modular crates:
   - `net_inspector.rs`: Built-in `:ports` local TCP/UDP listening port scanner.
 - **`crates/mrt-mcp`**:
   - `protocol.rs`: JSON-RPC 2.0 and Model Context Protocol (MCP) types.
-  - `server.rs`: MRT as an MCP Server (`mrt --mcp-server`), exposing `mrt_get_session_state`, `mrt_list_blocks`, `mrt_run_command` (protected by the Safety Gate), `mrt_http_request`, `mrt_web_fetch`, and `mrt_inspect_ports`.
+  - `bridge.rs`: Localhost TCP bridge (`mcp-bridge.json`) so external `mrt --mcp-server` processes transparently control a running MRT GUI window.
+  - `server.rs`: MRT as an MCP Server (`mrt --mcp-server` or live GUI bridge), exposing 24 tools across session & multi-tab control (`mrt_get_session_state`, `mrt_list_tabs`, `mrt_create_tab`, `mrt_switch_tab`, `mrt_close_tab`, `mrt_configure_tab`), command execution & block inspection/diffing/triage (`mrt_run_command`, `mrt_list_blocks`, `mrt_get_block`, `mrt_search_blocks`, `mrt_compare_blocks`, `mrt_diagnose_block`, `mrt_clear_blocks`), interactive PTYs (`mrt_pty_spawn`, `mrt_pty_write`, `mrt_pty_read`, `mrt_pty_resize`, `mrt_pty_list`, `mrt_pty_kill`), live GUI control (`mrt_control_gui`), AI translation (`mrt_ai_translate`), and internet tools (`mrt_http_request`, `mrt_web_fetch`, `mrt_inspect_ports`), plus 4 MCP resources.
   - `client.rs`: MRT as an MCP Host, connecting to in-process loopback and external `stdio` MCP servers.
 - **`crates/mrt-ai`**:
   - `lib.rs`: Multi-provider AI client supporting **Google Gemini**, **Anthropic Claude**, **OpenAI**, **xAI Grok**, **DeepSeek**, **OpenRouter**, **Local Ollama**, and a deterministic **Offline Polyglot Heuristic Engine**.
 - **`crates/mrt-app`**:
   - `main.rs`: Entrypoint (`#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]`), CLI flag handler (`--mcp-server`, `--version`, `--help`), and `eframe` native GPU launcher.
-  - `app.rs` & `widgets/`: Multi-tab GUI, per-tab shell switcher, interactive block renderer, MCP Hub side panel, Internet Studio side panel, Safety Approval Gate modal, and Command Palette (`Ctrl+K`).
+  - `app.rs`, `history.rs`, `theme.rs` & `widgets/`: Multi-tab GUI, Mosaic split grid, Folder Explorer, SQLite + FTS5 trigram command history, dark theme & system font loader, per-tab shell switcher, interactive block renderer, MCP Hub side panel, Internet Studio side panel, Safety Approval Gate modal, and Command Palette (`Ctrl+K` / `Ctrl+P`).
 
 ---
 

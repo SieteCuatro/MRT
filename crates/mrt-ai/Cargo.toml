@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 mrt-core = { path = "../mrt-core" }
-mrt-mcp = { path = "../mrt-mcp" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

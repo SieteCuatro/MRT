@@ -1,65 +1,225 @@
+use crate::bridge::{read_bridge_port_file, try_forward_jsonrpc_to_gui};
 use crate::protocol::{
     JsonRpcRequest, JsonRpcResponse, McpResource, McpTool, McpToolCallResult,
 };
 use anyhow::Result;
+use mrt_ai::{diagnose_command_error, translate_nl_to_command};
 use mrt_core::{
-    assess_command, discover_shells, execute_command_in_shell, CommandBlock, RiskLevel,
-    ShellProfile,
+    assess_command, discover_shells, execute_command_in_shell, parse_ansi_text, CommandBlock,
+    InteractivePty, RiskLevel, ShellProfile,
 };
 use mrt_tools::{
     execute_http_request, fetch_url_as_markdown, inspect_listening_ports, HttpRequestSpec,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use uuid::Uuid;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpTabSession {
+    pub id: Uuid,
+    pub title: String,
+    pub shell_id: String,
+    pub shell_name: String,
+    pub cwd: PathBuf,
+    pub blocks: Vec<CommandBlock>,
+}
+
+#[derive(Debug, Clone)]
+pub enum GuiUiCommand {
+    SyncFromMcp,
+    SetInputDraft {
+        tab_id: Option<Uuid>,
+        text: String,
+        submit: bool,
+    },
+    SetMosaic {
+        enabled: bool,
+        columns: Option<usize>,
+    },
+    SetExplorer {
+        visible: bool,
+    },
+    SetComparison {
+        tab_id: Option<Uuid>,
+        previous_block_id: Uuid,
+        current_block_id: Uuid,
+    },
+}
 
 #[derive(Clone)]
 pub struct MrtMcpServerState {
     pub cwd: Arc<Mutex<PathBuf>>,
     pub blocks: Arc<Mutex<Vec<CommandBlock>>>,
+    pub tabs: Arc<Mutex<Vec<McpTabSession>>>,
+    pub active_tab_id: Arc<Mutex<Uuid>>,
+    pub ptys: Arc<Mutex<HashMap<Uuid, Arc<InteractivePty>>>>,
     pub shells: Vec<ShellProfile>,
+    pub gui_tx: Option<Sender<GuiUiCommand>>,
 }
 
 impl Default for MrtMcpServerState {
     fn default() -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let shells = discover_shells();
+        let default_shell = shells.first();
+        let shell_id = default_shell
+            .map(|s| s.id.clone())
+            .unwrap_or_else(|| "sh".into());
+        let shell_name = default_shell
+            .map(|s| s.kind.short_label().to_string())
+            .unwrap_or_else(|| "sh".into());
+        let tab_id = Uuid::new_v4();
+        let first_tab = McpTabSession {
+            id: tab_id,
+            title: format!("Tab 1 ({shell_name})"),
+            shell_id,
+            shell_name,
+            cwd: cwd.clone(),
+            blocks: Vec::new(),
+        };
         Self {
             cwd: Arc::new(Mutex::new(cwd)),
             blocks: Arc::new(Mutex::new(Vec::new())),
-            shells: discover_shells(),
+            tabs: Arc::new(Mutex::new(vec![first_tab])),
+            active_tab_id: Arc::new(Mutex::new(tab_id)),
+            ptys: Arc::new(Mutex::new(HashMap::new())),
+            shells,
+            gui_tx: None,
         }
     }
 }
 
 impl MrtMcpServerState {
+    fn notify_gui(&self, cmd: GuiUiCommand) {
+        if let Some(ref tx) = self.gui_tx {
+            let _ = tx.send(cmd);
+        }
+    }
+
+    fn resolve_tab_id(&self, requested: Option<&str>) -> Option<Uuid> {
+        let tabs = self.tabs.lock().ok()?;
+        if let Some(req) = requested {
+            let trimmed = req.trim();
+            if !trimmed.is_empty() {
+                if let Ok(uuid) = Uuid::parse_str(trimmed) {
+                    if tabs.iter().any(|t| t.id == uuid) {
+                        return Some(uuid);
+                    }
+                }
+                // Match by index ("0", "1") or case-insensitive title substring
+                if let Ok(idx) = trimmed.parse::<usize>() {
+                    if let Some(t) = tabs.get(idx) {
+                        return Some(t.id);
+                    }
+                }
+                let lower = trimmed.to_lowercase();
+                if let Some(t) = tabs.iter().find(|t| t.title.to_lowercase().contains(&lower)) {
+                    return Some(t.id);
+                }
+                return None;
+            }
+        }
+        let active = *self.active_tab_id.lock().ok()?;
+        if tabs.iter().any(|t| t.id == active) {
+            Some(active)
+        } else {
+            tabs.first().map(|t| t.id)
+        }
+    }
+
+    fn resolve_shell(&self, requested: Option<&str>) -> Option<ShellProfile> {
+        if let Some(req) = requested {
+            let trimmed = req.trim();
+            if !trimmed.is_empty() {
+                return self
+                    .shells
+                    .iter()
+                    .find(|s| {
+                        s.id.eq_ignore_ascii_case(trimmed)
+                            || s.kind.short_label().eq_ignore_ascii_case(trimmed)
+                            || s.name.to_lowercase().contains(&trimmed.to_lowercase())
+                    })
+                    .cloned();
+            }
+        }
+        self.shells.first().cloned()
+    }
+
     pub fn built_in_tools() -> Vec<McpTool> {
         vec![
             McpTool {
                 name: "mrt_get_session_state".into(),
-                description: "Get the current Modern Rust Terminal session state (OS, CWD, available shells, and block count).".into(),
+                description: "Get the current Modern Rust Terminal session state (OS, CWD, active tab, all open tabs, active PTY sessions, available shells, and block count).".into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {},
                 }),
             },
             McpTool {
-                name: "mrt_list_blocks".into(),
-                description: "List recent terminal command blocks, including command, shell, exit code, duration, and output.".into(),
+                name: "mrt_list_tabs".into(),
+                description: "List all terminal tabs with their IDs, titles, active shells, CWDs, block counts, and active status.".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {},
+                }),
+            },
+            McpTool {
+                name: "mrt_create_tab".into(),
+                description: "Create a new terminal tab with an optional title, shell profile, Working Directory (cwd), and focus flag.".into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "limit": {
-                            "type": "integer",
-                            "description": "Maximum number of recent blocks to return (default 10)"
-                        }
+                        "title": { "type": "string", "description": "Optional custom title for the new tab" },
+                        "shell": { "type": "string", "description": "Optional shell id (e.g. 'pwsh', 'powershell', 'cmd', 'bash', 'git-bash', 'wsl', 'zsh', 'sh')" },
+                        "cwd": { "type": "string", "description": "Optional starting directory path" },
+                        "activate": { "type": "boolean", "description": "Switch focus to the newly created tab (default true)" }
+                    }
+                }),
+            },
+            McpTool {
+                name: "mrt_switch_tab".into(),
+                description: "Switch the active terminal tab by tab UUID, 0-based index, or title substring.".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "tab_id": { "type": "string", "description": "Tab UUID, 0-based index, or title substring" }
+                    },
+                    "required": ["tab_id"]
+                }),
+            },
+            McpTool {
+                name: "mrt_close_tab".into(),
+                description: "Close a terminal tab by UUID, 0-based index, or title substring (at least one tab is always kept open).".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "tab_id": { "type": "string", "description": "Tab UUID, 0-based index, or title substring" }
+                    },
+                    "required": ["tab_id"]
+                }),
+            },
+            McpTool {
+                name: "mrt_configure_tab".into(),
+                description: "Configure a terminal tab's shell profile, working directory (cwd), or title.".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "tab_id": { "type": "string", "description": "Optional tab UUID, index, or title (defaults to active tab)" },
+                        "shell": { "type": "string", "description": "Optional new shell id (e.g. 'pwsh', 'cmd', 'bash', 'wsl')" },
+                        "cwd": { "type": "string", "description": "Optional new working directory path" },
+                        "title": { "type": "string", "description": "Optional new tab title" }
                     }
                 }),
             },
             McpTool {
                 name: "mrt_run_command".into(),
-                description: "Execute a command in a specified shell (pwsh, powershell, cmd, bash, wsl, zsh, sh) with MRT Safety Gate protection.".into(),
+                description: "Execute a command in a specified tab and shell (pwsh, powershell, cmd, bash, wsl, zsh, sh) with MRT Safety Gate protection, recording a structured CommandBlock.".into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -69,10 +229,197 @@ impl MrtMcpServerState {
                         },
                         "shell": {
                             "type": "string",
-                            "description": "Optional shell id (e.g. 'pwsh', 'cmd', 'bash', 'wsl')"
+                            "description": "Optional shell id override (e.g. 'pwsh', 'cmd', 'bash', 'wsl')"
+                        },
+                        "tab_id": {
+                            "type": "string",
+                            "description": "Optional target tab UUID, index, or title (defaults to active tab)"
+                        },
+                        "cwd": {
+                            "type": "string",
+                            "description": "Optional working directory override for this command"
                         }
                     },
                     "required": ["command"]
+                }),
+            },
+            McpTool {
+                name: "mrt_list_blocks".into(),
+                description: "List recent terminal command blocks (optionally scoped to a tab), including block ID, command, shell, exit code, duration, and output.".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "tab_id": {
+                            "type": "string",
+                            "description": "Optional tab UUID, index, or title to filter blocks"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of recent blocks to return (default 10)"
+                        }
+                    }
+                }),
+            },
+            McpTool {
+                name: "mrt_get_block".into(),
+                description: "Retrieve full details of a specific CommandBlock by its UUID, including raw ANSI output, plain text, and structured payload (JSON tree, Table headers/rows, Markdown, or HTTP exchange).".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "block_id": { "type": "string", "description": "UUID of the CommandBlock" }
+                    },
+                    "required": ["block_id"]
+                }),
+            },
+            McpTool {
+                name: "mrt_search_blocks".into(),
+                description: "Search and filter terminal blocks across tabs by command/output substring, shell, or exit code status.".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Substring to match in command or output" },
+                        "tab_id": { "type": "string", "description": "Optional tab UUID, index, or title" },
+                        "failed_only": { "type": "boolean", "description": "If true, only return blocks with non-zero exit codes" },
+                        "limit": { "type": "integer", "description": "Maximum matches to return (default 20)" }
+                    }
+                }),
+            },
+            McpTool {
+                name: "mrt_compare_blocks".into(),
+                description: "Compute a unified line-by-line diff between two CommandBlocks (and optionally open the visual comparison view in the MRT GUI).".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "previous_block_id": { "type": "string", "description": "UUID of the baseline/previous CommandBlock" },
+                        "current_block_id": { "type": "string", "description": "UUID of the current CommandBlock" },
+                        "show_in_gui": { "type": "boolean", "description": "Also activate the visual comparison view in the MRT GUI (default true)" }
+                    },
+                    "required": ["previous_block_id", "current_block_id"]
+                }),
+            },
+            McpTool {
+                name: "mrt_diagnose_block".into(),
+                description: "Run MRT's shell-aware AI Error Triage on a CommandBlock (or arbitrary command/output) and attach the explanation and suggested fix to the block.".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "block_id": { "type": "string", "description": "UUID of the failed CommandBlock to diagnose" }
+                    },
+                    "required": ["block_id"]
+                }),
+            },
+            McpTool {
+                name: "mrt_clear_blocks".into(),
+                description: "Clear command blocks in the specified terminal tab (or all tabs if all=true).".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "tab_id": { "type": "string", "description": "Optional tab UUID, index, or title (defaults to active tab)" },
+                        "all": { "type": "boolean", "description": "If true, clear blocks across all tabs" }
+                    }
+                }),
+            },
+            McpTool {
+                name: "mrt_pty_spawn".into(),
+                description: "Spawn a persistent interactive PTY session (for REPLs, dev servers, SSH, watchers, or interactive CLI prompts) and return its pty_id.".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "shell": { "type": "string", "description": "Optional shell id (e.g. 'pwsh', 'cmd', 'bash', 'wsl')" },
+                        "command": { "type": "string", "description": "Optional initial command to run inside the PTY" },
+                        "cwd": { "type": "string", "description": "Optional working directory" },
+                        "cols": { "type": "integer", "description": "Terminal width in columns (default 120)" },
+                        "rows": { "type": "integer", "description": "Terminal height in rows (default 36)" },
+                        "wait_ms": { "type": "integer", "description": "Milliseconds to wait for initial startup output before returning (default 150)" }
+                    }
+                }),
+            },
+            McpTool {
+                name: "mrt_pty_write".into(),
+                description: "Send text, commands, or control characters (e.g. '\\u0003' for Ctrl+C, '\\u0004' for Ctrl+D) to a running interactive PTY session.".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "pty_id": { "type": "string", "description": "UUID of the PTY session" },
+                        "input": { "type": "string", "description": "Input string to write to the PTY stdin" },
+                        "append_newline": { "type": "boolean", "description": "Whether to append a newline after input (default true)" },
+                        "wait_ms": { "type": "integer", "description": "Optional milliseconds to wait before reading newly produced output (default 150)" }
+                    },
+                    "required": ["pty_id", "input"]
+                }),
+            },
+            McpTool {
+                name: "mrt_pty_read".into(),
+                description: "Read buffered output from an interactive PTY session (either draining only new unread output or reading the full session transcript).".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "pty_id": { "type": "string", "description": "UUID of the PTY session" },
+                        "drain": { "type": "boolean", "description": "If true (default), return and clear unread output; if false, return full transcript" },
+                        "strip_ansi": { "type": "boolean", "description": "If true (default), strip ANSI escape codes for clean agent reading" },
+                        "wait_ms": { "type": "integer", "description": "Optional milliseconds to wait before reading output (default 0)" }
+                    },
+                    "required": ["pty_id"]
+                }),
+            },
+            McpTool {
+                name: "mrt_pty_resize".into(),
+                description: "Resize an active interactive PTY session's terminal dimensions (cols and rows).".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "pty_id": { "type": "string", "description": "UUID of the PTY session" },
+                        "cols": { "type": "integer", "description": "New width in columns" },
+                        "rows": { "type": "integer", "description": "New height in rows" }
+                    },
+                    "required": ["pty_id", "cols", "rows"]
+                }),
+            },
+            McpTool {
+                name: "mrt_pty_list".into(),
+                description: "List all active and exited interactive PTY sessions managed by MRT.".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
+            McpTool {
+                name: "mrt_pty_kill".into(),
+                description: "Terminate a running interactive PTY session and optionally remove it from the session table.".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "pty_id": { "type": "string", "description": "UUID of the PTY session to kill" },
+                        "remove": { "type": "boolean", "description": "Remove the PTY session entry after killing (default true)" }
+                    },
+                    "required": ["pty_id"]
+                }),
+            },
+            McpTool {
+                name: "mrt_control_gui".into(),
+                description: "Control the live MRT GUI layout and prompt bar (populate or submit the command input bar, toggle Mosaic multi-terminal grid view, or toggle the folder Explorer panel).".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "tab_id": { "type": "string", "description": "Optional target tab UUID, index, or title" },
+                        "input_text": { "type": "string", "description": "Optional text to type into the tab's command prompt bar" },
+                        "submit_input": { "type": "boolean", "description": "If true, immediately submit the input_text in the GUI (honoring the GUI Safety Gate modal for Critical commands)" },
+                        "mosaic": { "type": "boolean", "description": "Optional toggle for Mosaic multi-terminal grid mode" },
+                        "mosaic_columns": { "type": "integer", "description": "Optional column count (1..=6) for Mosaic grid mode" },
+                        "explorer": { "type": "boolean", "description": "Optional toggle for the left Folder Explorer side panel" }
+                    }
+                }),
+            },
+            McpTool {
+                name: "mrt_ai_translate".into(),
+                description: "Translate a natural-language task description into an idiomatic shell command for the target shell using MRT's multi-provider AI / polyglot engine.".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Natural language description of what to do" },
+                        "shell": { "type": "string", "description": "Optional target shell id (defaults to active tab's shell)" }
+                    },
+                    "required": ["query"]
                 }),
             },
             McpTool {
@@ -81,7 +428,7 @@ impl MrtMcpServerState {
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "method": { "type": "string", "description": "HTTP method (GET, POST, PUT, DELETE)" },
+                        "method": { "type": "string", "description": "HTTP method (GET, POST, PUT, DELETE, PATCH)" },
                         "url": { "type": "string", "description": "Target URL" },
                         "body": { "type": "string", "description": "Optional request body" }
                     },
@@ -115,13 +462,25 @@ impl MrtMcpServerState {
             McpResource {
                 uri: "mrt://session/state".into(),
                 name: "Active Terminal Session State".into(),
-                description: "Live JSON snapshot of CWD, available shells, and environment.".into(),
+                description: "Live JSON snapshot of CWD, active tab, available shells, and environment.".into(),
+                mime_type: "application/json".into(),
+            },
+            McpResource {
+                uri: "mrt://session/tabs".into(),
+                name: "Open Terminal Tabs".into(),
+                description: "List of open terminal tabs, active shell per tab, CWD, and block counts.".into(),
                 mime_type: "application/json".into(),
             },
             McpResource {
                 uri: "mrt://session/blocks".into(),
                 name: "Command Block History".into(),
                 description: "Structured list of executed terminal blocks in this session.".into(),
+                mime_type: "application/json".into(),
+            },
+            McpResource {
+                uri: "mrt://session/ptys".into(),
+                name: "Interactive PTY Sessions".into(),
+                description: "Active and exited interactive background PTY sessions.".into(),
                 mime_type: "application/json".into(),
             },
         ]
@@ -135,6 +494,7 @@ pub async fn handle_mcp_jsonrpc(
 ) -> Option<JsonRpcResponse> {
     match req.method.as_str() {
         "notifications/initialized" | "notifications/cancelled" => None,
+        "ping" => Some(JsonRpcResponse::success(req.id, json!({}))),
         "initialize" => Some(JsonRpcResponse::success(
             req.id,
             json!({
@@ -169,19 +529,70 @@ pub async fn handle_mcp_jsonrpc(
                 .and_then(|u| u.as_str())
                 .unwrap_or("mrt://session/state");
 
-            let text = if uri == "mrt://session/blocks" {
-                let guard = state.blocks.lock().unwrap();
-                serde_json::to_string_pretty(&*guard).unwrap_or_else(|_| "[]".into())
-            } else {
-                let cwd = state.cwd.lock().unwrap().display().to_string();
-                let shells: Vec<&str> = state.shells.iter().map(|s| s.id.as_str()).collect();
-                serde_json::to_string_pretty(&json!({
-                    "os": std::env::consts::OS,
-                    "arch": std::env::consts::ARCH,
-                    "cwd": cwd,
-                    "available_shells": shells,
-                }))
-                .unwrap_or_default()
+            let text = match uri {
+                "mrt://session/blocks" => {
+                    let guard = state.blocks.lock().unwrap();
+                    serde_json::to_string_pretty(&*guard).unwrap_or_else(|_| "[]".into())
+                }
+                "mrt://session/tabs" => {
+                    let active_id = *state.active_tab_id.lock().unwrap();
+                    let tabs = state.tabs.lock().unwrap();
+                    let summaries: Vec<Value> = tabs
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, t)| {
+                            json!({
+                                "index": idx,
+                                "id": t.id,
+                                "title": t.title,
+                                "active": t.id == active_id,
+                                "shell_id": t.shell_id,
+                                "shell_name": t.shell_name,
+                                "cwd": t.cwd.display().to_string(),
+                                "block_count": t.blocks.len(),
+                            })
+                        })
+                        .collect();
+                    serde_json::to_string_pretty(&summaries).unwrap_or_else(|_| "[]".into())
+                }
+                "mrt://session/ptys" => {
+                    let guard = state.ptys.lock().unwrap();
+                    let list: Vec<Value> = guard
+                        .values()
+                        .map(|pty| {
+                            let exit_code = pty.try_wait_exit().ok().flatten();
+                            json!({
+                                "pty_id": pty.id,
+                                "shell_id": pty.shell_id,
+                                "shell_name": pty.shell_name,
+                                "cwd": pty.cwd.display().to_string(),
+                                "cols": pty.cols,
+                                "rows": pty.rows,
+                                "running": exit_code.is_none(),
+                                "exit_code": exit_code,
+                            })
+                        })
+                        .collect();
+                    serde_json::to_string_pretty(&list).unwrap_or_else(|_| "[]".into())
+                }
+                _ => {
+                    let cwd = state.cwd.lock().unwrap().display().to_string();
+                    let active_tab_id = *state.active_tab_id.lock().unwrap();
+                    let tab_count = state.tabs.lock().unwrap().len();
+                    let pty_count = state.ptys.lock().unwrap().len();
+                    let shells: Vec<&str> = state.shells.iter().map(|s| s.id.as_str()).collect();
+                    serde_json::to_string_pretty(&json!({
+                        "os": std::env::consts::OS,
+                        "arch": std::env::consts::ARCH,
+                        "cwd": cwd,
+                        "active_tab_id": active_tab_id,
+                        "tab_count": tab_count,
+                        "pty_count": pty_count,
+                        "gui_attached": state.gui_tx.is_some(),
+                        "available_shells": shells,
+                    }))
+                    .unwrap_or_default()
+                }
             };
 
             Some(JsonRpcResponse::success(
@@ -223,6 +634,27 @@ pub async fn execute_mrt_mcp_tool(
         "mrt_get_session_state" => {
             let cwd = state.cwd.lock().unwrap().display().to_string();
             let block_count = state.blocks.lock().unwrap().len();
+            let active_tab_id = *state.active_tab_id.lock().unwrap();
+            let tabs: Vec<Value> = state
+                .tabs
+                .lock()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .map(|(idx, t)| {
+                    json!({
+                        "index": idx,
+                        "id": t.id,
+                        "title": t.title,
+                        "active": t.id == active_tab_id,
+                        "shell_id": t.shell_id,
+                        "shell_name": t.shell_name,
+                        "cwd": t.cwd.display().to_string(),
+                        "block_count": t.blocks.len(),
+                    })
+                })
+                .collect();
+            let pty_count = state.ptys.lock().unwrap().len();
             let shells: Vec<Value> = state
                 .shells
                 .iter()
@@ -232,11 +664,240 @@ pub async fn execute_mrt_mcp_tool(
                 "os": std::env::consts::OS,
                 "arch": std::env::consts::ARCH,
                 "cwd": cwd,
+                "active_tab_id": active_tab_id,
+                "tab_count": tabs.len(),
+                "tabs": tabs,
+                "pty_count": pty_count,
                 "block_count": block_count,
+                "gui_attached": state.gui_tx.is_some(),
                 "available_shells": shells
             });
             McpToolCallResult::text(
                 serde_json::to_string_pretty(&payload).unwrap_or_default(),
+                false,
+            )
+        }
+        "mrt_list_tabs" => {
+            let active_tab_id = *state.active_tab_id.lock().unwrap();
+            let tabs: Vec<Value> = state
+                .tabs
+                .lock()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .map(|(idx, t)| {
+                    json!({
+                        "index": idx,
+                        "id": t.id,
+                        "title": t.title,
+                        "active": t.id == active_tab_id,
+                        "shell_id": t.shell_id,
+                        "shell_name": t.shell_name,
+                        "cwd": t.cwd.display().to_string(),
+                        "block_count": t.blocks.len(),
+                    })
+                })
+                .collect();
+            McpToolCallResult::text(
+                serde_json::to_string_pretty(&tabs).unwrap_or_default(),
+                false,
+            )
+        }
+        "mrt_create_tab" => {
+            let requested_shell = args.get("shell").and_then(|v| v.as_str());
+            let Some(shell) = state.resolve_shell(requested_shell) else {
+                return McpToolCallResult::text("No matching shell available on host", true);
+            };
+            let cwd = args
+                .get("cwd")
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| state.cwd.lock().unwrap().clone());
+            let activate = args
+                .get("activate")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+
+            let mut tabs = state.tabs.lock().unwrap();
+            let n = tabs.len() + 1;
+            let title = args
+                .get("title")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(String::from)
+                .unwrap_or_else(|| format!("Tab {n} ({})", shell.kind.short_label()));
+            let new_id = Uuid::new_v4();
+            let session = McpTabSession {
+                id: new_id,
+                title: title.clone(),
+                shell_id: shell.id.clone(),
+                shell_name: shell.kind.short_label().to_string(),
+                cwd: cwd.clone(),
+                blocks: Vec::new(),
+            };
+            tabs.push(session);
+            drop(tabs);
+
+            if activate {
+                *state.active_tab_id.lock().unwrap() = new_id;
+                *state.cwd.lock().unwrap() = cwd.clone();
+            }
+            state.notify_gui(GuiUiCommand::SyncFromMcp);
+
+            let resp = json!({
+                "tab_id": new_id,
+                "title": title,
+                "shell_id": shell.id,
+                "cwd": cwd.display().to_string(),
+                "activated": activate,
+            });
+            McpToolCallResult::text(
+                serde_json::to_string_pretty(&resp).unwrap_or_default(),
+                false,
+            )
+        }
+        "mrt_switch_tab" => {
+            let req_id = args.get("tab_id").and_then(|v| v.as_str());
+            let Some(target_id) = state.resolve_tab_id(req_id) else {
+                return McpToolCallResult::text(
+                    format!("Tab not found: {:?}", req_id.unwrap_or("")),
+                    true,
+                );
+            };
+            *state.active_tab_id.lock().unwrap() = target_id;
+            let tab_info = {
+                let tabs = state.tabs.lock().unwrap();
+                tabs.iter().find(|t| t.id == target_id).cloned()
+            };
+            if let Some(ref t) = tab_info {
+                *state.cwd.lock().unwrap() = t.cwd.clone();
+            }
+            state.notify_gui(GuiUiCommand::SyncFromMcp);
+            McpToolCallResult::text(
+                serde_json::to_string_pretty(&json!({
+                    "active_tab_id": target_id,
+                    "title": tab_info.as_ref().map(|t| &t.title),
+                    "shell_id": tab_info.as_ref().map(|t| &t.shell_id),
+                    "cwd": tab_info.as_ref().map(|t| t.cwd.display().to_string()),
+                }))
+                .unwrap_or_default(),
+                false,
+            )
+        }
+        "mrt_close_tab" => {
+            let req_id = args.get("tab_id").and_then(|v| v.as_str());
+            let Some(target_id) = state.resolve_tab_id(req_id) else {
+                return McpToolCallResult::text(
+                    format!("Tab not found: {:?}", req_id.unwrap_or("")),
+                    true,
+                );
+            };
+            let mut tabs = state.tabs.lock().unwrap();
+            if tabs.len() <= 1 {
+                return McpToolCallResult::text(
+                    "Cannot close the last remaining terminal tab",
+                    true,
+                );
+            }
+            tabs.retain(|t| t.id != target_id);
+            let mut active = state.active_tab_id.lock().unwrap();
+            if *active == target_id {
+                if let Some(first) = tabs.first() {
+                    *active = first.id;
+                    *state.cwd.lock().unwrap() = first.cwd.clone();
+                }
+            }
+            let remaining = tabs.len();
+            let active_now = *active;
+            drop(active);
+            drop(tabs);
+            state.notify_gui(GuiUiCommand::SyncFromMcp);
+
+            McpToolCallResult::text(
+                serde_json::to_string_pretty(&json!({
+                    "closed_tab_id": target_id,
+                    "active_tab_id": active_now,
+                    "remaining_tabs": remaining,
+                }))
+                .unwrap_or_default(),
+                false,
+            )
+        }
+        "mrt_configure_tab" => {
+            let req_id = args.get("tab_id").and_then(|v| v.as_str());
+            let Some(target_id) = state.resolve_tab_id(req_id) else {
+                return McpToolCallResult::text("Target tab not found", true);
+            };
+            let new_shell = if let Some(s_str) = args.get("shell").and_then(|v| v.as_str()) {
+                let Some(s) = state.resolve_shell(Some(s_str)) else {
+                    return McpToolCallResult::text(format!("Unknown shell: {s_str}"), true);
+                };
+                Some(s)
+            } else {
+                None
+            };
+            let new_cwd = if let Some(c_str) = args.get("cwd").and_then(|v| v.as_str()) {
+                let candidate = PathBuf::from(c_str);
+                let resolved = if candidate.is_absolute() {
+                    candidate
+                } else {
+                    let base = state
+                        .tabs
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .find(|t| t.id == target_id)
+                        .map(|t| t.cwd.clone())
+                        .unwrap_or_else(|| state.cwd.lock().unwrap().clone());
+                    base.join(candidate)
+                };
+                if !resolved.is_dir() {
+                    return McpToolCallResult::text(
+                        format!("Directory does not exist: {}", resolved.display()),
+                        true,
+                    );
+                }
+                Some(resolved)
+            } else {
+                None
+            };
+            let new_title = args
+                .get("title")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(String::from);
+
+            let mut tabs = state.tabs.lock().unwrap();
+            let Some(tab) = tabs.iter_mut().find(|t| t.id == target_id) else {
+                return McpToolCallResult::text("Target tab not found", true);
+            };
+            if let Some(s) = new_shell {
+                tab.shell_id = s.id;
+                tab.shell_name = s.kind.short_label().to_string();
+            }
+            if let Some(ref c) = new_cwd {
+                tab.cwd = c.clone();
+            }
+            if let Some(t) = new_title {
+                tab.title = t;
+            }
+            let updated = tab.clone();
+            drop(tabs);
+
+            if *state.active_tab_id.lock().unwrap() == target_id {
+                *state.cwd.lock().unwrap() = updated.cwd.clone();
+            }
+            state.notify_gui(GuiUiCommand::SyncFromMcp);
+
+            McpToolCallResult::text(
+                serde_json::to_string_pretty(&json!({
+                    "tab_id": updated.id,
+                    "title": updated.title,
+                    "shell_id": updated.shell_id,
+                    "shell_name": updated.shell_name,
+                    "cwd": updated.cwd.display().to_string(),
+                }))
+                .unwrap_or_default(),
                 false,
             )
         }
@@ -245,26 +906,292 @@ pub async fn execute_mrt_mcp_tool(
                 .get("limit")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(10) as usize;
-            let guard = state.blocks.lock().unwrap();
-            let recent: Vec<Value> = guard
-                .iter()
-                .rev()
-                .take(limit)
-                .map(|b| {
-                    json!({
-                        "id": b.id,
-                        "command": b.command,
-                        "shell": b.shell_name,
-                        "cwd": b.cwd,
-                        "exit_code": b.exit_code,
-                        "duration_ms": b.duration_ms,
-                        "structured_type": b.structured.badge_label(),
-                        "output": b.plain_output,
+            let requested_tab = args.get("tab_id").and_then(|v| v.as_str());
+            let recent: Vec<Value> = if let Some(tab_str) = requested_tab {
+                let Some(tab_id) = state.resolve_tab_id(Some(tab_str)) else {
+                    return McpToolCallResult::text(format!("Tab not found: {tab_str}"), true);
+                };
+                let tabs = state.tabs.lock().unwrap();
+                tabs.iter()
+                    .find(|t| t.id == tab_id)
+                    .map(|t| {
+                        t.blocks
+                            .iter()
+                            .rev()
+                            .take(limit)
+                            .map(|b| format_block_summary(b, Some(t.id)))
+                            .collect()
                     })
-                })
-                .collect();
+                    .unwrap_or_default()
+            } else {
+                let guard = state.blocks.lock().unwrap();
+                guard
+                    .iter()
+                    .rev()
+                    .take(limit)
+                    .map(|b| format_block_summary(b, None))
+                    .collect()
+            };
             McpToolCallResult::text(
                 serde_json::to_string_pretty(&recent).unwrap_or_default(),
+                false,
+            )
+        }
+        "mrt_get_block" => {
+            let Some(id_str) = args.get("block_id").and_then(|v| v.as_str()) else {
+                return McpToolCallResult::text("Missing required 'block_id' parameter", true);
+            };
+            let Ok(block_id) = Uuid::parse_str(id_str.trim()) else {
+                return McpToolCallResult::text(format!("Invalid block UUID: {id_str}"), true);
+            };
+            let found = {
+                let tabs = state.tabs.lock().unwrap();
+                tabs.iter()
+                    .find_map(|t| t.blocks.iter().find(|b| b.id == block_id).cloned().map(|b| (Some(t.id), b)))
+                    .or_else(|| {
+                        let global = state.blocks.lock().unwrap();
+                        global.iter().find(|b| b.id == block_id).cloned().map(|b| (None, b))
+                    })
+            };
+            let Some((tab_id, block)) = found else {
+                return McpToolCallResult::text(format!("Block not found: {block_id}"), true);
+            };
+            let detail = json!({
+                "id": block.id,
+                "tab_id": tab_id,
+                "command": block.command,
+                "shell": block.shell_name,
+                "cwd": block.cwd,
+                "timestamp": block.timestamp,
+                "duration_ms": block.duration_ms,
+                "exit_code": block.exit_code,
+                "structured_type": block.structured.badge_label(),
+                "structured_data": block.structured,
+                "plain_output": block.plain_output,
+                "raw_output": block.raw_output,
+                "ai_explanation": block.ai_explanation,
+                "ai_suggested_fix": block.ai_suggested_fix,
+            });
+            McpToolCallResult::text(
+                serde_json::to_string_pretty(&detail).unwrap_or_default(),
+                false,
+            )
+        }
+        "mrt_search_blocks" => {
+            let query = args
+                .get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let failed_only = args
+                .get("failed_only")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let limit = args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(20) as usize;
+            let requested_tab = args
+                .get("tab_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| state.resolve_tab_id(Some(s)));
+
+            let tabs = state.tabs.lock().unwrap();
+            let mut results = Vec::new();
+            for t in tabs.iter() {
+                if let Some(tid) = requested_tab {
+                    if t.id != tid {
+                        continue;
+                    }
+                }
+                for b in t.blocks.iter().rev() {
+                    if failed_only && b.exit_code.unwrap_or(0) == 0 {
+                        continue;
+                    }
+                    if !query.is_empty()
+                        && !b.command.to_lowercase().contains(&query)
+                        && !b.plain_output.to_lowercase().contains(&query)
+                    {
+                        continue;
+                    }
+                    results.push(format_block_summary(b, Some(t.id)));
+                    if results.len() >= limit {
+                        break;
+                    }
+                }
+                if results.len() >= limit {
+                    break;
+                }
+            }
+            if results.is_empty() && requested_tab.is_none() {
+                let global = state.blocks.lock().unwrap();
+                for b in global.iter().rev() {
+                    if failed_only && b.exit_code.unwrap_or(0) == 0 {
+                        continue;
+                    }
+                    if !query.is_empty()
+                        && !b.command.to_lowercase().contains(&query)
+                        && !b.plain_output.to_lowercase().contains(&query)
+                    {
+                        continue;
+                    }
+                    results.push(format_block_summary(b, None));
+                    if results.len() >= limit {
+                        break;
+                    }
+                }
+            }
+            McpToolCallResult::text(
+                serde_json::to_string_pretty(&results).unwrap_or_default(),
+                false,
+            )
+        }
+        "mrt_compare_blocks" => {
+            let Some(prev_str) = args.get("previous_block_id").and_then(|v| v.as_str()) else {
+                return McpToolCallResult::text("Missing 'previous_block_id'", true);
+            };
+            let Some(curr_str) = args.get("current_block_id").and_then(|v| v.as_str()) else {
+                return McpToolCallResult::text("Missing 'current_block_id'", true);
+            };
+            let (Ok(prev_id), Ok(curr_id)) = (Uuid::parse_str(prev_str.trim()), Uuid::parse_str(curr_str.trim())) else {
+                return McpToolCallResult::text("Invalid block UUID", true);
+            };
+            let find_blk = |id: Uuid| -> Option<(Option<Uuid>, CommandBlock)> {
+                let tabs = state.tabs.lock().unwrap();
+                tabs.iter()
+                    .find_map(|t| t.blocks.iter().find(|b| b.id == id).cloned().map(|b| (Some(t.id), b)))
+                    .or_else(|| {
+                        let global = state.blocks.lock().unwrap();
+                        global.iter().find(|b| b.id == id).cloned().map(|b| (None, b))
+                    })
+            };
+            let Some((tab_a, prev_blk)) = find_blk(prev_id) else {
+                return McpToolCallResult::text(format!("Block not found: {prev_id}"), true);
+            };
+            let Some((tab_b, curr_blk)) = find_blk(curr_id) else {
+                return McpToolCallResult::text(format!("Block not found: {curr_id}"), true);
+            };
+
+            let mut diff_lines = Vec::new();
+            for change in similar::TextDiff::from_lines(&prev_blk.plain_output, &curr_blk.plain_output)
+                .iter_all_changes()
+            {
+                let sign = match change.tag() {
+                    similar::ChangeTag::Delete => "-",
+                    similar::ChangeTag::Insert => "+",
+                    similar::ChangeTag::Equal => " ",
+                };
+                diff_lines.push(format!("{sign}{}", change.value().trim_end_matches('\n')));
+            }
+
+            let show_in_gui = args
+                .get("show_in_gui")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            if show_in_gui {
+                state.notify_gui(GuiUiCommand::SetComparison {
+                    tab_id: tab_b.or(tab_a),
+                    previous_block_id: prev_id,
+                    current_block_id: curr_id,
+                });
+            }
+
+            let payload = json!({
+                "previous_block_id": prev_id,
+                "current_block_id": curr_id,
+                "identical": prev_blk.plain_output == curr_blk.plain_output,
+                "diff": diff_lines.join("\n"),
+            });
+            McpToolCallResult::text(
+                serde_json::to_string_pretty(&payload).unwrap_or_default(),
+                false,
+            )
+        }
+        "mrt_diagnose_block" => {
+            let Some(id_str) = args.get("block_id").and_then(|v| v.as_str()) else {
+                return McpToolCallResult::text("Missing required 'block_id' parameter", true);
+            };
+            let Ok(block_id) = Uuid::parse_str(id_str.trim()) else {
+                return McpToolCallResult::text(format!("Invalid block UUID: {id_str}"), true);
+            };
+
+            let mut diagnosed = None;
+            {
+                let mut tabs = state.tabs.lock().unwrap();
+                for t in tabs.iter_mut() {
+                    if let Some(b) = t.blocks.iter_mut().find(|b| b.id == block_id) {
+                        let shell = state
+                            .resolve_shell(Some(&b.shell_name))
+                            .unwrap_or_else(|| state.shells[0].clone());
+                        let triage = diagnose_command_error(
+                            &b.command,
+                            &b.plain_output,
+                            b.exit_code.unwrap_or(1),
+                            &shell,
+                        );
+                        b.ai_explanation = Some(triage.explanation.clone());
+                        b.ai_suggested_fix = triage.suggested_fix.clone();
+                        diagnosed = Some((b.command.clone(), b.exit_code, triage));
+                        break;
+                    }
+                }
+            }
+            {
+                let mut global = state.blocks.lock().unwrap();
+                if let Some(b) = global.iter_mut().find(|b| b.id == block_id) {
+                    let shell = state
+                        .resolve_shell(Some(&b.shell_name))
+                        .unwrap_or_else(|| state.shells[0].clone());
+                    let triage = diagnose_command_error(
+                        &b.command,
+                        &b.plain_output,
+                        b.exit_code.unwrap_or(1),
+                        &shell,
+                    );
+                    b.ai_explanation = Some(triage.explanation.clone());
+                    b.ai_suggested_fix = triage.suggested_fix.clone();
+                    if diagnosed.is_none() {
+                        diagnosed = Some((b.command.clone(), b.exit_code, triage));
+                    }
+                }
+            }
+
+            let Some((cmd, code, triage)) = diagnosed else {
+                return McpToolCallResult::text(format!("Block not found: {block_id}"), true);
+            };
+            state.notify_gui(GuiUiCommand::SyncFromMcp);
+            McpToolCallResult::text(
+                serde_json::to_string_pretty(&json!({
+                    "block_id": block_id,
+                    "command": cmd,
+                    "exit_code": code,
+                    "explanation": triage.explanation,
+                    "suggested_fix": triage.suggested_fix,
+                }))
+                .unwrap_or_default(),
+                false,
+            )
+        }
+        "mrt_clear_blocks" => {
+            let clear_all = args.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
+            if clear_all {
+                for t in state.tabs.lock().unwrap().iter_mut() {
+                    t.blocks.clear();
+                }
+                state.blocks.lock().unwrap().clear();
+            } else {
+                let req_tab = args.get("tab_id").and_then(|v| v.as_str());
+                let Some(tab_id) = state.resolve_tab_id(req_tab) else {
+                    return McpToolCallResult::text("Target tab not found", true);
+                };
+                if let Some(t) = state.tabs.lock().unwrap().iter_mut().find(|t| t.id == tab_id) {
+                    t.blocks.clear();
+                }
+            }
+            state.notify_gui(GuiUiCommand::SyncFromMcp);
+            McpToolCallResult::text(
+                serde_json::to_string_pretty(&json!({ "cleared": true, "all": clear_all }))
+                    .unwrap_or_default(),
                 false,
             )
         }
@@ -285,36 +1212,73 @@ pub async fn execute_mrt_mcp_tool(
                 );
             }
 
-            let requested_shell = args.get("shell").and_then(|v| v.as_str());
-            let shell = requested_shell
-                .and_then(|id| state.shells.iter().find(|s| s.id.eq_ignore_ascii_case(id)))
-                .or_else(|| state.shells.first())
-                .cloned();
+            let req_tab = args.get("tab_id").and_then(|v| v.as_str());
+            let target_tab_id = state.resolve_tab_id(req_tab);
 
-            let Some(shell_profile) = shell else {
+            let tab_defaults = target_tab_id.and_then(|tid| {
+                state
+                    .tabs
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|t| t.id == tid)
+                    .map(|t| (t.shell_id.clone(), t.cwd.clone()))
+            });
+
+            let requested_shell = args
+                .get("shell")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .or_else(|| tab_defaults.as_ref().map(|(s, _)| s.clone()));
+
+            let Some(shell_profile) = state.resolve_shell(requested_shell.as_deref()) else {
                 return McpToolCallResult::text("No shell available on host", true);
             };
 
-            let cwd = state.cwd.lock().unwrap().clone();
+            let cwd = args
+                .get("cwd")
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .or_else(|| tab_defaults.map(|(_, c)| c))
+                .unwrap_or_else(|| state.cwd.lock().unwrap().clone());
+
             match execute_command_in_shell(&shell_profile, cmd, &cwd).await {
                 Ok(res) => {
-                    if let Some(new_cwd) = &res.updated_cwd {
-                        *state.cwd.lock().unwrap() = new_cwd.clone();
+                    let effective_cwd = res.updated_cwd.clone().unwrap_or_else(|| cwd.clone());
+                    if res.updated_cwd.is_some() {
+                        *state.cwd.lock().unwrap() = effective_cwd.clone();
                     }
                     let block = CommandBlock::new_completed(
                         cmd,
-                        &shell_profile.name,
+                        shell_profile.kind.short_label(),
                         cwd.display().to_string(),
                         &res.combined_output,
                         res.exit_code,
                         res.duration_ms,
                     );
-                    state.blocks.lock().unwrap().push(block);
+                    let block_id = block.id;
+                    let structured_badge = block.structured.badge_label();
+
+                    state.blocks.lock().unwrap().push(block.clone());
+                    if let Some(tid) = target_tab_id {
+                        let mut tabs = state.tabs.lock().unwrap();
+                        if let Some(t) = tabs.iter_mut().find(|t| t.id == tid) {
+                            if res.updated_cwd.is_some() {
+                                t.cwd = effective_cwd.clone();
+                            }
+                            t.blocks.push(block);
+                        }
+                    }
+                    state.notify_gui(GuiUiCommand::SyncFromMcp);
 
                     let summary = json!({
+                        "block_id": block_id,
+                        "tab_id": target_tab_id,
                         "shell": shell_profile.id,
+                        "cwd": effective_cwd.display().to_string(),
                         "exit_code": res.exit_code,
                         "duration_ms": res.duration_ms,
+                        "structured_type": structured_badge,
                         "output": res.combined_output,
                     });
                     McpToolCallResult::text(
@@ -323,6 +1287,322 @@ pub async fn execute_mrt_mcp_tool(
                     )
                 }
                 Err(e) => McpToolCallResult::text(format!("Execution failed: {e}"), true),
+            }
+        }
+        "mrt_pty_spawn" => {
+            let requested_shell = args.get("shell").and_then(|v| v.as_str());
+            let Some(shell) = state.resolve_shell(requested_shell) else {
+                return McpToolCallResult::text("No shell available on host", true);
+            };
+            let initial_cmd = args.get("command").and_then(|v| v.as_str());
+            if let Some(cmd) = initial_cmd {
+                let safety = assess_command(cmd);
+                if safety.risk == RiskLevel::Critical {
+                    return McpToolCallResult::text(
+                        format!(
+                            "BLOCKED BY MRT SAFETY GATE: Command '{}' flagged as {} ({}).",
+                            cmd,
+                            safety.risk.label(),
+                            safety.reason
+                        ),
+                        true,
+                    );
+                }
+            }
+            let cwd = args
+                .get("cwd")
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| state.cwd.lock().unwrap().clone());
+            let cols = args
+                .get("cols")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(120)
+                .clamp(20, 500) as u16;
+            let rows = args
+                .get("rows")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(36)
+                .clamp(5, 200) as u16;
+            let wait_ms = args
+                .get("wait_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(150)
+                .min(5000);
+
+            match InteractivePty::spawn_with_command(&shell, &cwd, cols, rows, initial_cmd) {
+                Ok(pty) => {
+                    let pty_id = pty.id;
+                    let arc_pty = Arc::new(pty);
+                    state.ptys.lock().unwrap().insert(pty_id, Arc::clone(&arc_pty));
+                    if wait_ms > 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                    }
+                    let raw = arc_pty.drain_output();
+                    let (_, plain) = parse_ansi_text(&raw);
+                    let exit_code = arc_pty.try_wait_exit().ok().flatten();
+                    let payload = json!({
+                        "pty_id": pty_id,
+                        "shell": shell.id,
+                        "cwd": cwd.display().to_string(),
+                        "cols": cols,
+                        "rows": rows,
+                        "running": exit_code.is_none(),
+                        "exit_code": exit_code,
+                        "initial_output": plain,
+                    });
+                    McpToolCallResult::text(
+                        serde_json::to_string_pretty(&payload).unwrap_or_default(),
+                        false,
+                    )
+                }
+                Err(e) => McpToolCallResult::text(format!("Failed to spawn PTY: {e}"), true),
+            }
+        }
+        "mrt_pty_write" => {
+            let Some(id_str) = args.get("pty_id").and_then(|v| v.as_str()) else {
+                return McpToolCallResult::text("Missing required 'pty_id'", true);
+            };
+            let Some(input) = args.get("input").and_then(|v| v.as_str()) else {
+                return McpToolCallResult::text("Missing required 'input'", true);
+            };
+            let safety = assess_command(input);
+            if safety.risk == RiskLevel::Critical {
+                return McpToolCallResult::text(
+                    format!(
+                        "BLOCKED BY MRT SAFETY GATE: Input '{}' flagged as {} ({}).",
+                        input,
+                        safety.risk.label(),
+                        safety.reason
+                    ),
+                    true,
+                );
+            }
+            let Ok(pty_id) = Uuid::parse_str(id_str.trim()) else {
+                return McpToolCallResult::text(format!("Invalid pty_id UUID: {id_str}"), true);
+            };
+            let pty = state.ptys.lock().unwrap().get(&pty_id).cloned();
+            let Some(pty) = pty else {
+                return McpToolCallResult::text(format!("PTY session not found: {pty_id}"), true);
+            };
+            let append_newline = args
+                .get("append_newline")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let wait_ms = args
+                .get("wait_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(150)
+                .min(5000);
+
+            if let Err(e) = pty.send_input(input, append_newline) {
+                return McpToolCallResult::text(format!("PTY write error: {e}"), true);
+            }
+            if wait_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+            }
+            let raw = pty.drain_output();
+            let (_, plain) = parse_ansi_text(&raw);
+            let exit_code = pty.try_wait_exit().ok().flatten();
+            McpToolCallResult::text(
+                serde_json::to_string_pretty(&json!({
+                    "pty_id": pty_id,
+                    "running": exit_code.is_none(),
+                    "exit_code": exit_code,
+                    "output": plain,
+                }))
+                .unwrap_or_default(),
+                false,
+            )
+        }
+        "mrt_pty_read" => {
+            let Some(id_str) = args.get("pty_id").and_then(|v| v.as_str()) else {
+                return McpToolCallResult::text("Missing required 'pty_id'", true);
+            };
+            let Ok(pty_id) = Uuid::parse_str(id_str.trim()) else {
+                return McpToolCallResult::text(format!("Invalid pty_id UUID: {id_str}"), true);
+            };
+            let pty = state.ptys.lock().unwrap().get(&pty_id).cloned();
+            let Some(pty) = pty else {
+                return McpToolCallResult::text(format!("PTY session not found: {pty_id}"), true);
+            };
+            let drain = args.get("drain").and_then(|v| v.as_bool()).unwrap_or(true);
+            let strip_ansi = args
+                .get("strip_ansi")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let wait_ms = args
+                .get("wait_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                .min(5000);
+
+            if wait_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+            }
+            let raw = if drain {
+                pty.drain_output()
+            } else {
+                pty.read_transcript()
+            };
+            let output = if strip_ansi {
+                parse_ansi_text(&raw).1
+            } else {
+                raw
+            };
+            let exit_code = pty.try_wait_exit().ok().flatten();
+            McpToolCallResult::text(
+                serde_json::to_string_pretty(&json!({
+                    "pty_id": pty_id,
+                    "running": exit_code.is_none(),
+                    "exit_code": exit_code,
+                    "output": output,
+                }))
+                .unwrap_or_default(),
+                false,
+            )
+        }
+        "mrt_pty_resize" => {
+            let Some(id_str) = args.get("pty_id").and_then(|v| v.as_str()) else {
+                return McpToolCallResult::text("Missing required 'pty_id'", true);
+            };
+            let Ok(pty_id) = Uuid::parse_str(id_str.trim()) else {
+                return McpToolCallResult::text(format!("Invalid pty_id UUID: {id_str}"), true);
+            };
+            let cols = args
+                .get("cols")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(120)
+                .clamp(20, 500) as u16;
+            let rows = args
+                .get("rows")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(36)
+                .clamp(5, 200) as u16;
+            let pty = state.ptys.lock().unwrap().get(&pty_id).cloned();
+            let Some(pty) = pty else {
+                return McpToolCallResult::text(format!("PTY session not found: {pty_id}"), true);
+            };
+            match pty.resize(cols, rows) {
+                Ok(()) => McpToolCallResult::text(
+                    serde_json::to_string_pretty(&json!({
+                        "pty_id": pty_id,
+                        "cols": cols,
+                        "rows": rows,
+                    }))
+                    .unwrap_or_default(),
+                    false,
+                ),
+                Err(e) => McpToolCallResult::text(format!("PTY resize failed: {e}"), true),
+            }
+        }
+        "mrt_pty_list" => {
+            let guard = state.ptys.lock().unwrap();
+            let list: Vec<Value> = guard
+                .values()
+                .map(|pty| {
+                    let exit_code = pty.try_wait_exit().ok().flatten();
+                    json!({
+                        "pty_id": pty.id,
+                        "shell_id": pty.shell_id,
+                        "shell_name": pty.shell_name,
+                        "cwd": pty.cwd.display().to_string(),
+                        "cols": pty.cols,
+                        "rows": pty.rows,
+                        "running": exit_code.is_none(),
+                        "exit_code": exit_code,
+                    })
+                })
+                .collect();
+            McpToolCallResult::text(
+                serde_json::to_string_pretty(&list).unwrap_or_default(),
+                false,
+            )
+        }
+        "mrt_pty_kill" => {
+            let Some(id_str) = args.get("pty_id").and_then(|v| v.as_str()) else {
+                return McpToolCallResult::text("Missing required 'pty_id'", true);
+            };
+            let Ok(pty_id) = Uuid::parse_str(id_str.trim()) else {
+                return McpToolCallResult::text(format!("Invalid pty_id UUID: {id_str}"), true);
+            };
+            let remove = args.get("remove").and_then(|v| v.as_bool()).unwrap_or(true);
+            let pty = if remove {
+                state.ptys.lock().unwrap().remove(&pty_id)
+            } else {
+                state.ptys.lock().unwrap().get(&pty_id).cloned()
+            };
+            let Some(pty) = pty else {
+                return McpToolCallResult::text(format!("PTY session not found: {pty_id}"), true);
+            };
+            let _ = pty.kill();
+            McpToolCallResult::text(
+                serde_json::to_string_pretty(&json!({
+                    "pty_id": pty_id,
+                    "killed": true,
+                    "removed": remove,
+                }))
+                .unwrap_or_default(),
+                false,
+            )
+        }
+        "mrt_control_gui" => {
+            let tab_id = args
+                .get("tab_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| state.resolve_tab_id(Some(s)));
+            if let Some(text) = args.get("input_text").and_then(|v| v.as_str()) {
+                let submit = args
+                    .get("submit_input")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                state.notify_gui(GuiUiCommand::SetInputDraft {
+                    tab_id,
+                    text: text.to_string(),
+                    submit,
+                });
+            }
+            if let Some(mosaic) = args.get("mosaic").and_then(|v| v.as_bool()) {
+                let columns = args
+                    .get("mosaic_columns")
+                    .and_then(|v| v.as_u64())
+                    .map(|c| c.clamp(1, 6) as usize);
+                state.notify_gui(GuiUiCommand::SetMosaic {
+                    enabled: mosaic,
+                    columns,
+                });
+            }
+            if let Some(explorer) = args.get("explorer").and_then(|v| v.as_bool()) {
+                state.notify_gui(GuiUiCommand::SetExplorer { visible: explorer });
+            }
+            McpToolCallResult::text(
+                serde_json::to_string_pretty(&json!({
+                    "gui_attached": state.gui_tx.is_some(),
+                    "status": "dispatched"
+                }))
+                .unwrap_or_default(),
+                false,
+            )
+        }
+        "mrt_ai_translate" => {
+            let Some(query) = args.get("query").and_then(|v| v.as_str()) else {
+                return McpToolCallResult::text("Missing required 'query' parameter", true);
+            };
+            let req_shell = args.get("shell").and_then(|v| v.as_str());
+            let Some(shell) = state.resolve_shell(req_shell) else {
+                return McpToolCallResult::text("No shell available", true);
+            };
+            let cwd = state.cwd.lock().unwrap().display().to_string();
+            let tool_names: Vec<String> = MrtMcpServerState::built_in_tools()
+                .into_iter()
+                .map(|t| t.name)
+                .collect();
+            match translate_nl_to_command(query, &shell, &cwd, &tool_names).await {
+                Ok(prop) => McpToolCallResult::text(
+                    serde_json::to_string_pretty(&prop).unwrap_or_default(),
+                    false,
+                ),
+                Err(e) => McpToolCallResult::text(format!("AI translation error: {e}"), true),
             }
         }
         "mrt_http_request" => {
@@ -369,8 +1649,26 @@ pub async fn execute_mrt_mcp_tool(
     }
 }
 
+fn format_block_summary(b: &CommandBlock, tab_id: Option<Uuid>) -> Value {
+    json!({
+        "id": b.id,
+        "tab_id": tab_id,
+        "command": b.command,
+        "shell": b.shell_name,
+        "cwd": b.cwd,
+        "exit_code": b.exit_code,
+        "duration_ms": b.duration_ms,
+        "structured_type": b.structured.badge_label(),
+        "output": b.plain_output,
+        "ai_explanation": b.ai_explanation,
+        "ai_suggested_fix": b.ai_suggested_fix,
+    })
+}
+
 /// Runs MRT in headless stdio MCP Server mode (`mrt --mcp-server`), reading JSON-RPC lines
 /// from stdin and writing JSON-RPC responses to stdout.
+/// If a live MRT GUI window is running on the host (discovered via `mcp-bridge.json`),
+/// requests are transparently proxied to the live GUI so external agents control the open terminal!
 pub async fn run_stdio_mcp_server(state: MrtMcpServerState) -> Result<()> {
     let stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
@@ -382,7 +1680,17 @@ pub async fn run_stdio_mcp_server(state: MrtMcpServerState) -> Result<()> {
             continue;
         }
         let response = match serde_json::from_str::<JsonRpcRequest>(trimmed) {
-            Ok(req) => handle_mcp_jsonrpc(&state, req).await,
+            Ok(req) => {
+                if let Some(port) = read_bridge_port_file() {
+                    if let Ok(forwarded) = try_forward_jsonrpc_to_gui(port, &req).await {
+                        forwarded
+                    } else {
+                        handle_mcp_jsonrpc(&state, req).await
+                    }
+                } else {
+                    handle_mcp_jsonrpc(&state, req).await
+                }
+            }
             Err(e) => Some(JsonRpcResponse::error(
                 None,
                 -32700,

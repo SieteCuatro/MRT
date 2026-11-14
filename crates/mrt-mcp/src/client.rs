@@ -322,7 +322,7 @@ mod tests {
             .as_array()
             .unwrap()
             .len();
-        assert!(tools >= 5);
+        assert!(tools >= 20);
     }
 
     #[tokio::test]
@@ -339,5 +339,217 @@ mod tests {
             .unwrap();
         assert!(res.is_error);
         assert!(res.content[0].text.contains("BLOCKED BY MRT SAFETY GATE"));
+    }
+
+    #[tokio::test]
+    async fn test_mcp_tab_management_and_block_inspection() {
+        let state = MrtMcpServerState::default();
+        let host = McpHostManager::new(state);
+
+        // 1. Create a second tab
+        let created = host
+            .call_tool(
+                "mrt-native-mcp",
+                "mrt_create_tab",
+                json!({ "title": "Agent Build Tab", "activate": true }),
+            )
+            .await
+            .unwrap();
+        assert!(!created.is_error);
+        let created_json: Value = serde_json::from_str(&created.content[0].text).unwrap();
+        let new_tab_id = created_json.get("tab_id").unwrap().as_str().unwrap();
+
+        // 2. Run two commands in the new tab so we can compare them
+        let run1 = host
+            .call_tool(
+                "mrt-native-mcp",
+                "mrt_run_command",
+                json!({ "command": "echo alpha_line", "tab_id": new_tab_id }),
+            )
+            .await
+            .unwrap();
+        assert!(!run1.is_error);
+        let run1_json: Value = serde_json::from_str(&run1.content[0].text).unwrap();
+        let blk1_id = run1_json.get("block_id").unwrap().as_str().unwrap();
+
+        let run2 = host
+            .call_tool(
+                "mrt-native-mcp",
+                "mrt_run_command",
+                json!({ "command": "echo beta_line", "tab_id": new_tab_id }),
+            )
+            .await
+            .unwrap();
+        assert!(!run2.is_error);
+        let run2_json: Value = serde_json::from_str(&run2.content[0].text).unwrap();
+        let blk2_id = run2_json.get("block_id").unwrap().as_str().unwrap();
+
+        // 3. Get block by ID
+        let blk_detail = host
+            .call_tool(
+                "mrt-native-mcp",
+                "mrt_get_block",
+                json!({ "block_id": blk1_id }),
+            )
+            .await
+            .unwrap();
+        assert!(!blk_detail.is_error);
+        assert!(blk_detail.content[0].text.contains("alpha_line"));
+
+        // 4. Search blocks
+        let search = host
+            .call_tool(
+                "mrt-native-mcp",
+                "mrt_search_blocks",
+                json!({ "query": "beta_line", "tab_id": new_tab_id }),
+            )
+            .await
+            .unwrap();
+        assert!(!search.is_error);
+        let search_arr: Vec<Value> = serde_json::from_str(&search.content[0].text).unwrap();
+        assert_eq!(search_arr.len(), 1);
+
+        // 5. Compare blocks
+        let cmp = host
+            .call_tool(
+                "mrt-native-mcp",
+                "mrt_compare_blocks",
+                json!({ "previous_block_id": blk1_id, "current_block_id": blk2_id }),
+            )
+            .await
+            .unwrap();
+        assert!(!cmp.is_error);
+        let cmp_json: Value = serde_json::from_str(&cmp.content[0].text).unwrap();
+        assert_eq!(cmp_json.get("identical").and_then(|v| v.as_bool()), Some(false));
+        let diff_str = cmp_json.get("diff").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(diff_str.contains("-alpha_line"));
+        assert!(diff_str.contains("+beta_line"));
+
+        // 6. Diagnose block
+        let diag = host
+            .call_tool(
+                "mrt-native-mcp",
+                "mrt_diagnose_block",
+                json!({ "block_id": blk1_id }),
+            )
+            .await
+            .unwrap();
+        assert!(!diag.is_error);
+        assert!(diag.content[0].text.contains("explanation"));
+
+        // 7. Close tab
+        let close = host
+            .call_tool(
+                "mrt-native-mcp",
+                "mrt_close_tab",
+                json!({ "tab_id": new_tab_id }),
+            )
+            .await
+            .unwrap();
+        assert!(!close.is_error);
+    }
+
+    #[tokio::test]
+    async fn test_mcp_interactive_pty_lifecycle() {
+        let state = MrtMcpServerState::default();
+        let host = McpHostManager::new(state);
+
+        // Spawn an interactive PTY session
+        let spawned = host
+            .call_tool(
+                "mrt-native-mcp",
+                "mrt_pty_spawn",
+                json!({ "shell": "cmd", "cols": 100, "rows": 30, "wait_ms": 150 }),
+            )
+            .await
+            .unwrap();
+        assert!(!spawned.is_error);
+        let spawned_json: Value = serde_json::from_str(&spawned.content[0].text).unwrap();
+        let pty_id = spawned_json.get("pty_id").unwrap().as_str().unwrap();
+
+        // Write a command to the PTY
+        let written = host
+            .call_tool(
+                "mrt-native-mcp",
+                "mrt_pty_write",
+                json!({
+                    "pty_id": pty_id,
+                    "input": "echo MRT_PTY_STREAM_OK",
+                    "append_newline": true,
+                    "wait_ms": 300
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(!written.is_error);
+
+        // Poll up to a few times in case the OS shell takes a moment to flush
+        let mut transcript = String::new();
+        for _ in 0..10 {
+            let read_res = host
+                .call_tool(
+                    "mrt-native-mcp",
+                    "mrt_pty_read",
+                    json!({ "pty_id": pty_id, "drain": false, "wait_ms": 100 }),
+                )
+                .await
+                .unwrap();
+            assert!(!read_res.is_error);
+            transcript = read_res.content[0].text.clone();
+            if transcript.contains("MRT_PTY_STREAM_OK") {
+                break;
+            }
+        }
+        assert!(
+            transcript.contains("MRT_PTY_STREAM_OK"),
+            "Expected PTY transcript to contain MRT_PTY_STREAM_OK, got: {transcript}"
+        );
+
+        // Resize PTY
+        let resized = host
+            .call_tool(
+                "mrt-native-mcp",
+                "mrt_pty_resize",
+                json!({ "pty_id": pty_id, "cols": 132, "rows": 40 }),
+            )
+            .await
+            .unwrap();
+        assert!(!resized.is_error);
+
+        // Kill PTY
+        let killed = host
+            .call_tool(
+                "mrt-native-mcp",
+                "mrt_pty_kill",
+                json!({ "pty_id": pty_id, "remove": true }),
+            )
+            .await
+            .unwrap();
+        assert!(!killed.is_error);
+    }
+
+    #[tokio::test]
+    async fn test_live_gui_bridge_tcp_forwarding() {
+        let state = MrtMcpServerState::default();
+        let addr = crate::bridge::start_gui_bridge_listener(state, 0, false)
+            .await
+            .unwrap();
+
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!(99)),
+            method: "tools/call".into(),
+            params: Some(json!({
+                "name": "mrt_create_tab",
+                "arguments": { "title": "Bridged TCP Tab" }
+            })),
+        };
+        let resp = crate::bridge::try_forward_jsonrpc_to_gui(addr.port(), &req)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(resp.error.is_none());
+        let result_str = serde_json::to_string(&resp.result).unwrap();
+        assert!(result_str.contains("Bridged TCP Tab"));
     }
 }

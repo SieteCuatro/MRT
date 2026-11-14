@@ -2,12 +2,13 @@
 
 mod app;
 mod history;
+mod theme;
 mod widgets;
 
 use anyhow::Result;
 use app::MrtGuiApp;
 use mrt_core::{attach_parent_console_if_cli, hydrate_login_environment};
-use mrt_mcp::{run_stdio_mcp_server, MrtMcpServerState};
+use mrt_mcp::{clear_bridge_port_file, run_stdio_mcp_server, MrtMcpServerState};
 
 fn main() -> Result<()> {
     hydrate_login_environment();
@@ -58,12 +59,13 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native(
+    let res = eframe::run_native(
         "Modern Rust Terminal",
         native_options,
         Box::new(|_| Ok(Box::new(MrtGuiApp::new()))),
     )
-    .map_err(|e| anyhow::anyhow!("GUI error: {e}"))?;
+    .map_err(|e| anyhow::anyhow!("GUI error: {e}"));
 
-    Ok(())
+    clear_bridge_port_file();
+    res
 }

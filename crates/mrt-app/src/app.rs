@@ -1,8 +1,9 @@
 use crate::theme::{
-    apply_mrt_theme, chip, icon_button, panel_frame, primary_button, secondary_button, section_label,
+    apply_mrt_theme, chip, ghost_button, icon_button, panel_frame, primary_button, secondary_button, section_label,
     Palette, Radius,
 };
-use crate::widgets::block_view::{render_command_block, BlockAction};
+use crate::widgets::block_view::{render_command_block, render_compact_block, BlockAction};
+use crate::widgets::mosaic::{mosaic_rects, MosaicLayout};
 use crate::widgets::chrome::{
     brand_mark, centered_column, nav_row, palette_row, search_pill, tab_row, TabStatus,
 };
@@ -185,6 +186,7 @@ pub struct MrtGuiApp {
     running_output: HashMap<Uuid, (Uuid, std::sync::Arc<std::sync::Mutex<String>>)>,
     mosaic: bool,
     mosaic_columns: usize,
+    mosaic_layout: MosaicLayout,
     show_explorer: bool,
     explorer_path: Option<PathBuf>,
     explorer_entries: Result<Vec<(PathBuf, bool)>, String>,
@@ -271,7 +273,8 @@ impl MrtGuiApp {
             active_replay: None,
             running_output: HashMap::new(),
             mosaic: false,
-            mosaic_columns: 2,
+            mosaic_columns: 3,
+            mosaic_layout: MosaicLayout::Grid,
             show_explorer: false,
             explorer_path: None,
             explorer_entries: Ok(Vec::new()),
@@ -401,116 +404,287 @@ impl MrtGuiApp {
         }
     }
 
+    fn add_mosaic_terminal(&mut self) {
+        let active = &self.tabs[self.active_tab];
+        let tab = TerminalTab::new(
+            format!("Terminal {}", self.tabs.len() + 1),
+            active.active_shell_idx,
+            active.cwd.clone(),
+        );
+        self.tabs.push(tab);
+        self.active_tab = self.tabs.len() - 1;
+    }
+
+    /// Mosaic: every terminal on screen at once, arranged by a layout preset
+    /// (Grid / Columns / Rows / Focus). Tiles are reordered by dragging their header.
     fn render_mosaic(&mut self, ui: &mut egui::Ui) {
+        // Toolbar: layout presets, column stepper, add terminal.
+        let mut add_terminal = false;
         ui.horizontal_wrapped(|ui| {
-            ui.add(egui::Slider::new(&mut self.mosaic_columns, 1..=6).text("Columns"));
-            if ui.button("+ Terminal").clicked() {
-                let active = &self.tabs[self.active_tab];
-                let tab = TerminalTab::new(
-                    format!("Terminal {}", self.tabs.len() + 1),
-                    active.active_shell_idx,
-                    active.cwd.clone(),
+            egui::Frame::none()
+                .fill(Palette::BG_INSET)
+                .rounding(egui::Rounding::same(Radius::BUTTON))
+                .inner_margin(egui::Margin::same(3.0))
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    for layout in MosaicLayout::ALL {
+                        let selected = self.mosaic_layout == layout;
+                        let button = egui::Button::new(
+                            RichText::new(layout.label()).size(13.0).color(if selected {
+                                Palette::TEXT_PRIMARY
+                            } else {
+                                Palette::TEXT_SECONDARY
+                            }),
+                        )
+                        .fill(if selected { Palette::BORDER_SUBTLE } else { Color32::TRANSPARENT })
+                        .stroke(egui::Stroke::NONE)
+                        .rounding(egui::Rounding::same(8.0))
+                        .min_size(egui::vec2(0.0, 28.0));
+                        if ui.add(button).on_hover_text(layout.description()).clicked() {
+                            self.mosaic_layout = layout;
+                        }
+                    }
+                });
+            if self.mosaic_layout == MosaicLayout::Grid {
+                ui.add_space(6.0);
+                ui.label(RichText::new("Per row").size(13.0).color(Palette::TEXT_MUTED));
+                if ui
+                    .add_enabled(self.mosaic_columns > 1, secondary_button("−").min_size(egui::vec2(30.0, 30.0)))
+                    .on_hover_text("Fewer columns")
+                    .clicked()
+                {
+                    self.mosaic_columns -= 1;
+                }
+                ui.label(
+                    RichText::new(self.mosaic_columns.to_string())
+                        .monospace()
+                        .size(14.0)
+                        .color(Palette::TEXT_PRIMARY),
                 );
-                self.tabs.push(tab);
-                self.active_tab = self.tabs.len() - 1;
+                if ui
+                    .add_enabled(self.mosaic_columns < 6, secondary_button("+").min_size(egui::vec2(30.0, 30.0)))
+                    .on_hover_text("More columns")
+                    .clicked()
+                {
+                    self.mosaic_columns += 1;
+                }
             }
-            ui.weak("Drag a title to reorder");
+            ui.add_space(6.0);
+            if ui.add(secondary_button("+  Terminal")).clicked() {
+                add_terminal = true;
+            }
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(match self.mosaic_layout {
+                    MosaicLayout::Focus => "Click a terminal to make it the main one · drag headers to reorder",
+                    _ => "Drag a terminal's header onto another to move it there",
+                })
+                .size(12.0)
+                .color(Palette::TEXT_MUTED),
+            );
         });
-        ui.add_space(8.0);
-        let spacing = 10.0;
-        let available = ui.available_width().max(1.0);
-        let columns = self
-            .mosaic_columns
-            .min(((available + spacing) / 250.0).floor().max(1.0) as usize);
-        let size = ((available - spacing * (columns - 1) as f32) / columns as f32).max(1.0);
+        if add_terminal {
+            self.add_mosaic_terminal();
+        }
+        ui.add_space(10.0);
+
+        let gap = 10.0;
+        let viewport = ui.available_rect_before_wrap();
         let mut reorder = None;
         let mut close = None;
         let mut submit = None;
         let mut action = None;
-        let active_id = self.tabs[self.active_tab].id;
-        egui::ScrollArea::vertical().id_salt("mosaic_grid").show(ui, |ui| {
-            for row in (0..self.tabs.len()).step_by(columns) {
-                ui.horizontal_top(|ui| {
-                    ui.spacing_mut().item_spacing.x = spacing;
-                    for index in row..(row + columns).min(self.tabs.len()) {
-                        let tab = &mut self.tabs[index];
-                        let id = tab.id;
-                        ui.push_id(id, |ui| {
-                            ui.allocate_ui_with_layout(egui::vec2(size, size), egui::Layout::top_down(egui::Align::Min), |ui| {
-                                ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
-                                let frame = egui::Frame::none().inner_margin(8.0)
-                                    .stroke(egui::Stroke::new(1.0_f32, if id == active_id { Color32::LIGHT_BLUE } else { Color32::DARK_GRAY }))
-                                    .rounding(5.0);
-                                let (panel, dropped) = ui.dnd_drop_zone::<Uuid, _>(frame, |ui| {
-                                    ui.set_width((size - 16.0).max(1.0));
-                                    ui.horizontal(|ui| {
-                                        ui.dnd_drag_source(egui::Id::new(("terminal_drag", id)), id, |ui| {
-                                            let title = ui.add_sized(
-                                                [((size - 120.0).max(24.0)), 20.0],
-                                                egui::Label::new(RichText::new(&tab.title).strong())
-                                                    .truncate().sense(egui::Sense::click()),
-                                            );
-                                            if title.clicked() { self.active_tab = index; }
-                                        });
-                                        if ui.small_button("Expand").clicked() {
-                                            self.active_tab = index;
-                                            self.mosaic = false;
+        let mut expand = None;
+        let mut select = None;
+        let active_index = self.active_tab;
+        let layout = self.mosaic_layout;
+        let columns = self.mosaic_columns;
+        let shells = &self.shells;
+        let tabs = &mut self.tabs;
+
+        egui::ScrollArea::vertical()
+            .id_salt("mosaic_grid")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let area = egui::Rect::from_min_size(
+                    ui.cursor().min,
+                    egui::vec2(ui.available_width(), (viewport.height() - 10.0).max(200.0)),
+                );
+                let (order, rects) = mosaic_rects(layout, tabs.len(), columns, active_index, area, gap);
+                let content_bottom = rects.iter().map(|r| r.bottom()).fold(area.top(), f32::max);
+                ui.allocate_rect(
+                    egui::Rect::from_min_max(area.min, egui::pos2(area.right(), content_bottom)),
+                    egui::Sense::hover(),
+                );
+
+                for (slot, rect) in rects.iter().enumerate() {
+                    let index = order[slot];
+                    let tab = &mut tabs[index];
+                    let id = tab.id;
+                    let is_active = index == active_index;
+                    let shell_label = shells
+                        .get(tab.active_shell_idx)
+                        .map(|s| s.kind.short_label())
+                        .unwrap_or("shell");
+                    let status = Self::tab_status(tab);
+                    let folder = tab
+                        .cwd
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| tab.cwd.display().to_string());
+                    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(*rect).id_salt(("mosaic_tile", id)), |ui| {
+                        ui.set_clip_rect(rect.expand(2.0).intersect(ui.clip_rect()));
+                        let frame = egui::Frame::none()
+                            .fill(Palette::BG_SURFACE)
+                            .stroke(egui::Stroke::new(
+                                if is_active { 1.5_f32 } else { 1.0_f32 },
+                                if is_active { Palette::ACCENT } else { Palette::BORDER_FAINT },
+                            ))
+                            .rounding(egui::Rounding::same(Radius::BLOCK))
+                            .inner_margin(egui::Margin::symmetric(12.0, 10.0));
+                        let (panel, dropped) = ui.dnd_drop_zone::<Uuid, _>(frame, |ui| {
+                            let inner_w = (rect.width() - 26.0).max(1.0);
+                            let inner_h = (rect.height() - 22.0).max(1.0);
+                            ui.set_width(inner_w);
+                            ui.set_height(inner_h);
+
+                            // Header: actions are laid out first (right to left) so the
+                            // title gets the remaining width; narrow tiles drop the extras.
+                            let wide = inner_w >= 330.0;
+                            ui.horizontal(|ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.spacing_mut().item_spacing.x = 2.0;
+                                    if icon_button(ui, "×", "Close terminal").clicked() {
+                                        close = Some(id);
+                                    }
+                                    if wide {
+                                        if ui
+                                            .add(ghost_button("Open"))
+                                            .on_hover_text("Leave Mosaic and open this terminal")
+                                            .clicked()
+                                        {
+                                            expand = Some(index);
                                         }
-                                        if ui.small_button("×").clicked() { close = Some(id); }
+                                        egui::ComboBox::from_id_salt(("mosaic_shell", id))
+                                            .width(96.0)
+                                            .selected_text(
+                                                RichText::new(shell_label).monospace().size(11.5).color(Palette::TEXT_SECONDARY),
+                                            )
+                                            .show_ui(ui, |ui| {
+                                                for (shell_index, shell) in shells.iter().enumerate() {
+                                                    ui.selectable_value(&mut tab.active_shell_idx, shell_index, &shell.name);
+                                                }
+                                            });
+                                    }
+                                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                        ui.dnd_drag_source(egui::Id::new(("terminal_drag", id)), id, |ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.label(RichText::new("●").size(9.0).color(status.color()));
+                                                let title = ui.add(
+                                                    egui::Label::new(
+                                                        RichText::new(format!("{}  {folder}", index + 1))
+                                                            .size(13.5)
+                                                            .strong()
+                                                            .color(if is_active { Palette::TEXT_PRIMARY } else { Palette::TEXT_BODY }),
+                                                    )
+                                                    .truncate()
+                                                    .sense(egui::Sense::click()),
+                                                );
+                                                if title.double_clicked() {
+                                                    expand = Some(index);
+                                                } else if title.clicked() {
+                                                    select = Some(index);
+                                                }
+                                            });
+                                        })
+                                        .response
+                                        .on_hover_text(format!(
+                                            "{shell_label} · {}\nDrag onto another terminal to move it there · double-click to open",
+                                            tab.cwd.display()
+                                        ));
                                     });
-                                    egui::ComboBox::from_id_salt("shell").selected_text(&self.shells[tab.active_shell_idx].name)
-                                        .show_ui(ui, |ui| {
-                                            for (shell_index, shell) in self.shells.iter().enumerate() {
-                                                ui.selectable_value(&mut tab.active_shell_idx, shell_index, &shell.name);
-                                            }
-                                        });
-                                    ui.add(egui::Label::new(RichText::new(tab.cwd.display().to_string()).small()).truncate());
-                                    let output_height = (size - 135.0).max(24.0);
-                                    egui::ScrollArea::both().id_salt("output").auto_shrink([false, false])
-                                        .max_height(output_height).min_scrolled_height(output_height)
-                                        .stick_to_bottom(true).show(ui, |ui| {
-                                            let mut previous_runs = HashMap::new();
-                                            for block in &mut tab.blocks {
-                                                let key = (block.command.clone(), block.shell_name.clone(), block.cwd.clone());
-                                                let previous = previous_runs.insert(key, block.id);
-                                                let filter = tab.table_filters.entry(block.id).or_default();
-                                                if let Some(event) = render_command_block(ui, block, filter, previous) {
-                                                    action = Some((index, event));
-                                                }
-                                            }
-                                            if let Some((previous_id, current_id)) = tab.comparison {
-                                                let previous = tab.blocks.iter().find(|block| block.id == previous_id);
-                                                let current = tab.blocks.iter().find(|block| block.id == current_id);
-                                                if let (Some(previous), Some(current)) = (previous, current) {
-                                                    if crate::widgets::block_view::render_comparison(ui, previous, current) {
-                                                        tab.comparison = None;
-                                                    }
-                                                }
-                                            }
-                                        });
+                                });
+                            });
+
+                            ui.add_space(4.0);
+                            // Output
+                            let input_h = 36.0;
+                            let output_h = (ui.available_height() - input_h - 6.0).max(24.0);
+                            egui::ScrollArea::vertical()
+                                .id_salt(("mosaic_output", id))
+                                .auto_shrink([false, false])
+                                .max_height(output_h)
+                                .min_scrolled_height(output_h)
+                                .stick_to_bottom(true)
+                                .show(ui, |ui| {
+                                    if tab.blocks.is_empty() {
+                                        ui.label(
+                                            RichText::new(tab.cwd.display().to_string())
+                                                .monospace()
+                                                .size(11.5)
+                                                .color(Palette::TEXT_MUTED),
+                                        );
+                                    }
+                                    for block in &tab.blocks {
+                                        if let Some(event) = render_compact_block(ui, block) {
+                                            action = Some((index, event));
+                                        }
+                                    }
+                                });
+
+                            // Input
+                            ui.add_space(6.0);
+                            egui::Frame::none()
+                                .fill(Palette::BG_INSET)
+                                .rounding(egui::Rounding::same(Radius::BUTTON))
+                                .inner_margin(egui::Margin::symmetric(10.0, 4.0))
+                                .show(ui, |ui| {
                                     ui.horizontal(|ui| {
-                                        let response = ui.add(egui::TextEdit::singleline(&mut tab.input_line)
-                                            .id(egui::Id::new(("mosaic_input", id))).font(egui::TextStyle::Monospace)
-                                            .desired_width((ui.available_width() - 48.0).max(1.0)).hint_text("Command"));
-                                        if response.has_focus() || response.clicked() { self.active_tab = index; }
+                                        ui.label(
+                                            RichText::new("›")
+                                                .monospace()
+                                                .size(14.0)
+                                                .color(if is_active { Palette::ACCENT } else { Palette::TEXT_MUTED }),
+                                        );
+                                        let response = ui.add(
+                                            egui::TextEdit::singleline(&mut tab.input_line)
+                                                .id(egui::Id::new(("mosaic_input", id)))
+                                                .font(egui::FontId::monospace(13.0))
+                                                .frame(false)
+                                                .desired_width(ui.available_width())
+                                                .hint_text("Command, or # to ask AI"),
+                                        );
+                                        if response.gained_focus() || response.clicked() {
+                                            select = Some(index);
+                                        }
                                         if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                                             submit = Some(index);
                                             response.request_focus();
                                         }
-                                        if ui.add_enabled(!tab.input_line.trim().is_empty(), egui::Button::new("Run")).clicked() {
-                                            submit = Some(index);
-                                        }
                                     });
                                 });
-                                if panel.response.clicked() { self.active_tab = index; }
-                                if let Some(source) = dropped { reorder = Some((*source, id)); }
-                            });
                         });
-                    }
-                });
-                ui.add_space(spacing);
-            }
-        });
+                        if is_active {
+                            // dnd_drop_zone restyles the frame stroke, so mark the active tile on top.
+                            ui.painter().rect_stroke(
+                                rect.shrink(0.75),
+                                egui::Rounding::same(Radius::BLOCK),
+                                egui::Stroke::new(1.5_f32, Palette::ACCENT),
+                            );
+                        }
+                        if panel.response.clicked() {
+                            select = Some(index);
+                        }
+                        if let Some(source) = dropped {
+                            reorder = Some((*source, id));
+                        }
+                    });
+                }
+            });
+
+        if let Some(index) = select {
+            self.active_tab = index;
+        }
         if let Some(index) = submit {
             self.active_tab = index;
             self.submit_input(None, false);
@@ -521,6 +695,10 @@ impl MrtGuiApp {
         }
         if let Some((source, target)) = reorder {
             self.move_terminal(source, target);
+        }
+        if let Some(index) = expand {
+            self.active_tab = index;
+            self.mosaic = false;
         }
         if let Some(id) = close {
             self.close_terminal(id);
@@ -768,8 +946,11 @@ impl MrtGuiApp {
                         }
                     }
                 }
-                GuiUiCommand::SetMosaic { enabled, columns } => {
+                GuiUiCommand::SetMosaic { enabled, columns, layout } => {
                     self.mosaic = enabled;
+                    if let Some(layout) = layout.as_deref().and_then(MosaicLayout::parse) {
+                        self.mosaic_layout = layout;
+                    }
                     if let Some(c) = columns {
                         self.mosaic_columns = c.clamp(1, 6);
                     }
@@ -1980,20 +2161,35 @@ impl MrtGuiApp {
                     section_label(ui, "   Tabs");
                 }
                 let closable = self.tabs.len() > 1;
+                let folder_of = |tab: &TerminalTab| {
+                    tab.cwd
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| tab.cwd.display().to_string())
+                };
+                let mut name_counts: HashMap<String, usize> = HashMap::new();
+                for tab in &self.tabs {
+                    if tab.title.starts_with("Tab ") || tab.title.starts_with("Terminal ") {
+                        *name_counts.entry(folder_of(tab)).or_default() += 1;
+                    }
+                }
                 for (idx, tab) in self.tabs.iter().enumerate() {
                     let shell = self
                         .shells
                         .get(tab.active_shell_idx)
                         .map(|s| s.kind.short_label())
                         .unwrap_or("shell");
-                    let folder = tab
-                        .cwd
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| tab.cwd.display().to_string());
-                    let title = if tab.title.starts_with("Tab ") { folder.clone() } else { tab.title.clone() };
+                    let folder = folder_of(tab);
+                    let generic = tab.title.starts_with("Tab ") || tab.title.starts_with("Terminal ");
+                    let title = if !generic {
+                        tab.title.clone()
+                    } else if name_counts.get(&folder).copied().unwrap_or(0) > 1 {
+                        format!("{folder} · {}", idx + 1)
+                    } else {
+                        folder.clone()
+                    };
                     let status = Self::tab_status(tab);
-                    let subtitle = if tab.title.starts_with("Tab ") {
+                    let subtitle = if generic {
                         format!("{shell} · {}", status.label())
                     } else {
                         format!("{shell} · {folder}")
@@ -2350,6 +2546,7 @@ impl eframe::App for MrtGuiApp {
         }
 
         focus_prompt |= previous_tab != self.tabs[self.active_tab].id || (palette_was_open && !self.show_command_palette);
+        let show_composer = !self.mosaic || self.tabs[self.active_tab].ai_proposal.is_some();
 
         // Floating composer: AI suggestion card + command input card
         egui::TopBottomPanel::bottom("mrt_bottom_prompt")
@@ -2360,7 +2557,7 @@ impl eframe::App for MrtGuiApp {
                 top: 6.0,
                 bottom: 18.0,
             }))
-            .show(ctx, |ui| {
+            .show_animated(ctx, show_composer, |ui| {
                 centered_column(ui, |ui| {
                     if !self.show_history {
                         if let Some(error) = &self.history_error {
@@ -2444,7 +2641,7 @@ impl eframe::App for MrtGuiApp {
                         && self.active_tui.is_none();
                     let tui_active = self.active_tui.is_some();
                     let shells = &self.shells;
-                    if let Some(tab) = self.tabs.get_mut(active_idx) {
+                    if let Some(tab) = self.tabs.get_mut(active_idx).filter(|_| !mosaic) {
                         egui::Frame::none()
                             .fill(Palette::BG_ELEVATED)
                             .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_STRONG))
@@ -2458,13 +2655,6 @@ impl eframe::App for MrtGuiApp {
                             })
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
-                                if mosaic {
-                                    ui.label(
-                                        RichText::new(format!("Active · {}", tab.title))
-                                            .size(12.0)
-                                            .color(Palette::TEXT_MUTED),
-                                    );
-                                }
                                 let response = ui.add(
                                     egui::TextEdit::singleline(&mut tab.input_line)
                                         .id(egui::Id::new(("command_input", tab.id)))
@@ -3386,6 +3576,7 @@ mod tests {
                     "submit_input": false,
                     "mosaic": true,
                     "mosaic_columns": 3,
+                    "mosaic_layout": "focus",
                     "explorer": true
                 }),
             )
@@ -3395,6 +3586,7 @@ mod tests {
         app.process_mcp_ui_commands();
         assert!(app.mosaic);
         assert_eq!(app.mosaic_columns, 3);
+        assert_eq!(app.mosaic_layout, MosaicLayout::Focus);
         assert!(app.show_explorer);
         assert_eq!(app.tabs[app.active_tab].input_line, "echo drafted_by_agent");
     }

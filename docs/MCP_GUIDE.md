@@ -68,7 +68,7 @@ All built-in tools are defined in [`MrtMcpServerState::built_in_tools()`](../cra
 | **`mrt_switch_tab`** | Switches the active terminal tab by UUID, 0-based index, or title substring. | `tab_id` *(required)* |
 | **`mrt_close_tab`** | Closes a tab by UUID, index, or title substring (always keeps at least 1 tab open). | `tab_id` *(required)* |
 | **`mrt_configure_tab`** | Updates a tab's shell profile, working directory (`cwd`), or title. | `tab_id?`, `shell?`, `cwd?`, `title?` |
-| **`mrt_control_gui`** | Controls the live MRT GUI: sets/submits the prompt bar (honoring the GUI Safety Gate modal), toggles Mosaic grid mode + columns, or toggles the Folder Explorer. | `tab_id?`, `input_text?`, `submit_input?`, `mosaic?`, `mosaic_columns?`, `explorer?` |
+| **`mrt_control_gui`** | Controls the live MRT GUI: sets/submits the prompt bar (honoring the GUI Safety Gate modal), toggles Mosaic mode with its arrangement (`grid`, `columns`, `rows`, `focus`) and grid columns, or toggles the Folder Explorer. | `tab_id?`, `input_text?`, `submit_input?`, `mosaic?`, `mosaic_columns?`, `mosaic_layout?`, `explorer?` |
 
 ### 3.2 Command Execution & Block Inspection
 

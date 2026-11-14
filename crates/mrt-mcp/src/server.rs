@@ -43,6 +43,8 @@ pub enum GuiUiCommand {
     SetMosaic {
         enabled: bool,
         columns: Option<usize>,
+        /// Optional arrangement: "grid", "columns", "rows" or "focus".
+        layout: Option<String>,
     },
     SetExplorer {
         visible: bool,
@@ -408,6 +410,7 @@ impl MrtMcpServerState {
                         "submit_input": { "type": "boolean", "description": "If true, immediately submit the input_text in the GUI (honoring the GUI Safety Gate modal for Critical commands)" },
                         "mosaic": { "type": "boolean", "description": "Optional toggle for Mosaic multi-terminal grid mode" },
                         "mosaic_columns": { "type": "integer", "description": "Optional column count (1..=6) for Mosaic grid mode" },
+                        "mosaic_layout": { "type": "string", "enum": ["grid", "columns", "rows", "focus"], "description": "Optional Mosaic arrangement: even grid, side-by-side columns, stacked rows, or focus (active terminal large, others beside it)" },
                         "explorer": { "type": "boolean", "description": "Optional toggle for the left Folder Explorer side panel" }
                     }
                 }),
@@ -1643,9 +1646,14 @@ pub async fn execute_mrt_mcp_tool(
                     .get("mosaic_columns")
                     .and_then(|v| v.as_u64())
                     .map(|c| c.clamp(1, 6) as usize);
+                let layout = args
+                    .get("mosaic_layout")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
                 state.notify_gui(GuiUiCommand::SetMosaic {
                     enabled: mosaic,
                     columns,
+                    layout,
                 });
             }
             if let Some(explorer) = args.get("explorer").and_then(|v| v.as_bool()) {

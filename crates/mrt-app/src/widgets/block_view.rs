@@ -287,6 +287,109 @@ pub fn render_command_block(
     triggered_action
 }
 
+/// Terminal-style rendering for small Mosaic tiles: a prompt line with the
+/// status, then the raw ANSI output. Failed commands keep a Diagnose action.
+pub fn render_compact_block(ui: &mut Ui, block: &CommandBlock) -> Option<BlockAction> {
+    let mut action = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        match block.exit_code {
+            Some(0) => {
+                ui.label(RichText::new("✔").size(12.0).color(Palette::ACCENT_GREEN));
+            }
+            Some(_) => {
+                ui.label(RichText::new("✖").size(12.0).color(Palette::ACCENT_RED));
+            }
+            None => {
+                ui.add(egui::Spinner::new().size(12.0).color(Palette::ACCENT));
+            }
+        }
+        ui.add(
+            egui::Label::new(
+                RichText::new(&block.command)
+                    .monospace()
+                    .size(12.5)
+                    .color(Palette::TEXT_PRIMARY),
+            )
+            .truncate(),
+        )
+        .on_hover_text(format!(
+            "{}\n{} · {}",
+            block.command,
+            format_duration(block.duration_ms as u64),
+            block.timestamp.format("%H:%M:%S")
+        ));
+    });
+    let mut job = egui::text::LayoutJob::default();
+    for span in &block.ansi_spans {
+        let fg = span
+            .fg
+            .map(|c| Color32::from_rgb(c.r, c.g, c.b))
+            .unwrap_or(Palette::TEXT_BODY);
+        job.append(
+            &span.text,
+            0.0,
+            egui::TextFormat {
+                font_id: egui::FontId::monospace(12.0),
+                color: fg,
+                italics: span.italic,
+                ..Default::default()
+            },
+        );
+    }
+    if !job.text.trim().is_empty() {
+        ui.label(job);
+    }
+    if let Some(code) = block.exit_code.filter(|c| *c != 0) {
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!("exit {code}"))
+                    .size(11.0)
+                    .color(Color32::from_rgb(252, 165, 165)),
+            );
+            if block.ai_explanation.is_none()
+                && ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new("✨ Diagnose")
+                                .size(11.5)
+                                .color(Palette::ACCENT_TEXT),
+                        )
+                        .frame(false),
+                    )
+                    .clicked()
+            {
+                action = Some(BlockAction::DiagnoseError(block.id));
+            }
+        });
+    }
+    if let Some(explanation) = &block.ai_explanation {
+        ui.label(
+            RichText::new(format!("✨ {explanation}"))
+                .size(12.0)
+                .color(Palette::ACCENT_TEXT),
+        );
+        if let Some(fix) = &block.ai_suggested_fix {
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new(format!("Run  {fix}"))
+                            .monospace()
+                            .size(11.5)
+                            .color(Palette::TEXT_PRIMARY),
+                    )
+                    .fill(Palette::BG_INSET),
+                )
+                .clicked()
+            {
+                action = Some(BlockAction::ApplySuggestedFix(fix.clone()));
+            }
+        }
+    }
+    ui.add_space(8.0);
+    action
+}
+
 fn render_ansi_spans(ui: &mut Ui, block: &CommandBlock) {
     if block.ansi_spans.is_empty() {
         ui.label(

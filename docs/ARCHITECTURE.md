@@ -24,9 +24,10 @@ flowchart LR
 
 ## Crate-by-Crate Breakdown
 
-### 1. `mrt-core` — Polyglot Shell, Interactive PTYs, VT Parser, Blocks & Safety Gate
+### 1. `mrt-core` — Polyglot Shell, Interactive PTYs, VT Parser, Blocks, Shell Integration & Safety Gate
 - **Multi-Shell Discovery (`discover_shells`)**: Automatically probes the OS and `PATH` for PowerShell 7 (`pwsh`), Windows PowerShell (`powershell`), Command Prompt / Batch (`cmd.exe`), Git Bash (`bash.exe`), WSL (`wsl.exe`), Bash, Zsh, Fish, Nushell (`nu`), and POSIX `sh`.
 - **Interactive PTY Engine (`InteractivePty`)**: Wraps `portable-pty` for persistent interactive sessions with raw/line input (`\r\n` on Windows, `\n` on Unix), unread buffer draining, full transcript reading, dynamic resizing, exit polling, and process termination.
+- **Shell Integration (`shell_integration.rs`)**: Parses OSC 133 semantic prompt escape markers (`133;A` prompt start, `133;B` prompt end, `133;C` executed, `133;D` finished with exit code) and generates integration scripts for Bash, Zsh, Fish, PowerShell, and CMD.
 - **ANSI / VT100 Parser (`vt.rs`)**: Uses `vte` to parse SGR colors (16-color and 24-bit RGB truecolor), bold, italic, and underline attributes into `Vec<AnsiSpan>` while simultaneously producing clean plain text for structured output classification.
 - **Structured Output Classifier (`block.rs`)**: Inspects completed command outputs and classifies them into:
   - `StructuredOutput::Json(Value)` — Rendered as an interactive collapsible tree.
@@ -40,15 +41,20 @@ flowchart LR
 - **`http_inspector.rs`**: Executes REST/HTTP calls (`GET`, `POST`, `PUT`, `DELETE`, `PATCH`), measuring round-trip latency and auto-formatting JSON responses.
 - **`web_fetch.rs`**: Fetches live web pages and converts HTML into clean Markdown (stripping `<script>`, `<style>`, `<svg>`).
 - **`net_inspector.rs`**: Queries local listening sockets (`netstat -ano` on Windows, `/usr/sbin/lsof` on macOS, `ss -tulnp` on Linux/Unix) and returns a structured table of Protocol, Local Address, Port, State, and PID.
+- **`dns_inspector.rs`**: Resolves IPv4 and IPv6 records, measures DNS lookup time, and concurrently benchmarks TCP handshake latency across all endpoints.
+- **`ws_inspector.rs`**: Connects to `ws://` / `wss://` endpoints, records handshake latency, logs frames with relative timestamps, and sends test probes.
+- **`bug_reporter.rs`**: Automatically redacts sensitive tokens (GitHub PATs, API keys, AWS credentials, Bearer tokens, private keys) and formats Markdown bug reports for GitHub issues.
+- **`structured_diff.rs`**: Computes canonical JSON diffs (key order agnostic) and port snapshot delta analyses.
 
 ### 3. `mrt-mcp` — Dual-Mode Model Context Protocol & Live GUI Bridge
 - **Live GUI Bridge (`bridge.rs`)**: Runs a localhost TCP JSON-RPC listener inside the MRT GUI (`mcp-bridge.json`), allowing external `mrt --mcp-server` processes to transparently control the live GUI window (and falling back to standalone headless mode when no GUI is running).
-- **MCP Server (`server.rs`)**: Speaks JSON-RPC 2.0 over `stdio` (`mrt --mcp-server`), TCP bridge, or in-memory loopback. Exposes 24 tools covering session & multi-tab management (`mrt_get_session_state`, `mrt_list_tabs`, `mrt_create_tab`, `mrt_switch_tab`, `mrt_close_tab`, `mrt_configure_tab`), command execution & block inspection/diffing/AI triage (`mrt_run_command`, `mrt_list_blocks`, `mrt_get_block`, `mrt_search_blocks`, `mrt_compare_blocks`, `mrt_diagnose_block`, `mrt_clear_blocks`), interactive PTY sessions (`mrt_pty_spawn`, `mrt_pty_write`, `mrt_pty_read`, `mrt_pty_resize`, `mrt_pty_list`, `mrt_pty_kill`), live GUI control (`mrt_control_gui`), AI translation (`mrt_ai_translate`), and internet tools (`mrt_http_request`, `mrt_web_fetch`, `mrt_inspect_ports`), plus 4 MCP resources (`mrt://session/state`, `mrt://session/tabs`, `mrt://session/blocks`, `mrt://session/ptys`).
-- **MCP Host (`client.rs`)**: Connects to external `stdio` MCP servers (`initialize` -> `tools/list` -> `tools/call`) and surfaces their tools inside the GUI's **MCP Hub**.
+- **MCP Server (`server.rs`)**: Speaks JSON-RPC 2.0 over `stdio` (`mrt --mcp-server`), TCP bridge, or in-memory loopback. Exposes 27 tools covering session & multi-tab management (`mrt_get_session_state`, `mrt_list_tabs`, `mrt_create_tab`, `mrt_switch_tab`, `mrt_close_tab`, `mrt_configure_tab`), command execution & block inspection/diffing/AI triage (`mrt_run_command`, `mrt_list_blocks`, `mrt_get_block`, `mrt_search_blocks`, `mrt_compare_blocks`, `mrt_diagnose_block`, `mrt_clear_blocks`), interactive PTY sessions (`mrt_pty_spawn`, `mrt_pty_write`, `mrt_pty_read`, `mrt_pty_resize`, `mrt_pty_list`, `mrt_pty_kill`), live GUI control (`mrt_control_gui`), AI translation (`mrt_ai_translate`), and internet/diagnostic tools (`mrt_http_request`, `mrt_web_fetch`, `mrt_inspect_ports`, `mrt_inspect_dns`, `mrt_generate_bug_report`, `mrt_inspect_ws`), plus 4 MCP resources (`mrt://session/state`, `mrt://session/tabs`, `mrt://session/blocks`, `mrt://session/ptys`).
+- **MCP Host (`client.rs`)**: Connects to external `stdio` MCP servers (`initialize` -> `tools/list` -> `tools/call`) with one-click presets for common servers (Filesystem, Git, Memory Graph, SQLite, Fetch) and surfaces their tools inside the GUI's **MCP Hub**.
 
 ### 4. `mrt-ai` — Multi-Provider AI & Error Triage
 - Supports **Google Gemini**, **Anthropic Claude**, **OpenAI**, **xAI Grok**, **DeepSeek**, **OpenRouter**, and **Local Ollama**, plus a built-in **Offline Polyglot Engine** that adapts commands to the active tab's shell (`cmd.exe` vs `pwsh` vs `bash`).
-- Includes `diagnose_command_error` to explain failed commands (non-zero exit codes) and offer one-click shell-appropriate fixes.
+- Includes `diagnose_command_error` and `diagnose_command_error_streaming` to stream AI explanations token-by-token into failed command blocks with one-click shell-appropriate fixes.
 
 ### 5. `mrt-app` — Native GPU GUI (`eframe` / `egui`)
-- Renders multi-shell tabs, **Mosaic** multi-terminal grid mode, **Folder Explorer**, persistent SQLite **Command History** and **Saved Runbooks** (with offline sequence editing, preview, Safety Gate enforcement, and stop-on-first-failure replay), the **Command Block** stream (with diff comparison), the **MCP Hub** (with Live GUI Bridge indicator) and **Internet Studio** side panels, the **Safety Approval Gate** modal, and the **Universal Command Palette** (`Ctrl+K` / `Ctrl+P`).
+- Renders multi-shell tabs, **Split Panes** within any tab (`:split-h`, `:split-v`, `:unsplit`), full-screen **Interactive TUI Mode** overlay (`:tui <cmd>`, `vim`, `nano`, `htop`, `lazygit`), **Mosaic** multi-terminal grid mode, **Folder Explorer**, persistent SQLite **Command History** and **Saved Runbooks** (with offline sequence editing, preview, Safety Gate enforcement, and stop-on-first-failure replay), the **Command Block** stream (with structured diff comparison), the **MCP Hub** (with Live GUI Bridge indicator) and **Internet Studio** side panels, the **Safety Approval Gate** modal, and the **Universal Command Palette** (`Ctrl+K` / `Ctrl+P`).
+- Automated multi-platform CI/CD distribution workflow in `.github/workflows/release.yml` building release packages for Windows, Linux, and macOS.

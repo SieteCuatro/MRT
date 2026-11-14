@@ -22,26 +22,28 @@ Terminal commands, HTTP requests, web fetches, port scans, MCP tool calls, and A
 
 ### 2.1 Top Bar (`app.rs`)
 - **Layout Toggles**: Toggle **Mosaic** (multi-terminal split grid with configurable columns and drag-and-drop reordering) and **Explorer** (left-hand directory browser synced to the active tab's CWD).
+- **Split Panes**: Split any active tab horizontally or vertically (`Split ◫`, `Split ⊟`, or via `:split`, `:split-h`, `:split-v`, `:unsplit`). Each pane maintains its own independent command block history, shell execution stream, and focus state.
 - **Multi-Tab Manager**: Switch between tabs, close tabs (`×`), or click **+ New tab** to open a new tab directly in any discovered shell (`Windows PowerShell`, `Command Prompt / Batch`, `Git Bash`, `WSL`, etc.).
 - **Active Shell Switcher**: A live dropdown that changes the active tab's `ShellProfile` on the fly.
 - **Right-Side Inspector Toggles**: Toggle buttons for **History** (SQLite-backed command/output search with `+ Runbook` quick-add), **Runbooks** (saved command sequences), **MCP Hub**, **Internet Studio**, and **Palette (`Ctrl+K`)**.
 
 ### 2.2 Command Block Renderer (`widgets/block_view.rs`)
 Each `CommandBlock` is rendered inside a status-colored card frame (green border for `exit 0`, red border for non-zero exit codes):
-- **Header Bar**: Shell badge (`pwsh`, `cmd`, `git-bash`, `wsl`, `mrt-http`, `mrt-net`, `mcp-tool`), command text, exit status & duration pill (`0 (42ms)`), **Compare with previous run**, **Rerun**, **Copy**, **Structured / Raw ANSI Toggle**, and **Diagnose Error**.
+- **Header Bar**: Shell badge (`pwsh`, `cmd`, `git-bash`, `wsl`, `mrt-http`, `mrt-net`, `mcp-tool`), command text, exit status & duration pill (`0 (42ms)`), **Compare with previous run**, **Report Bug** (for failed commands, generating sanitized Markdown for GitHub), **Rerun**, **Copy**, **Structured / Raw ANSI Toggle**, and **Diagnose Error**.
 - **Specialized Viewers**:
   - `render_json_tree`: Recursive collapsible `egui::CollapsingHeader` tree with syntax-colored keys, strings, numbers, booleans, and nulls.
   - `render_structured_table`: Striped `egui::Grid` with a real-time row substring filter box.
   - `render_http_exchange`: Method/URL header, color-coded HTTP status & latency badge, collapsible response headers, and embedded JSON tree.
   - `render_markdown_block`: Styled `#` / `##` / `###` headings and bullet lists.
   - `render_ansi_spans`: Converts `Vec<AnsiSpan>` into an `egui::text::LayoutJob` with per-span foreground/background RGB colors, italics, and underlines.
-  - `render_comparison`: Line-by-line unified diff (`similar::TextDiff`) comparing two `CommandBlock`s.
+  - `render_comparison`: Structured diff viewer supporting canonical JSON diffs (key reordering produces 0 diff), port snapshot delta breakdowns, and line-by-line unified diffs (`similar::TextDiff`).
 
 ### 2.3 Side Panels (`widgets/side_panels.rs` & `widgets/runbooks.rs`)
-- **MCP Hub Panel (`render_mcp_side_panel`)**: Displays the **Live GUI Bridge** status (`127.0.0.1:<port>`) with a one-click **Copy MCP Config** button, lists connected MCP servers (`mrt-native-mcp` + external `stdio` servers), expandable tool descriptions, custom JSON argument editor, one-click **Invoke Tool** buttons, and a form to connect new external `stdio` MCP servers.
-- **Internet Studio Panel (`render_internet_side_panel`)**: Interactive GUI forms for the HTTP/REST Inspector, Readable Webpage Extractor, and Local Port Scanner.
+- **MCP Hub Panel (`render_mcp_side_panel`)**: Displays the **Live GUI Bridge** status (`127.0.0.1:<port>`) with a one-click **Copy MCP Config** button, lists connected MCP servers (`mrt-native-mcp` + external `stdio` servers), expandable tool descriptions, custom JSON argument editor, one-click **Invoke Tool** buttons, one-click **Server Presets** (Filesystem, Git, Memory Graph, SQLite, Fetch), and a form to connect new external `stdio` MCP servers.
+- **Internet Studio Panel (`render_internet_side_panel`)**: Interactive GUI forms for the HTTP/REST Inspector, Readable Webpage Extractor, Local Port Scanner, DNS Resolution & Latency Tracer, and WebSocket Inspector.
 - **Runbooks Panel (`render_runbooks_panel`)**: Offline SQLite-backed manager for saved command sequences (`Runbook` / `RunbookStep` in `history.rs`). Supports creating and editing runbooks, picking steps from command history (or adding manual steps), reordering steps (`^` / `v` / `x`), selecting per-step shell and working directory, previewing steps before execution, and replaying step-by-step via `ActiveRunbookReplay` (routing each step through the Safety Approval Gate, rendering each output as a `CommandBlock`, and stopping on the first non-zero exit code).
 
-### 2.4 Modals (`app.rs`)
+### 2.4 Modals & Overlays (`app.rs`)
+- **Interactive TUI Mode Overlay (`ActiveTuiSession`)**: When launching interactive console tools (`vim`, `vi`, `nvim`, `nano`, `htop`, `lazygit`, `less`, etc., or via `:tui <cmd>`), MRT opens a full-screen alt-screen PTY overlay. Keystrokes (including arrow keys, Enter, Backspace, Tab, Escape, and Ctrl sequences) are streamed directly to the child process with rapid 30ms GUI repainting. Exiting cleanly or pressing `Ctrl+Q` terminates the session and stores the transcript as a standard completed `CommandBlock`.
 - **MRT Safety Approval Gate**: Centered modal window that intercepts `RiskLevel::Critical` commands, displays the risk classification, reason, target shell, and working directory, and requires explicit **Approve & Execute** or **Cancel Command**.
 - **Universal Command Palette (`Ctrl+K` / `Ctrl+P`)**: Fuzzy-searchable modal to switch shell profiles or run built-in internet/AI actions from the keyboard.

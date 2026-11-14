@@ -60,10 +60,83 @@ Invoked via `:ports`, the **Internet Studio** side panel, or the `mrt_inspect_po
 
 ---
 
-## 4. How Contributors Can Add a New Built-in `:tool`
+## 4. DNS Resolution & Handshake Latency Tracer (`dns_inspector.rs`)
 
-Want to use your AI tokens to add `:dns`, `:whois`, `:ping`, or `:ws` (WebSocket inspector)?
-1. Create a new module in [`crates/mrt-tools/src/`](../crates/mrt-tools/src) (for example, `dns_inspector.rs`) and export it in `crates/mrt-tools/src/lib.rs`.
+Invoked via `:dns <host_or_url>`, the **Internet Studio** side panel, or the `mrt_inspect_dns` MCP tool.
+
+### Syntax
+```text
+:dns <hostname>
+:dns <hostname>:<port>
+:dns https://example.com/path
+```
+
+### How It Works
+1. Normalizes the input, stripping URL schemes (`http://`, `https://`) and paths, extracting hostname and target port (default `80` for http, `443` for https, or custom).
+2. Measures DNS resolution latency using non-blocking asynchronous address lookup (`tokio::net::lookup_host`).
+3. Classifies resolved addresses into IPv4 (A) and IPv6 (AAAA) records.
+4. Concurrently probes TCP connection latency (`TcpStream::connect`) to all resolved IP endpoints.
+5. Emits a `StructuredOutput::Table` containing Host, IP Address, Record Type, TCP Handshake Latency (ms), and Reachability Status, along with summary metrics.
+
+---
+
+## 5. WebSocket Inspector (`ws_inspector.rs`)
+
+Invoked via `:ws <url> [optional_initial_message]`, the **Internet Studio** side panel, or the `mrt_inspect_ws` MCP tool.
+
+### Syntax
+```text
+:ws ws://localhost:8080/events
+:ws wss://echo.websocket.events "Hello MRT"
+:ws --timeout 5000 wss://stream.example.com
+```
+
+### What It Measures & Captures
+- HTTP/101 Upgrade Handshake round-trip latency.
+- Real-time incoming frames stream: Frame Type (`Text`, `Binary`, `Ping`, `Pong`, `Close`), Payload size, Timestamp, and elapsed offset (`+Xms`).
+- Emits structured JSON summary (`WsInspectionResult`) and Markdown transcript with message payloads and connection status.
+
+---
+
+## 6. Markdown Bug Reporter with Secret Token Redaction (`bug_reporter.rs`)
+
+Invoked via the **Report** button on failed blocks, the `:report` or `:bug` commands, or the `mrt_generate_bug_report` MCP tool.
+
+### Secret Redactor Engine
+Before generating any report, `redact_sensitive_tokens()` scans all inputs and outputs using regular expressions and pattern matching to sanitize:
+- GitHub Personal Access Tokens (`ghp_`, `gho_`, `github_pat_`)
+- OpenAI API Keys (`sk-...`)
+- Google AI / Gemini API Keys (`AIzaSy...`)
+- AWS Access Key IDs (`AKIA...`)
+- Authorization Bearer tokens (`Bearer ...`)
+- Password fields in connection strings and JSON keys (`"password": "..."`)
+- PEM private keys (`-----BEGIN PRIVATE KEY-----`)
+
+### Output Format
+Generates a GitHub-flavored Markdown issue template with:
+- System environment (OS, architecture, MRT version)
+- Failed command, shell kind, exit code, and execution duration
+- Sanitized command stdout/stderr
+- Preceding command history context leading up to the failure
+
+---
+
+## 7. Canonical Structured Diffs (`structured_diff.rs`)
+
+Invoked via the **Diff** button on blocks, `:diff [block1] [block2]`, or the `mrt_compare_blocks` MCP tool.
+
+### Features
+- **JSON Key Canonicalization**: Parses JSON objects and sorts all nested keys alphabetically using `BTreeMap`. Reordering keys in a response produces zero spurious diffs.
+- **JSON Path Deltas**: Pinpoints added, removed, and modified JSON paths between two executions.
+- **Port Snapshot Dettas**: When comparing two `:ports` blocks, identifies newly opened sockets and closed sockets.
+- **Line-by-Line Unified Diff**: Integrates `similar::TextDiff` for raw textual differences.
+
+---
+
+## 8. How Contributors Can Add a New Built-in `:tool`
+
+Want to use your AI tokens to add `:whois` or `:ping`?
+1. Create a new module in [`crates/mrt-tools/src/`](../crates/mrt-tools/src) and export it in `crates/mrt-tools/src/lib.rs`.
 2. Return either a `StructuredOutput::Table`, `StructuredOutput::Json`, or `StructuredOutput::Markdown` from your async function.
-3. Wire the `:dns` prefix in [`crates/mrt-app/src/app.rs`](../crates/mrt-app/src/app.rs) inside `MrtGuiApp::submit_input` and optionally expose it as an MCP tool in [`crates/mrt-mcp/src/server.rs`](../crates/mrt-mcp/src/server.rs).
+3. Wire the tool prefix in [`crates/mrt-app/src/app.rs`](../crates/mrt-app/src/app.rs) inside `MrtGuiApp::submit_input` and expose it as an MCP tool in [`crates/mrt-mcp/src/server.rs`](../crates/mrt-mcp/src/server.rs).
 4. Add unit tests in `crates/mrt-tools` and run `cargo test --workspace`.

@@ -12,6 +12,7 @@
 | **`vt`** | [`src/vt.rs`](../crates/mrt-core/src/vt.rs) | ANSI / VT100 escape sequence state machine powered by `vte`, producing styled `AnsiSpan` vectors and stripped plain text. |
 | **`block`** | [`src/block.rs`](../crates/mrt-core/src/block.rs) | `CommandBlock` data model and automatic `StructuredOutput` detector (JSON, CSV/TSV Tables, Markdown, HTTP results). |
 | **`safety`** | [`src/safety.rs`](../crates/mrt-core/src/safety.rs) | Cross-shell destructive command classifier (`RiskLevel::Safe`, `Moderate`, `Critical`) powering the MRT Safety Approval Gate. |
+| **`shell_integration`** | [`src/shell_integration.rs`](../crates/mrt-core/src/shell_integration.rs) | OSC 133 semantic prompt marker parser and shell integration generator for Bash, Zsh, Fish, PowerShell, and CMD. |
 | **`platform`** | [`src/platform.rs`](../crates/mrt-core/src/platform.rs) | OS-specific environment hydration (macOS/Linux login `$PATH` loader and Windows `AttachConsole` CLI helper). |
 
 ---
@@ -76,3 +77,23 @@ Users can toggle any structured block between **Structured View** and **Raw ANSI
   - `sudo `, `rm `, `del `, `Remove-Item `, `kill -9`, `Stop-Process`, `taskkill /f`, `chmod 777`
 - **`RiskLevel::Safe`**:
   - Read-only and standard developer commands (`git status`, `cargo test`, `dir`, `ls`, etc.).
+
+---
+
+## 6. Shell Integration & Semantic Prompt Markers (`shell_integration.rs`)
+
+MRT integrates native support for the **OSC 133 semantic prompt specification**, allowing the terminal to unambiguously separate user prompts, command input, command execution, and exit codes:
+
+### Supported Markers
+- **`OSC 133 ; A ST`**: Prompt started.
+- **`OSC 133 ; B ST`**: Prompt ended / command input started.
+- **`OSC 133 ; C ST`**: Command execution initiated (output begins).
+- **`OSC 133 ; D [; <code>] ST`**: Command finished with optional numeric exit code.
+
+### Shell Integration Generator
+`generate_shell_integration(shell: ShellKind) -> String` generates initialization snippets that configure hooks in:
+- **Bash**: `PROMPT_COMMAND` wrapper.
+- **Zsh**: `precmd` and `preexec` hook functions.
+- **Fish**: `fish_prompt` and `fish_postexec` event handlers.
+- **PowerShell**: Custom `prompt` function with `$LASTEXITCODE` forwarding.
+- **Windows CMD**: Clink / prompt sequence generation.

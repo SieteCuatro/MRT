@@ -71,3 +71,12 @@ Whenever a command exits with a non-zero status code (`exit_code != 0`), MRT dis
 - Running `export VAR=val` inside `cmd.exe` or `powershell` -> Suggests `set VAR=val` (for Batch) or `$env:VAR = "val"` (for PowerShell).
 - Unrecognized command / `command not found` -> Suggests `Get-Command *<bin>*` (PowerShell), `where <bin>` (CMD), or `which <bin>` (Bash).
 - Missing path / directory -> Suggests listing the current directory in the active shell's native syntax.
+
+---
+
+## 4. Streaming AI Explanations (`diagnose_command_error_streaming`)
+
+To eliminate waiting latency when requesting error diagnoses, MRT features token-by-token progressive streaming:
+- `diagnose_command_error_streaming(command, output, exit_code, shell, on_chunk)` streams explanation tokens progressively via callback as they arrive from the active AI provider or heuristic engine.
+- In `mrt-app`, background worker threads dispatch `AsyncWorkerEvent::AiExplanationChunk { tab_id, block_id, chunk, done }` to update the GUI state on every frame.
+- The block's AI explanation text expands live as the model responds, providing immediate feedback to the user.

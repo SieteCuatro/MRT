@@ -54,7 +54,7 @@ Open the **MCP Hub** side panel inside MRT and click **Copy MCP Config**, or add
 
 ---
 
-## 3. Complete MCP Server Tool Reference (24 Tools)
+## 3. Complete MCP Server Tool Reference (27 Tools)
 
 All built-in tools are defined in [`MrtMcpServerState::built_in_tools()`](../crates/mrt-mcp/src/server.rs).
 
@@ -95,7 +95,7 @@ All built-in tools are defined in [`MrtMcpServerState::built_in_tools()`](../cra
 | **`mrt_pty_list`** | Lists all active and exited interactive PTY sessions with running status and exit codes. | *(none)* |
 | **`mrt_pty_kill`** | Terminates a running PTY session and optionally removes it from the session table. | `pty_id` *(required)*, `remove?` (default `true`) |
 
-### 3.4 AI & Built-in Internet Tools
+### 3.4 AI & Built-in Internet / Diagnostic Tools
 
 | Tool | Description | Key Parameters |
 | :--- | :--- | :--- |
@@ -103,6 +103,9 @@ All built-in tools are defined in [`MrtMcpServerState::built_in_tools()`](../cra
 | **`mrt_http_request`** | Performs an HTTP/REST request via `mrt-tools::http_inspector` and returns status, latency, headers, and formatted body. | `url` *(required)*, `method?` (default `GET`), `body?` |
 | **`mrt_web_fetch`** | Fetches a web URL and converts its HTML into clean readable Markdown. | `url` *(required)* |
 | **`mrt_inspect_ports`** | Lists active local listening TCP/UDP ports and PIDs on the host system in CSV format. | *(none)* |
+| **`mrt_inspect_dns`** | Resolves IPv4 (A) and IPv6 (AAAA) records, calculates lookup duration, and measures TCP handshake latency to all endpoints. | `host` *(required)*, `port?` |
+| **`mrt_generate_bug_report`** | Generates a GitHub-flavored Markdown issue report for a failed command block with automatic secret token redaction. | `block_id` *(required)* |
+| **`mrt_inspect_ws`** | Connects to a WebSocket endpoint (`ws://` or `wss://`), measures handshake latency, logs frames with timestamps, and optionally sends an initial probe frame. | `url` *(required)*, `initial_message?`, `timeout_ms?` (default `3000`) |
 
 ---
 
@@ -123,8 +126,15 @@ External MCP clients can list and read four native MCP resources via `resources/
 
 Inside the MRT GUI, open the **MCP Hub** side panel on the right:
 1. **Live GUI Bridge Indicator**: Shows the active `127.0.0.1:<port>` bridge address and a **Copy MCP Config** button for external agents.
-2. **Built-in Loopback Server (`mrt-native-mcp`)**: Connected automatically on startup so you can test and invoke all 24 MRT MCP tools directly from the GUI.
-3. **Connecting External Stdio MCP Servers**:
+2. **Built-in Loopback Server (`mrt-native-mcp`)**: Connected automatically on startup so you can test and invoke all 27 MRT MCP tools directly from the GUI.
+3. **One-Click Server Presets**:
+   - Quick-load preconfigured profiles for popular MCP servers:
+     - **Filesystem**: `@modelcontextprotocol/server-filesystem`
+     - **Git**: `mcp-server-git`
+     - **Memory Graph**: `@modelcontextprotocol/server-memory`
+     - **SQLite**: `mcp-server-sqlite`
+     - **Fetch**: `mcp-server-fetch`
+4. **Connecting External Stdio MCP Servers**:
    - Enter a **Name** (e.g., `filesystem`), **Command** (e.g., `npx`), and **Args** (e.g., `-y @modelcontextprotocol/server-filesystem .`), then click **Connect MCP Server**.
    - `McpHostManager::connect_external_stdio_server` spawns the server (with `CREATE_NO_WINDOW` on Windows so no console window flashes), performs the `initialize` and `tools/list` handshake, and renders every discovered tool in the side panel.
    - Clicking **Invoke Tool** executes `tools/call` and renders the returned MCP content directly as a `CommandBlock` in your active terminal tab.

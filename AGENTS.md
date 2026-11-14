@@ -15,21 +15,26 @@ The Cargo workspace contains 5 modular crates:
   - `vt.rs`: Parses ANSI/VT100 escape sequences via `vte` into colored `AnsiSpan` segments and stripped plain text.
   - `block.rs`: Defines `CommandBlock` and `classify_output` (auto-detecting JSON trees, CSV/TSV tables, Markdown, and HTTP responses).
   - `safety.rs`: Evaluates command risk (`Safe`, `Moderate`, `Critical`) across Bash, PowerShell, CMD/Batch, SQL, Git, and Kubernetes for the MRT Safety Approval Gate.
+  - `shell_integration.rs`: OSC 133 semantic prompt markers parser and shell integration generator for Bash, Zsh, Fish, PowerShell, and CMD.
   - `platform.rs`: Cross-platform startup helpers (`hydrate_login_environment` for macOS/Linux GUI `$PATH` inheritance and `attach_parent_console_if_cli` for Windows CLI flags).
 - **`crates/mrt-tools`**:
   - `http_inspector.rs`: Built-in `:http` / `:curl` REST API client (`reqwest`).
   - `web_fetch.rs`: Built-in `:web` HTML-to-readable-Markdown extractor.
   - `net_inspector.rs`: Built-in `:ports` local TCP/UDP listening port scanner.
+  - `dns_inspector.rs`: Built-in `:dns` DNS resolution and TCP handshake latency tracer.
+  - `ws_inspector.rs`: Built-in `:ws` WebSocket inspector with live frame logging and test probe sender.
+  - `bug_reporter.rs`: Built-in `:report` / `:bug` Markdown bug report generator with automatic secret token redaction.
+  - `structured_diff.rs`: Canonical JSON diffs (key order invariant) and listening port snapshot delta detection.
 - **`crates/mrt-mcp`**:
   - `protocol.rs`: JSON-RPC 2.0 and Model Context Protocol (MCP) types.
   - `bridge.rs`: Localhost TCP bridge (`mcp-bridge.json`) so external `mrt --mcp-server` processes transparently control a running MRT GUI window.
   - `server.rs`: MRT as an MCP Server (`mrt --mcp-server` or live GUI bridge), exposing 27 tools across session & multi-tab control (`mrt_get_session_state`, `mrt_list_tabs`, `mrt_create_tab`, `mrt_switch_tab`, `mrt_close_tab`, `mrt_configure_tab`), command execution & block inspection/diffing/triage (`mrt_run_command`, `mrt_list_blocks`, `mrt_get_block`, `mrt_search_blocks`, `mrt_compare_blocks`, `mrt_diagnose_block`, `mrt_clear_blocks`), interactive PTYs (`mrt_pty_spawn`, `mrt_pty_write`, `mrt_pty_read`, `mrt_pty_resize`, `mrt_pty_list`, `mrt_pty_kill`), live GUI control (`mrt_control_gui`), AI translation (`mrt_ai_translate`), and internet & diagnostic tools (`mrt_http_request`, `mrt_web_fetch`, `mrt_inspect_ports`, `mrt_inspect_dns`, `mrt_generate_bug_report`, `mrt_inspect_ws`), plus 4 MCP resources.
-  - `client.rs`: MRT as an MCP Host, connecting to in-process loopback and external `stdio` MCP servers.
+  - `client.rs`: MRT as an MCP Host, connecting to in-process loopback and external `stdio` MCP servers (with one-click presets for Filesystem, Git, Memory, SQLite, Fetch).
 - **`crates/mrt-ai`**:
-  - `lib.rs`: Multi-provider AI client supporting **Google Gemini**, **Anthropic Claude**, **OpenAI**, **xAI Grok**, **DeepSeek**, **OpenRouter**, **Local Ollama**, and a deterministic **Offline Polyglot Heuristic Engine**.
+  - `lib.rs`: Multi-provider AI client supporting **Google Gemini**, **Anthropic Claude**, **OpenAI**, **xAI Grok**, **DeepSeek**, **OpenRouter**, **Local Ollama**, and a deterministic **Offline Polyglot Heuristic Engine**, with streaming token delivery (`diagnose_command_error_streaming`).
 - **`crates/mrt-app`**:
   - `main.rs`: Entrypoint (`#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]`), CLI flag handler (`--mcp-server`, `--version`, `--help`), and `eframe` native GPU launcher.
-  - `app.rs`, `history.rs`, `theme.rs` & `widgets/`: Multi-tab GUI, Mosaic split grid, Folder Explorer, SQLite + FTS5 trigram command history, dark theme & system font loader, per-tab shell switcher, interactive block renderer, MCP Hub side panel, Internet Studio side panel, Safety Approval Gate modal, and Command Palette (`Ctrl+K` / `Ctrl+P`).
+  - `app.rs`, `history.rs`, `theme.rs` & `widgets/`: Multi-tab GUI, Split Panes within tabs (`:split-h`, `:split-v`, `:unsplit`), full-screen Interactive TUI Mode overlay (`:tui <cmd>`, `vim`, `nano`, `htop`, `lazygit`), Mosaic split grid, Folder Explorer, SQLite + FTS5 trigram command history, dark theme & system font loader, per-tab shell switcher, interactive block renderer (with structured diffs), MCP Hub side panel, Internet Studio side panel, Safety Approval Gate modal, and Command Palette (`Ctrl+K` / `Ctrl+P`).
 
 ---
 

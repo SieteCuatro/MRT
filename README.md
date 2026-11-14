@@ -6,18 +6,25 @@ Licensed under the [MIT License](LICENSE).
 
 ## Features
 
-- **Polyglot Shell Support**: Auto-discovers and runs PowerShell (`pwsh`, `powershell`), Windows Batch (`cmd.exe`), Bash, Git Bash, WSL, Zsh, Fish, Nushell, and `sh` in multi-tab or Mosaic split-grid layouts, with a synchronized Folder Explorer.
-- **Structured Command Blocks**: Automatically classifies command output into collapsible JSON trees, filterable CSV/TSV tables, Markdown, or HTTP exchanges while preserving full ANSI/VT100 styling and line-by-line block diffing.
+- **Polyglot Shell Support & Split Panes**: Auto-discovers and runs PowerShell (`pwsh`, `powershell`), Windows Batch (`cmd.exe`), Bash, Git Bash, WSL, Zsh, Fish, Nushell, and `sh` in multi-tab, horizontal/vertical split panes (`:split-h`, `:split-v`, `:unsplit`), or Mosaic split-grid layouts, with a synchronized Folder Explorer.
+- **Interactive Terminal Mode (TUI)**: Run full-screen interactive console programs (`vim`, `nano`, `htop`, `lazygit`, `less`, etc., or via `:tui <cmd>`) inside an alt-screen PTY overlay with full keyboard forwarding, rapid streaming repaints, and graceful exit (`Ctrl+Q`), automatically saving the session transcript as a command block.
+- **Shell Integration (OSC 133)**: Built-in semantic prompt marker parser and integration script generator for Bash, Zsh, Fish, PowerShell, and CMD for precise prompt, command execution, and exit code detection.
+- **Structured Command Blocks**: Automatically classifies command output into collapsible JSON trees, filterable CSV/TSV tables, Markdown, or HTTP exchanges while preserving full ANSI/VT100 styling, structured JSON/port diffing, and line-by-line block comparisons.
 - **Persistent History & Saved Runbooks**: Stores executed command blocks in SQLite with FTS5 trigram indexing for fast substring search across sessions, and lets you assemble, reorder, and save offline command sequences as **Runbooks**—previewing commands, shells, and working directories before replaying each step through the Safety Approval Gate and stopping on the first failure.
-- **Built-in Network Tools**:
+- **Built-in Network & Diagnostic Tools**:
   - `:http` / `:curl` — Inline REST API client with latency timing, response headers, and JSON tree rendering.
   - `:web` — Fetches URLs and converts HTML pages into readable Markdown.
   - `:ports` — Cross-platform local listening TCP/UDP port scanner (`netstat`, `lsof`, `ss`).
-- **MCP Host & Server**:
-  - **MCP Server (`mrt --mcp-server`)**: Exposes 24 tools and 4 resources over JSON-RPC 2.0 (`stdio`), transparently proxying to a running GUI window via a local TCP bridge (`mcp-bridge.json`) or running standalone headless.
-  - **MCP Host**: Connects to external `stdio` MCP servers from the GUI's MCP Hub panel.
+  - `:dns` — Resolves IPv4 (A) and IPv6 (AAAA) records, measures DNS lookup duration, and traces concurrent TCP handshake latency to all endpoints.
+  - `:ws` — WebSocket client inspecting handshake latency, logging real-time frames with timing offsets, and sending probe messages.
+  - `:report` / `:bug` — Generates GitHub-flavored Markdown bug reports with automatic redaction of sensitive credentials (API keys, tokens, private keys).
+  - `:diff` — Compares two command blocks with canonical JSON key ordering and listening port snapshot delta detection.
+- **MCP Host & Server (27 Native Tools)**:
+  - **MCP Server (`mrt --mcp-server`)**: Exposes 27 tools and 4 resources over JSON-RPC 2.0 (`stdio`), transparently proxying to a running GUI window via a local TCP bridge (`mcp-bridge.json`) or running standalone headless.
+  - **MCP Host**: Connects to external `stdio` MCP servers from the GUI's MCP Hub panel, with one-click presets for common servers (Filesystem, Git, Memory Graph, SQLite, Fetch).
 - **Safety Approval Gate**: Classifies commands (`Safe`, `Moderate`, `Critical`) across Bash, PowerShell, CMD/Batch, Git, SQL, and Kubernetes; prompts for confirmation in the GUI and blocks unapproved `Critical` commands over MCP.
-- **Provider-Agnostic AI**: Translates natural-language prompts (`#` or `?`) into shell-specific commands and diagnoses non-zero exit codes, with an offline heuristic fallback when no API key is configured.
+- **Provider-Agnostic AI with Streaming**: Translates natural-language prompts (`#` or `?`) into shell-specific commands and streams AI error diagnoses token-by-token directly into failed blocks, with an offline heuristic fallback when no API key is configured.
+- **Automated CI/CD Distribution**: Multi-platform release matrix in GitHub Actions publishing ready-to-use binaries for Windows (x86_64 ZIP), Linux (Ubuntu tar.gz), and macOS (Intel & Apple Silicon tar.gz).
 
 ## Quick Start
 

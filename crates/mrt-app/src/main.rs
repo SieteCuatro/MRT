@@ -59,7 +59,7 @@ fn main() -> Result<()> {
     eframe::run_native(
         "Modern Rust Terminal",
         native_options,
-        Box::new(|cc| Ok(Box::new(MrtGuiApp::new(cc)))),
+        Box::new(|_| Ok(Box::new(MrtGuiApp::new()))),
     )
     .map_err(|e| anyhow::anyhow!("GUI error: {e}"))?;
 

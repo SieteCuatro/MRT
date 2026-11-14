@@ -3,7 +3,7 @@ use crate::widgets::side_panels::{
     render_internet_side_panel, render_mcp_side_panel, SidePanelEvent, SidePanelState,
 };
 use egui::{Color32, Key, Modifiers, RichText};
-use mrt_ai::{diagnose_command_error, translate_nl_to_command};
+use mrt_ai::{diagnose_command_error, translate_nl_to_command, AiCommandProposal};
 use mrt_core::{
     assess_command, discover_shells, execute_command_in_shell, CommandBlock, RiskLevel,
     SafetyAssessment, ShellProfile, StructuredOutput,
@@ -25,6 +25,7 @@ pub struct TerminalTab {
     pub cwd: PathBuf,
     pub blocks: Vec<CommandBlock>,
     pub input_line: String,
+    pub ai_proposal: Option<AiCommandProposal>,
     pub command_history: Vec<String>,
     pub history_cursor: Option<usize>,
     pub table_filters: HashMap<Uuid, String>,
@@ -61,6 +62,7 @@ impl TerminalTab {
             cwd,
             blocks: vec![welcome_block],
             input_line: String::new(),
+            ai_proposal: None,
             command_history: Vec::new(),
             history_cursor: None,
             table_filters: HashMap::new(),
@@ -76,9 +78,7 @@ pub enum AsyncWorkerEvent {
     },
     AiCommandReady {
         tab_id: Uuid,
-        proposed_command: String,
-        explanation: String,
-        provider: String,
+        proposal: AiCommandProposal,
     },
     ExternalMcpConnected(mrt_mcp::McpServerStatus),
 }
@@ -100,7 +100,6 @@ pub struct MrtGuiApp {
     pub tx: Sender<AsyncWorkerEvent>,
     pub rx: Receiver<AsyncWorkerEvent>,
     pub pending_safety: Option<PendingSafetyApproval>,
-    pub ai_banner: Option<(String, String, String)>, // (proposed_cmd, explanation, provider)
     pub show_command_palette: bool,
     pub palette_query: String,
     pub busy_count: usize,
@@ -108,7 +107,7 @@ pub struct MrtGuiApp {
 }
 
 impl MrtGuiApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new() -> Self {
         let runtime = tokio::runtime::Runtime::new().expect("Tokio runtime initialization");
         let shells = discover_shells();
         let initial_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -136,7 +135,6 @@ impl MrtGuiApp {
             tx,
             rx,
             pending_safety: None,
-            ai_banner: None,
             show_command_palette: false,
             palette_query: String::new(),
             busy_count: 0,
@@ -167,16 +165,11 @@ impl MrtGuiApp {
                         tab.blocks.push(block);
                     }
                 }
-                AsyncWorkerEvent::AiCommandReady {
-                    tab_id,
-                    proposed_command,
-                    explanation,
-                    provider,
-                } => {
+                AsyncWorkerEvent::AiCommandReady { tab_id, proposal } => {
                     if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
-                        tab.input_line = proposed_command.clone();
+                        tab.input_line = proposal.proposed_command.clone();
+                        tab.ai_proposal = Some(proposal);
                     }
-                    self.ai_banner = Some((proposed_command, explanation, provider));
                 }
                 AsyncWorkerEvent::ExternalMcpConnected(status) => {
                     self.mcp_host
@@ -229,9 +222,7 @@ impl MrtGuiApp {
                 {
                     let _ = tx.send(AsyncWorkerEvent::AiCommandReady {
                         tab_id,
-                        proposed_command: prop.proposed_command,
-                        explanation: prop.explanation,
-                        provider: prop.provider_used,
+                        proposal: prop,
                     });
                 }
             });
@@ -688,7 +679,11 @@ impl eframe::App for MrtGuiApp {
             // Optional AI Command Proposal Banner
             let mut run_ai_cmd = None;
             let mut dismiss_ai = false;
-            if let Some((ref cmd, ref explanation, ref provider)) = self.ai_banner {
+            let tab = &mut self.tabs[self.active_tab];
+            if let Some(proposal) = &tab.ai_proposal {
+                let cmd = &proposal.proposed_command;
+                let explanation = &proposal.explanation;
+                let provider = &proposal.provider_used;
                 egui::Frame::none()
                     .fill(Color32::from_rgb(30, 46, 68))
                     .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(95, 165, 245)))
@@ -723,7 +718,7 @@ impl eframe::App for MrtGuiApp {
                 ui.add_space(4.0);
             }
             if dismiss_ai {
-                self.ai_banner = None;
+                tab.ai_proposal = None;
             }
             if let Some(c) = run_ai_cmd {
                 self.submit_input(Some(c), false);
@@ -1009,5 +1004,63 @@ impl eframe::App for MrtGuiApp {
                 self.show_command_palette = false;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn deliver_proposal(app: &mut MrtGuiApp, tab_id: Uuid, command: &str) {
+        let proposal = AiCommandProposal {
+            query: String::new(),
+            target_shell: app.shells[0].name.clone(),
+            proposed_command: command.into(),
+            explanation: String::new(),
+            provider_used: "test".into(),
+        };
+        app.tx
+            .send(AsyncWorkerEvent::AiCommandReady { tab_id, proposal })
+            .unwrap();
+        app.process_async_events();
+    }
+
+    #[test]
+    fn delayed_ai_replies_follow_the_requesting_tab() {
+        let mut app = MrtGuiApp::new();
+        let first_id = app.tabs[0].id;
+        let second_dir = app.tabs[0].cwd.join("second-project");
+        app.tabs.push(TerminalTab::new(
+            "Second".into(),
+            0,
+            &app.shells[0],
+            second_dir,
+        ));
+        app.active_tab = 1;
+        let second_id = app.tabs[1].id;
+        deliver_proposal(&mut app, second_id, "echo second");
+        deliver_proposal(&mut app, first_id, "echo first");
+
+        let active = &app.tabs[app.active_tab];
+        assert_eq!(active.input_line, "echo second");
+        assert_eq!(
+            active.ai_proposal.as_ref().unwrap().proposed_command,
+            "echo second"
+        );
+        assert_eq!(app.tabs[0].input_line, "echo first");
+        assert_eq!(
+            app.tabs[0].ai_proposal.as_ref().unwrap().proposed_command,
+            "echo first"
+        );
+
+        app.tabs.remove(0);
+        app.active_tab = 0;
+        deliver_proposal(&mut app, first_id, "echo late");
+        let remaining = &app.tabs[app.active_tab];
+        assert_eq!(remaining.input_line, "echo second");
+        assert_eq!(
+            remaining.ai_proposal.as_ref().unwrap().proposed_command,
+            "echo second"
+        );
     }
 }

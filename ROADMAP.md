@@ -16,10 +16,11 @@ A first version should show the commands, shell, and working directory before re
 
 ## Remote connections between MRT instances
 
-Open a terminal tab on another computer running MRT, across Windows, macOS, and Linux. For example, a developer on a Windows laptop could open a shell on a Linux workstation, run a build there, and watch its output appear in command blocks on the laptop. The tab should show the remote computer’s name, shell, and working directory so the user can see where each command will run.
+Attach to an existing MRT tab from a second computer running Windows, macOS, or Linux. A developer who starts a build on a Linux workstation can open that same tab on a Windows laptop, see earlier command blocks, follow live output, and enter the next command. Show the host name, shell, and working directory in the attached tab.
 
-- **Local network.** Start with two computers on the same LAN. Pair the devices with approval on the host, open an encrypted session, and let the host disconnect it or revoke access.
-- **Over the internet.** Extend the same paired-device experience to computers on different networks. A milestone is reconnecting to the workstation from another network, verifying its identity, and opening a remote tab.
+- **Local network.** Pair two devices on the same LAN with host approval and share a selected tab over an encrypted connection. The host owns the shell, processes, and command blocks and can revoke access.
+- **Reconnect milestone.** Start a build on the host, attach from the laptop, and disconnect the laptop mid-build. When it reconnects to the same tab, the build should have continued and the laptop should show the missed output exactly once, including the exit status if the build finished.
+- **Over the internet.** Extend tab attachment and reconnection to paired devices on different networks. Choose the internet transport after validating the LAN milestone.
 
 ## Debugging and sharing results
 

@@ -5,6 +5,10 @@ on:
   pull_request:
 permissions:
   contents: read
+# A newer push to the same branch or PR cancels the run still in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   test:
     strategy:
@@ -14,10 +18,20 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       RUSTFLAGS: -D warnings
+      # CI builds from scratch or from cache, so incremental artifacts only cost time and cache space.
+      CARGO_INCREMENTAL: 0
+      # Full debuginfo makes linking slow; line tables still give file:line in panics.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Check workspace
-        run: cargo check --workspace --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Only main writes the cache; PRs reuse it without filling it with branch builds.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # `cargo test` compiles every lib, bin and test target, so a separate `cargo check` only repeated the work.
+      - name: Build tests
+        run: cargo test --workspace --locked --no-run
       - name: Test workspace
         run: cargo test --workspace --locked

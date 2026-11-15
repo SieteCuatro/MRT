@@ -54,8 +54,7 @@ fn main() -> Result<()> {
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([860.0, 520.0])
             .with_visible(true)
-            .with_active(true)
-            .with_window_level(egui::WindowLevel::AlwaysOnTop),
+            .with_active(true),
         ..Default::default()
     };
 

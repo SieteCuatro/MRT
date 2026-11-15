@@ -442,7 +442,7 @@ impl MrtGuiApp {
                         let blk = &tab.blocks[idx];
                         let history = &tab.blocks[..idx];
                         let os_info = format!("{} ({})", std::env::consts::OS, std::env::consts::ARCH);
-                        let report = generate_markdown_bug_report(blk, history, &os_info, "0.1.0");
+                        let report = generate_markdown_bug_report(blk, history, &os_info, env!("CARGO_PKG_VERSION"));
                         let new_block = CommandBlock::new_structured(
                             &format!(":report {}", blk.command),
                             "mrt-report",
@@ -1945,7 +1945,7 @@ impl MrtGuiApp {
                 let blk = &tab.blocks[idx];
                 let history = &tab.blocks[..idx];
                 let os_info = format!("{} ({})", std::env::consts::OS, std::env::consts::ARCH);
-                let report = generate_markdown_bug_report(blk, history, &os_info, "0.1.0");
+                let report = generate_markdown_bug_report(blk, history, &os_info, env!("CARGO_PKG_VERSION"));
                 let new_block = CommandBlock::new_structured(
                     ":report",
                     "mrt-report",

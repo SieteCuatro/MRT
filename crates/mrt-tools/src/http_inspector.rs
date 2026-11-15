@@ -63,7 +63,7 @@ pub fn parse_http_command(input: &str) -> Result<HttpRequestSpec> {
     };
 
     let mut headers = BTreeMap::new();
-    headers.insert("User-Agent".to_string(), "ModernRustTerminal/0.1".to_string());
+    headers.insert("User-Agent".to_string(), concat!("ModernRustTerminal/", env!("CARGO_PKG_VERSION")).to_string());
     if body.is_some() {
         headers.insert("Content-Type".to_string(), "application/json".to_string());
     }

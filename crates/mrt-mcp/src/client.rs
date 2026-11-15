@@ -45,7 +45,7 @@ impl McpHostManager {
                 builtin_loopback: true,
             },
             connected: true,
-            server_version: "0.1.0".to_string(),
+            server_version: env!("CARGO_PKG_VERSION").to_string(),
             tools: builtin_tools,
             resources: builtin_resources,
             last_error: None,
@@ -175,7 +175,7 @@ async fn probe_external_stdio_server(
         params: Some(json!({
             "protocolVersion": "2024-11-05",
             "capabilities": {},
-            "clientInfo": { "name": "ModernRustTerminal", "version": "0.1.0" }
+            "clientInfo": { "name": "ModernRustTerminal", "version": env!("CARGO_PKG_VERSION") }
         })),
     };
     let mut line = serde_json::to_string(&init_req)? + "\n";
@@ -254,7 +254,7 @@ async fn call_external_stdio_tool(
         "params": {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
-            "clientInfo": { "name": "ModernRustTerminal", "version": "0.1.0" }
+            "clientInfo": { "name": "ModernRustTerminal", "version": env!("CARGO_PKG_VERSION") }
         }
     });
     stdin

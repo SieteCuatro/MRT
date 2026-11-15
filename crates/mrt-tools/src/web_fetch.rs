@@ -19,7 +19,7 @@ pub async fn fetch_url_as_markdown(url_input: &str) -> Result<String> {
     };
 
     let client = reqwest::Client::builder()
-        .user_agent("ModernRustTerminal/0.1 (+https://mrt.dev)")
+        .user_agent(concat!("ModernRustTerminal/", env!("CARGO_PKG_VERSION"), " (+https://github.com/SieteCuatro/MRT)"))
         .timeout(std::time::Duration::from_secs(15))
         .build()?;
 

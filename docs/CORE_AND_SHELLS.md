@@ -8,7 +8,7 @@
 
 | Module | File | Responsibility |
 | :--- | :--- | :--- |
-| **`pty`** | [`src/pty.rs`](../crates/mrt-core/src/pty.rs) | Multi-shell discovery (`ShellProfile`), per-command & streaming shell execution (`execute_command_in_shell`, `execute_command_streaming`), and streaming `portable-pty` sessions (`InteractivePty`). |
+| **`pty`** | [`src/pty.rs`](../crates/mrt-core/src/pty.rs) | Multi-shell discovery (`ShellProfile`), per-command & streaming shell execution (`execute_command_in_shell`, `execute_command_streaming`, `execute_command_streaming_with_pid`), and streaming `portable-pty` sessions (`InteractivePty`). |
 | **`vt`** | [`src/vt.rs`](../crates/mrt-core/src/vt.rs) | ANSI / VT100 escape sequence state machine powered by `vte`, producing styled `AnsiSpan` vectors and stripped plain text. |
 | **`block`** | [`src/block.rs`](../crates/mrt-core/src/block.rs) | `CommandBlock` data model and automatic `StructuredOutput` detector (JSON, CSV/TSV Tables, Markdown, HTTP results). |
 | **`safety`** | [`src/safety.rs`](../crates/mrt-core/src/safety.rs) | Cross-shell destructive command classifier (`RiskLevel::Safe`, `Moderate`, `Critical`) powering the MRT Safety Approval Gate. |
@@ -34,6 +34,8 @@ Unlike terminals that hardcode a single default shell, `discover_shells()` dynam
 | `Nushell` | `nu.exe` | `nu` | `["-c"]` |
 | `Sh` | — | `sh` | `["-c"]` |
 
+Each profile has a stable `id` (`pwsh`, `powershell`, `cmd`, `git-bash`, `wsl`, `bash`, `zsh`, `fish`, `nu`, `sh`) used by the shell switcher, runbooks, and the MCP `shell` arguments. Only shells found on the host are returned; if none is found, `cmd` (Windows) or `sh` (Unix) is added as a fallback so the list is never empty.
+
 ### Directory Tracking (`cd` / `Set-Location`)
 When a user runs `cd <path>`, `cd /d <path>`, `Set-Location <path>`, or `cd ~`, `execute_command_in_shell()` resolves and canonicalizes the target directory relative to the tab's current `cwd`, strips Windows UNC `\\?\` prefixes for clean display, and returns `updated_cwd: Some(new_path)` so subsequent commands in that tab (or MCP session) execute in the new directory.
 
@@ -54,7 +56,7 @@ On Windows, `execute_command_in_shell()` applies `.creation_flags(0x08000000)` (
 
 ## 4. Command Blocks & Automatic Structured Output (`block.rs`)
 
-Every command executed in MRT produces a `CommandBlock`. When a block completes, `classify_output(&plain_output)` inspects the output in order:
+Every command executed in MRT produces a `CommandBlock`. When a block completes, `classify_output(&plain_output)` inspects the output in order (`StructuredOutput::HttpResult` is never produced by the classifier; only `:http` / `:curl` and `mrt_http_request` create it):
 1. **JSON Detection (`StructuredOutput::Json`)**: If the trimmed output starts with `{...}` or `[...]` and parses via `serde_json::from_str`, MRT defaults the block to an interactive collapsible **JSON Tree** view.
 2. **CSV / TSV Table Detection (`StructuredOutput::Table`)**: If the output has 2+ non-empty lines with a consistent `,` or `\t` column count (at least 2 columns), MRT parses the header row and data rows into an interactive filterable **Table** view.
 3. **Markdown Detection (`StructuredOutput::Markdown`)**: If the output contains Markdown headings (`# `, `## `), fenced code blocks (```` ``` ````), and bullet lists, MRT renders it with formatted typography.
@@ -66,7 +68,7 @@ Users can toggle any structured block between **Structured View** and **Raw ANSI
 
 ## 5. Cross-Shell Safety Approval Gate (`safety.rs`)
 
-`assess_command(command: &str) -> SafetyAssessment` protects users and AI agents from accidental data loss across all shells:
+Rules are case-insensitive substring matches checked in order: Critical patterns first, then process control, then Moderate. `assess_command(command: &str) -> SafetyAssessment` protects users and AI agents from accidental data loss across all shells:
 - **`RiskLevel::Critical` (`requires_approval = true`)**:
   - Unix/Bash: `rm -rf`, `rm -fr`, `mkfs`, `dd if=`, `shutdown`, `reboot`
   - PowerShell: `Remove-Item -Recurse -Force`, `ri -r -fo`
@@ -75,8 +77,8 @@ Users can toggle any structured block between **Structured View** and **Raw ANSI
   - SQL & Cloud: `DROP TABLE`, `DROP DATABASE`, `TRUNCATE TABLE`, `kubectl delete`, `terraform destroy`
   - Process control aimed at OS-critical processes (`PROTECTED_PROCESS_NAMES`, e.g. `taskkill /F /IM lsass.exe`, `pkill launchd`), PID 1 (`kill -9 1`) or every process (`kill -1`)
 - **Process control (`requires_approval = true`)**: `kill`, `pkill`, `killall`, `taskkill`, `tskill`, `Stop-Process` / `spps`, and `xkill` in command position of any pipeline segment (after optional `sudo` / `doas`) are always sent to the Safety Gate. Ordinary targets are `Moderate`; by-name kills are flagged as possibly stopping several processes. Mentions of these words elsewhere (for example inside a commit message) are not matched. `is_protected_process_name` / `normalize_process_name` are shared with the Task Manager (`mrt-tools::process_inspector`).
-- **`RiskLevel::Moderate`**:
-  - `sudo `, `rm `, `del `, `Remove-Item `, `chmod 777`
+- **`RiskLevel::Moderate`** (shown in the composer's Safety indicator, but runs without a prompt):
+  - `sudo `, `rm `, `del `, `Remove-Item `, `chmod 777`, `curl `, `Invoke-WebRequest`
 - **`RiskLevel::Safe`**:
   - Read-only and standard developer commands (`git status`, `cargo test`, `dir`, `ls`, etc.).
 
@@ -92,10 +94,17 @@ MRT integrates native support for the **OSC 133 semantic prompt specification**,
 - **`OSC 133 ; C ST`**: Command execution initiated (output begins).
 - **`OSC 133 ; D [; <code>] ST`**: Command finished with optional numeric exit code.
 
+### Parser
+`parse_osc133_markers(input: &str) -> Vec<Osc133Event>` finds every marker in a stream (terminated by `BEL` or `ESC \`) and returns its `Osc133Kind` (`PromptStart`, `CommandStart`, `CommandExecuted`, `CommandFinished(Option<i32>)`) with its `byte_offset`.
+
 ### Shell Integration Generator
-`generate_shell_integration(shell: ShellKind) -> String` generates initialization snippets that configure hooks in:
+`generate_shell_integration_script(kind: ShellKind) -> &'static str` returns an initialization snippet that configures hooks in:
 - **Bash**: `PROMPT_COMMAND` wrapper.
 - **Zsh**: `precmd` and `preexec` hook functions.
 - **Fish**: `fish_prompt` and `fish_postexec` event handlers.
-- **PowerShell**: Custom `prompt` function with `$LASTEXITCODE` forwarding.
-- **Windows CMD**: Clink / prompt sequence generation.
+- **PowerShell** (Core and Windows): Custom `prompt` function with `$LASTEXITCODE` forwarding.
+- **Windows CMD**: A `PROMPT` string with `$E]133;…$E\` escapes (no Clink required).
+- Other shells (`sh`, Nushell, WSL, Git Bash kinds) get a comment saying OSC 133 is not supported.
+
+### Status
+The parser and scripts are a library API with unit tests. The GUI does not inject the scripts or read markers yet: each command block runs in its own shell process (`-Command` / `/C` / `-c`), so the exit code comes from the process itself. Wiring OSC 133 into persistent PTY tabs is tracked in the [Roadmap](../ROADMAP.md#everyday-terminal-use).

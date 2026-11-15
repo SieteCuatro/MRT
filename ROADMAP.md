@@ -12,7 +12,8 @@ The first version is implemented in the **Runbooks** panel and SQLite `HistorySt
 
 - **Interactive terminal mode.** *(implemented)* Launch full-screen interactive TUI applications (`vim`, `vi`, `nvim`, `nano`, `htop`, `lazygit`, `less`, etc., or via `:tui <cmd>`) inside an alt-screen PTY overlay modal. Forwards text and control keystrokes, provides rapid repaint streaming, supports graceful exit via `Ctrl+Q` or normal process termination, and preserves the full session transcript as a standard completed CommandBlock.
 - **Split panes within a tab.** *(implemented)* Split any tab horizontally or vertically into independent panes (`:split`, `:split-h`, `:split-v`, `:unsplit`, and UI buttons), each with its own block stream, shell, and focus management.
-- **Shell integration.** *(implemented)* Built-in OSC 133 semantic prompt marker parser and integration script generator for Bash, Zsh, Fish, PowerShell, and CMD to identify prompt, command start, execution, and exit codes.
+- **Shell integration.** *(library implemented, GUI pending)* `mrt-core::shell_integration` parses OSC 133 semantic prompt markers and generates integration scripts for Bash, Zsh, Fish, PowerShell, and CMD. Next step: run each tab as a persistent PTY shell with the script injected, and use the markers to split output into command blocks with exact exit codes, so `cd`, environment variables, and shell functions persist naturally between commands.
+- **Configuration file.** Load `~/.config/mrt/config.toml` / `.mrt.toml` following the schema in [`mrt.example.toml`](mrt.example.toml) (default shell, font size, Safety Gate options, AI provider, MCP servers to connect at startup). Today MRT reads environment variables and GUI controls only.
 
 ## Remote connections between MRT instances
 
@@ -52,6 +53,7 @@ The panel held the HTTP inspector, web reader, port scanner, DNS/latency tracer,
 - **Structure.** `ToolboxTab` in `widgets/toolbox.rs`, a thin `render_toolbox_side_panel` that draws the tab strip and dispatches to `render_network_tab` (`widgets/side_panels.rs`) and `render_task_manager_tab` (`widgets/task_manager.rs`). A future tool family is a new `ToolboxTab` variant plus a widget file.
 - **Renamed.** `show_internet_panel` → `show_toolbox_panel`, `render_internet_side_panel` → `render_network_tab`, the egui panel id, sidebar label, Command Palette entries, `--help` banner, Linux desktop entry, and `docs/INTERNET_TOOLS.md` → `docs/TOOLBOX.md` with references updated across the docs. `ToolboxTab::parse` still accepts `"internet"` for the Network tab.
 - **Crate name.** `mrt-tools` stays as is; `process_inspector.rs` lives there alongside the network modules.
+
 ## AI and MCP
 
 - **Streaming AI responses.** *(implemented)* Display tokens of an AI error explanation in the requesting terminal tab progressively as they are generated, eliminating UI latency.

@@ -15,7 +15,7 @@ The Cargo workspace contains 5 modular crates:
   - `vt.rs`: Parses ANSI/VT100 escape sequences via `vte` into colored `AnsiSpan` segments and stripped plain text.
   - `block.rs`: Defines `CommandBlock` and `classify_output` (auto-detecting JSON trees, CSV/TSV tables, Markdown, and HTTP responses).
   - `safety.rs`: Evaluates command risk (`Safe`, `Moderate`, `Critical`) across Bash, PowerShell, CMD/Batch, SQL, Git, Kubernetes, and process control (`kill`, `taskkill`, `Stop-Process`, protected OS process names) for the MRT Safety Approval Gate.
-  - `shell_integration.rs`: OSC 133 semantic prompt markers parser and shell integration generator for Bash, Zsh, Fish, PowerShell, and CMD.
+  - `shell_integration.rs`: OSC 133 semantic prompt markers parser and shell integration generator for Bash, Zsh, Fish, PowerShell, and CMD (library only; not wired into the GUI yet).
   - `platform.rs`: Cross-platform startup helpers (`hydrate_login_environment` for macOS/Linux GUI `$PATH` inheritance and `attach_parent_console_if_cli` for Windows CLI flags).
 - **`crates/mrt-tools`**:
   - `http_inspector.rs`: Built-in `:http` / `:curl` REST API client (`reqwest`).
@@ -47,4 +47,6 @@ The Cargo workspace contains 5 modular crates:
 2. **Multi-AI Provider Neutrality**:
    - Keep `mrt-ai` compatible with all major LLM providers (Gemini, OpenAI, Anthropic, Grok, DeepSeek, OpenRouter, Ollama) plus the offline fallback so MRT always works with zero configuration.
 3. **Zero Warnings Policy**:
-   - Always run `cargo test --workspace` before finishing a task and resolve any compiler warnings (such as unused imports or `f32` literal annotations in `egui`).
+   - Always run `cargo test --workspace` before finishing a task and resolve any compiler warnings (such as unused imports or `f32` literal annotations in `egui`). CI runs with `RUSTFLAGS=-D warnings` and `--locked`, so a warning fails the build.
+4. **Keep the Docs in Sync**:
+   - When you change behavior, update the matching document (see the table in [CONTRIBUTING.md](CONTRIBUTING.md#which-documents-to-update)). User-facing commands, shortcuts, and file locations live in [docs/USER_GUIDE.md](docs/USER_GUIDE.md).

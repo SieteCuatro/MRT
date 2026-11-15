@@ -2,13 +2,13 @@
 
 A cross-platform (Windows, macOS, Linux) GPU-accelerated terminal emulator written in Rust (`eframe`/`egui` + `wgpu`). MRT combines native shell execution with structured command blocks, built-in network inspection tools, multi-provider AI translation/triage, and dual-mode Model Context Protocol (MCP) support.
 
-Licensed under the [MIT License](LICENSE).
+Dual-licensed under the [MIT License or The Unlicense](LICENSE), at your option.
 
 ## Features
 
 - **Polyglot Shell Support & Split Panes**: Auto-discovers and runs PowerShell (`pwsh`, `powershell`), Windows Batch (`cmd.exe`), Bash, Git Bash, WSL, Zsh, Fish, Nushell, and `sh` in multi-tab, horizontal/vertical split panes (`:split-h`, `:split-v`, `:unsplit`), or Mosaic split-grid layouts, with a synchronized Folder Explorer.
 - **Interactive Terminal Mode (TUI)**: Run full-screen interactive console programs (`vim`, `nano`, `htop`, `lazygit`, `less`, etc., or via `:tui <cmd>`) inside an alt-screen PTY overlay with full keyboard forwarding, rapid streaming repaints, and graceful exit (`Ctrl+Q`), automatically saving the session transcript as a command block.
-- **Shell Integration (OSC 133)**: Built-in semantic prompt marker parser and integration script generator for Bash, Zsh, Fish, PowerShell, and CMD for precise prompt, command execution, and exit code detection.
+- **Shell Integration (OSC 133, library)**: `mrt-core` ships an OSC 133 semantic prompt marker parser and integration scripts for Bash, Zsh, Fish, PowerShell, and CMD. The GUI does not use them yet (commands run one shell process per block and read the process exit code); see the [Roadmap](ROADMAP.md#everyday-terminal-use).
 - **Structured Command Blocks**: Automatically classifies command output into collapsible JSON trees, filterable CSV/TSV tables, Markdown, or HTTP exchanges while preserving full ANSI/VT100 styling, structured JSON/port diffing, and line-by-line block comparisons.
 - **Persistent History & Saved Runbooks**: Stores executed command blocks in SQLite with FTS5 trigram indexing for fast substring search across sessions, and lets you assemble, reorder, and save offline command sequences as **Runbooks**—previewing commands, shells, and working directories before replaying each step through the Safety Approval Gate and stopping on the first failure.
 - **Built-in Network & Diagnostic Tools**:
@@ -30,11 +30,13 @@ Licensed under the [MIT License](LICENSE).
 - **MCP Host & Server (31 Native Tools)**:
   - **MCP Server (`mrt --mcp-server`)**: Exposes 31 tools and 5 resources over JSON-RPC 2.0 (`stdio`), transparently proxying to a running GUI window via a local TCP bridge (`mcp-bridge.json`) or running standalone headless.
   - **MCP Host**: Connects to external `stdio` MCP servers from the GUI's MCP Hub panel, with one-click presets for common servers (Filesystem, Git, Memory Graph, SQLite, Fetch).
-- **Safety Approval Gate**: Classifies commands (`Safe`, `Moderate`, `Critical`) across Bash, PowerShell, CMD/Batch, Git, SQL, Kubernetes, and process control (`kill`, `pkill`, `taskkill`, `Stop-Process`, …); prompts for confirmation in the GUI and blocks unapproved `Critical` commands over MCP.
+- **Safety Approval Gate**: Classifies commands (`Safe`, `Moderate`, `Critical`) across Bash, PowerShell, CMD/Batch, Git, SQL, Kubernetes, and process control (`kill`, `pkill`, `taskkill`, `Stop-Process`, …); prompts for confirmation in the GUI for `Critical` and process-control commands and blocks unapproved `Critical` commands over MCP.
 - **Provider-Agnostic AI with Streaming**: Translates natural-language prompts (`#` or `?`) into shell-specific commands and streams AI error diagnoses token-by-token directly into failed blocks, with an offline heuristic fallback when no API key is configured.
 - **Automated CI/CD Distribution**: Multi-platform release matrix in GitHub Actions publishing ready-to-use binaries for Windows (x86_64 ZIP), Linux (Ubuntu tar.gz), and macOS (Intel & Apple Silicon tar.gz).
 
 ## Quick Start
+
+Prebuilt binaries for Windows, Linux, and macOS are attached to each [GitHub Release](https://github.com/SieteCuatro/MRT/releases). To build from source you need a stable Rust toolchain; on Linux also install the GUI build dependencies listed in the [User Guide](docs/USER_GUIDE.md#1-install).
 
 ```bash
 git clone https://github.com/SieteCuatro/MRT.git
@@ -67,6 +69,7 @@ MRT checks configured environment variables in the following order and falls bac
 
 ## Documentation
 
+- [User Guide](docs/USER_GUIDE.md) — Install, prompt commands, keyboard shortcuts, data files, and troubleshooting.
 - [Architecture Overview](docs/ARCHITECTURE.md) — 5-crate workspace design and data flow.
 - [MCP Guide](docs/MCP_GUIDE.md) — Tool schemas, resources, Live GUI Bridge, and client setup.
 - [Core & Polyglot Shells](docs/CORE_AND_SHELLS.md) — Shell discovery, PTY engine, VT parser, blocks, and Safety Gate.
@@ -76,4 +79,4 @@ MRT checks configured environment variables in the following order and falls bac
 - [Roadmap](ROADMAP.md) — Planned milestones and project ideas.
 - [Contributing](CONTRIBUTING.md) — Development workflow and PR checklist.
 - [AI Agent Instructions](AGENTS.md) — Workspace context for coding agents.
-- [Configuration Example](mrt.example.toml) — Reference configuration schema.
+- [Configuration Example](mrt.example.toml) — Planned configuration schema (not loaded yet; MRT reads environment variables and GUI settings today).

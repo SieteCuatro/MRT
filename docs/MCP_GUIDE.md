@@ -51,7 +51,7 @@ Open the **MCP Hub** side panel inside MRT and click **Copy MCP Config**, or add
   }
 }
 ```
-*(On Linux/macOS, point `"command"` to `/path/to/MRT/target/release/mrt`.)*
+*(On Linux/macOS, point `"command"` to `/path/to/MRT/target/release/mrt`. The **Copy MCP Config** button fills in the path of the running executable for you.)*
 
 ---
 
@@ -75,7 +75,7 @@ All built-in tools are defined in [`MrtMcpServerState::built_in_tools()`](../cra
 
 | Tool | Description | Key Parameters |
 | :--- | :--- | :--- |
-| **`mrt_run_command`** | Executes a command in a target tab and shell (`pwsh`, `powershell`, `cmd`, `bash`, `git-bash`, `wsl`, `zsh`, `sh`) with MRT Safety Gate protection, recording a `CommandBlock`. | `command` *(required)*, `shell?`, `tab_id?`, `cwd?` |
+| **`mrt_run_command`** | Executes a command in a target tab and shell (`pwsh`, `powershell`, `cmd`, `bash`, `git-bash`, `wsl`, `zsh`, `fish`, `nu`, `sh` — whichever are installed) with MRT Safety Gate protection, recording a `CommandBlock`. | `command` *(required)*, `shell?`, `tab_id?`, `cwd?` |
 | **`mrt_list_blocks`** | Lists recent `CommandBlock` summaries (ID, tab, command, shell, CWD, exit code, duration, structured type, output). | `tab_id?`, `limit?` (default `10`) |
 | **`mrt_get_block`** | Retrieves full details of a `CommandBlock` by UUID, including structured payload (`Json`, `Table`, `Markdown`, `HttpResult`), raw ANSI, plain text, and AI triage. | `block_id` *(required)* |
 | **`mrt_search_blocks`** | Searches and filters blocks across tabs by command/output substring or non-zero exit codes. | `query?`, `tab_id?`, `failed_only?`, `limit?` (default `20`) |

@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind, Users};
+use sysinfo::{
+    Pid, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, UpdateKind, Users,
+};
 
 /// Shell name stamped on every block produced by the process tools.
 pub const PROCESS_BLOCK_SHELL: &str = "mrt-proc";
@@ -330,7 +332,11 @@ impl ProcessSampler {
             true,
             ProcessRefreshKind::nothing().without_tasks(),
         );
-        self.system.process(Pid::from_u32(pid)).is_some()
+        // A killed child that its parent has not reaped yet lingers as a zombie on Unix:
+        // it no longer runs, so count it as stopped.
+        self.system
+            .process(Pid::from_u32(pid))
+            .is_some_and(|p| !matches!(p.status(), ProcessStatus::Zombie | ProcessStatus::Dead))
     }
 
     /// Stops the given processes (and their descendants when `tree`), deepest first.

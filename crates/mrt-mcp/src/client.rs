@@ -454,16 +454,17 @@ mod tests {
         let state = MrtMcpServerState::default();
         let host = McpHostManager::new(state);
 
-        // Spawn an interactive PTY session
+        // Spawn an interactive PTY session with a shell every host has
+        let shell = if cfg!(target_os = "windows") { "cmd" } else { "sh" };
         let spawned = host
             .call_tool(
                 "mrt-native-mcp",
                 "mrt_pty_spawn",
-                json!({ "shell": "cmd", "cols": 100, "rows": 30, "wait_ms": 150 }),
+                json!({ "shell": shell, "cols": 100, "rows": 30, "wait_ms": 150 }),
             )
             .await
             .unwrap();
-        assert!(!spawned.is_error);
+        assert!(!spawned.is_error, "{}", spawned.content[0].text);
         let spawned_json: Value = serde_json::from_str(&spawned.content[0].text).unwrap();
         let pty_id = spawned_json.get("pty_id").unwrap().as_str().unwrap();
 

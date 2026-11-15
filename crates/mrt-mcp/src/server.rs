@@ -631,7 +631,7 @@ pub async fn handle_mcp_jsonrpc(
                 },
                 "serverInfo": {
                     "name": "mrt-mcp-server",
-                    "version": "0.1.0"
+                    "version": env!("CARGO_PKG_VERSION")
                 }
             }),
         )),
@@ -1910,7 +1910,7 @@ pub async fn execute_mrt_mcp_tool(
             };
 
             let os_info = format!("{} ({})", std::env::consts::OS, std::env::consts::ARCH);
-            let report = generate_markdown_bug_report(&target, &preceding, &os_info, "0.1.0");
+            let report = generate_markdown_bug_report(&target, &preceding, &os_info, env!("CARGO_PKG_VERSION"));
             McpToolCallResult::text(report, false)
         }
         "mrt_inspect_ws" => {

@@ -28,7 +28,7 @@ flowchart LR
 ### 1. `mrt-core` — Polyglot Shell, Interactive PTYs, VT Parser, Blocks, Shell Integration & Safety Gate
 - **Multi-Shell Discovery (`discover_shells`)**: Automatically probes the OS and `PATH` for PowerShell 7 (`pwsh`), Windows PowerShell (`powershell`), Command Prompt / Batch (`cmd.exe`), Git Bash (`bash.exe`), WSL (`wsl.exe`), Bash, Zsh, Fish, Nushell (`nu`), and POSIX `sh`.
 - **Interactive PTY Engine (`InteractivePty`)**: Wraps `portable-pty` for persistent interactive sessions with raw/line input (`\r\n` on Windows, `\n` on Unix), unread buffer draining, full transcript reading, dynamic resizing, exit polling, and process termination.
-- **Shell Integration (`shell_integration.rs`)**: Parses OSC 133 semantic prompt escape markers (`133;A` prompt start, `133;B` prompt end, `133;C` executed, `133;D` finished with exit code) and generates integration scripts for Bash, Zsh, Fish, PowerShell, and CMD.
+- **Shell Integration (`shell_integration.rs`)**: Parses OSC 133 semantic prompt escape markers (`133;A` prompt start, `133;B` prompt end, `133;C` executed, `133;D` finished with exit code) and generates integration scripts for Bash, Zsh, Fish, PowerShell, and CMD. Library only for now: the GUI runs one shell process per command block and does not inject these scripts yet.
 - **ANSI / VT100 Parser (`vt.rs`)**: Uses `vte` to parse SGR colors (16-color and 24-bit RGB truecolor), bold, italic, and underline attributes into `Vec<AnsiSpan>` while simultaneously producing clean plain text for structured output classification.
 - **Structured Output Classifier (`block.rs`)**: Inspects completed command outputs and classifies them into:
   - `StructuredOutput::Json(Value)` — Rendered as an interactive collapsible tree.
@@ -58,6 +58,14 @@ flowchart LR
 - Supports **Google Gemini**, **Anthropic Claude**, **OpenAI**, **xAI Grok**, **DeepSeek**, **OpenRouter**, and **Local Ollama**, plus a built-in **Offline Polyglot Engine** that adapts commands to the active tab's shell (`cmd.exe` vs `pwsh` vs `bash`).
 - Includes `diagnose_command_error` and `diagnose_command_error_streaming` to stream AI explanations token-by-token into failed command blocks with one-click shell-appropriate fixes.
 
-### 5. `mrt-app` — Native GPU GUI (`eframe` / `egui`)
+### 5. `mrt-app` — Native GPU GUI (`eframe` / `egui` 0.29)
 - Renders multi-shell tabs, **Split Panes** within any tab (`:split-h`, `:split-v`, `:unsplit`), full-screen **Interactive TUI Mode** overlay (`:tui <cmd>`, `vim`, `nano`, `htop`, `lazygit`), **Mosaic** multi-terminal grid mode, **Folder Explorer**, persistent SQLite **Command History** and **Saved Runbooks** (with offline sequence editing, preview, Safety Gate enforcement, and stop-on-first-failure replay), the **Command Block** stream (with structured diff comparison), the **MCP Hub** (with Live GUI Bridge indicator) and **Toolbox** side panels (**Network** and **Task Manager** tabs), live `:top` blocks and `:watch-proc` alerts, the **Safety Approval Gate** modal, and the **Universal Command Palette** (`Ctrl+K` / `Ctrl+P`).
-- Automated multi-platform CI/CD distribution workflow in `.github/workflows/release.yml` building release packages for Windows, Linux, and macOS.
+- Persists history and runbooks to `history.sqlite` in the per-user MRT data directory (see the [User Guide](USER_GUIDE.md#5-data-files-and-locations)).
+
+---
+
+## Build, CI & Release
+
+- **CI (`.github/workflows/ci.yml`)**: On every push to `main` and every pull request, runs `cargo test --workspace --locked` with `RUSTFLAGS=-D warnings` on Ubuntu, Windows, and macOS (Cargo cache via `Swatinem/rust-cache`, saved only from `main`).
+- **Release (`.github/workflows/release.yml`)**: On `v*` tags (or manual dispatch), builds `cargo build --release --locked` for `x86_64-pc-windows-msvc` (ZIP), `x86_64-unknown-linux-gnu`, `x86_64-apple-darwin`, and `aarch64-apple-darwin` (tar.gz) and attaches the archives to the GitHub Release.
+- **Packaging metadata**: `packaging/linux/mrt.desktop` (desktop entry) and `packaging/macos/Info.plist` (app bundle metadata). They are not used by the release workflow yet; the archives contain only the `mrt` binary.

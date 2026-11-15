@@ -51,7 +51,7 @@ Invoked from the prompt via `:http` or `:curl`, from the **Toolbox** panel (**Ne
 Invoked via `:web <url>`, the **Toolbox** panel (**Network** tab), or the `mrt_web_fetch` MCP tool.
 
 ### How It Works
-1. Fetches the target URL with `reqwest` using a clean `ModernRustTerminal/0.1` User-Agent.
+1. Fetches the target URL with `reqwest` using a `ModernRustTerminal/<version> (+https://github.com/SieteCuatro/MRT)` User-Agent (`:http` sends `ModernRustTerminal/<version>`).
 2. If the response `Content-Type` is `application/json`, formats the JSON into a fenced Markdown block with status metadata.
 3. If the response is HTML (`html_to_readable_markdown`):
    - Extracts `<title>` as the top-level `# Heading`.

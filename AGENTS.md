@@ -28,7 +28,7 @@ The Cargo workspace contains 5 modular crates:
   - `structured_diff.rs`: Canonical JSON diffs (key order invariant), listening port snapshot delta detection, and process snapshot deltas.
 - **`crates/mrt-mcp`**:
   - `protocol.rs`: JSON-RPC 2.0 and Model Context Protocol (MCP) types.
-  - `bridge.rs`: Localhost TCP bridge (`mcp-bridge.json`) so external `mrt --mcp-server` processes transparently control a running MRT GUI window.
+  - `bridge.rs`: Token-authenticated localhost TCP bridge (`mcp-bridge.json`) so external `mrt --mcp-server` processes transparently control a running MRT GUI window.
   - `server.rs`: MRT as an MCP Server (`mrt --mcp-server` or live GUI bridge), exposing 31 tools across session & multi-tab control (`mrt_get_session_state`, `mrt_list_tabs`, `mrt_create_tab`, `mrt_switch_tab`, `mrt_close_tab`, `mrt_configure_tab`), command execution & block inspection/diffing/triage (`mrt_run_command`, `mrt_list_blocks`, `mrt_get_block`, `mrt_search_blocks`, `mrt_compare_blocks`, `mrt_diagnose_block`, `mrt_clear_blocks`), interactive PTYs (`mrt_pty_spawn`, `mrt_pty_write`, `mrt_pty_read`, `mrt_pty_resize`, `mrt_pty_list`, `mrt_pty_kill`), live GUI control (`mrt_control_gui`), AI translation (`mrt_ai_translate`), and internet & diagnostic tools (`mrt_http_request`, `mrt_web_fetch`, `mrt_inspect_ports`, `mrt_inspect_dns`, `mrt_generate_bug_report`, `mrt_inspect_ws`), and the Task Manager (`mrt_list_processes`, `mrt_inspect_process`, `mrt_kill_process`, `mrt_compare_process_snapshots`), plus 5 MCP resources.
   - `client.rs`: MRT as an MCP Host, connecting to in-process loopback and external `stdio` MCP servers (with one-click presets for Filesystem, Git, Memory, SQLite, Fetch).
 - **`crates/mrt-ai`**:

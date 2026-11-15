@@ -315,7 +315,7 @@ impl MrtGuiApp {
         let bridge_port = runtime
             .block_on(async move { start_gui_bridge_listener(bridge_state, 0, write_discovery).await })
             .ok()
-            .map(|addr| addr.port());
+            .map(|endpoint| endpoint.addr.port());
 
         let process_sampler = mcp_state.process_sampler.clone();
         let mcp_host = McpHostManager::new(mcp_state);

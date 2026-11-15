@@ -1,4 +1,4 @@
-use crate::bridge::{read_bridge_port_file, try_forward_jsonrpc_to_gui};
+use crate::bridge::{read_bridge_endpoint, try_forward_jsonrpc_to_gui};
 use crate::protocol::{
     JsonRpcRequest, JsonRpcResponse, McpResource, McpTool, McpToolCallResult,
 };
@@ -2199,8 +2199,8 @@ pub async fn run_stdio_mcp_server(state: MrtMcpServerState) -> Result<()> {
         }
         let response = match serde_json::from_str::<JsonRpcRequest>(trimmed) {
             Ok(req) => {
-                if let Some(port) = read_bridge_port_file() {
-                    if let Ok(forwarded) = try_forward_jsonrpc_to_gui(port, &req).await {
+                if let Some((port, token)) = read_bridge_endpoint() {
+                    if let Ok(forwarded) = try_forward_jsonrpc_to_gui(port, &token, &req).await {
                         forwarded
                     } else {
                         handle_mcp_jsonrpc(&state, req).await

@@ -4,7 +4,7 @@ pub mod protocol;
 pub mod server;
 
 pub use bridge::{
-    clear_bridge_port_file, read_bridge_port_file, start_gui_bridge_listener,
+    clear_bridge_port_file, read_bridge_endpoint, start_gui_bridge_listener, GuiBridgeEndpoint,
     try_forward_jsonrpc_to_gui,
 };
 pub use client::{McpHostManager, McpServerConfig, McpServerStatus};

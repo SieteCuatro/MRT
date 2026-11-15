@@ -531,7 +531,7 @@ mod tests {
     #[tokio::test]
     async fn test_live_gui_bridge_tcp_forwarding() {
         let state = MrtMcpServerState::default();
-        let addr = crate::bridge::start_gui_bridge_listener(state, 0, false)
+        let endpoint = crate::bridge::start_gui_bridge_listener(state, 0, false)
             .await
             .unwrap();
 
@@ -544,7 +544,7 @@ mod tests {
                 "arguments": { "title": "Bridged TCP Tab" }
             })),
         };
-        let resp = crate::bridge::try_forward_jsonrpc_to_gui(addr.port(), &req)
+        let resp = crate::bridge::try_forward_jsonrpc_to_gui(endpoint.addr.port(), &endpoint.token, &req)
             .await
             .unwrap()
             .unwrap();

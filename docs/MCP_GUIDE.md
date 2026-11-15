@@ -30,8 +30,9 @@ sequenceDiagram
 ```
 
 ### How the Live GUI Bridge Works
-- When you launch the MRT desktop GUI (`mrt`), it automatically starts a local loopback TCP listener (`127.0.0.1:<port>`) in [`crates/mrt-mcp/src/bridge.rs`](../crates/mrt-mcp/src/bridge.rs) and writes the port to `mcp-bridge.json` in the local MRT data directory (removed cleanly on exit).
-- When an external AI client spawns `mrt --mcp-server`, MRT checks for a live `mcp-bridge.json` (or `MRT_MCP_BRIDGE_PORT` env var). If a GUI window is open, requests are transparently proxied to the live GUI so agents can create/switch tabs, run commands visible in your blocks, inspect your existing output, or toggle Mosaic/Explorer views in real time.
+- When you launch the MRT desktop GUI (`mrt`), it automatically starts a local loopback TCP listener (`127.0.0.1:<port>`) in [`crates/mrt-mcp/src/bridge.rs`](../crates/mrt-mcp/src/bridge.rs) and writes the port and a random per-session token to `mcp-bridge.json` in the local MRT data directory (`0600` on macOS/Linux, per-user `%LOCALAPPDATA%` on Windows; removed cleanly on exit).
+- Every bridge connection must first send `{"mrt_bridge_auth":"<token>"}` on its own line. Connections without the right token get a `-32001 Unauthorized` error and are closed, so other local programs cannot drive the GUI just by finding the port.
+- When an external AI client spawns `mrt --mcp-server`, MRT reads the port and token from a live `mcp-bridge.json` (or the `MRT_MCP_BRIDGE_PORT` + `MRT_MCP_BRIDGE_TOKEN` env vars). If a GUI window is open, requests are transparently proxied to the live GUI so agents can create/switch tabs, run commands visible in your blocks, inspect your existing output, or toggle Mosaic/Explorer views in real time.
 - If no GUI window is open, `mrt --mcp-server` seamlessly runs in standalone headless mode with its own multi-tab and PTY state.
 
 ---

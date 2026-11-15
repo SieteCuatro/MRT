@@ -31,7 +31,7 @@ fn main() -> Result<()> {
 
     if args.iter().any(|a| a == "--help" || a == "-h") {
         attach_parent_console_if_cli();
-        println!("Modern Rust Terminal (MRT) - Cross-Platform GPU Terminal with Blocks, Internet Tools & MCP");
+        println!("Modern Rust Terminal (MRT) - Cross-Platform GPU Terminal with Blocks, Toolbox (Network & Task Manager) & MCP");
         println!("\nUsage:");
         println!("  mrt                 Launch the native GPU terminal GUI");
         println!("  mrt --mcp-server    Run MRT in headless Model Context Protocol (MCP) stdio server mode");

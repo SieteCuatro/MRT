@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=Modern Rust Terminal
 GenericName=Terminal Emulator
-Comment=Cross-platform GPU-accelerated terminal with Blocks, Internet Tools, and MCP
+Comment=Cross-platform GPU-accelerated terminal with Blocks, Network Tools, a Task Manager, and MCP
 Exec=mrt
 Icon=utilities-terminal
 Terminal=false

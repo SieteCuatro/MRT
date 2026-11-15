@@ -73,8 +73,10 @@ Users can toggle any structured block between **Structured View** and **Raw ANSI
   - Windows CMD/Batch: `del /s /q`, `rd /s /q`, `rmdir /s /q`, `format `
   - Git: `git reset --hard`, `git push --force`, `git push -f`, `git clean -fd`
   - SQL & Cloud: `DROP TABLE`, `DROP DATABASE`, `TRUNCATE TABLE`, `kubectl delete`, `terraform destroy`
+  - Process control aimed at OS-critical processes (`PROTECTED_PROCESS_NAMES`, e.g. `taskkill /F /IM lsass.exe`, `pkill launchd`), PID 1 (`kill -9 1`) or every process (`kill -1`)
+- **Process control (`requires_approval = true`)**: `kill`, `pkill`, `killall`, `taskkill`, `tskill`, `Stop-Process` / `spps`, and `xkill` in command position of any pipeline segment (after optional `sudo` / `doas`) are always sent to the Safety Gate. Ordinary targets are `Moderate`; by-name kills are flagged as possibly stopping several processes. Mentions of these words elsewhere (for example inside a commit message) are not matched. `is_protected_process_name` / `normalize_process_name` are shared with the Task Manager (`mrt-tools::process_inspector`).
 - **`RiskLevel::Moderate`**:
-  - `sudo `, `rm `, `del `, `Remove-Item `, `kill -9`, `Stop-Process`, `taskkill /f`, `chmod 777`
+  - `sudo `, `rm `, `del `, `Remove-Item `, `chmod 777`
 - **`RiskLevel::Safe`**:
   - Read-only and standard developer commands (`git status`, `cargo test`, `dir`, `ls`, etc.).
 

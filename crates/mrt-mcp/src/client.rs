@@ -613,4 +613,83 @@ mod tests {
             .unwrap();
         assert!(res.is_error);
     }
+
+    #[tokio::test]
+    async fn test_mcp_process_tools() {
+        let state = MrtMcpServerState::default();
+        let host = McpHostManager::new(state);
+        let me = std::process::id();
+
+        let list = host
+            .call_tool("mrt-native-mcp", "mrt_list_processes", json!({ "filter": me.to_string(), "limit": 5 }))
+            .await
+            .unwrap();
+        assert!(!list.is_error, "{}", list.content[0].text);
+        let parsed: Value = serde_json::from_str(&list.content[0].text).unwrap();
+        let processes = parsed["processes"].as_array().unwrap();
+        assert!(processes.iter().any(|p| p["pid"] == json!(me)));
+        assert!(processes.iter().any(|p| p["mrt_owner"] == json!("MRT (this app)")));
+
+        let details = host
+            .call_tool("mrt-native-mcp", "mrt_inspect_process", json!({ "pid": me }))
+            .await
+            .unwrap();
+        assert!(!details.is_error, "{}", details.content[0].text);
+        assert!(details.content[0].text.contains("\"ports\""));
+
+        // Stopping MRT itself is Critical and always blocked.
+        let kill_self = host
+            .call_tool("mrt-native-mcp", "mrt_kill_process", json!({ "pid": me, "force": true }))
+            .await
+            .unwrap();
+        assert!(kill_self.is_error);
+        assert!(kill_self.content[0].text.contains("BLOCKED BY MRT SAFETY GATE"));
+
+        let missing = host
+            .call_tool("mrt-native-mcp", "mrt_kill_process", json!({}))
+            .await
+            .unwrap();
+        assert!(missing.is_error);
+
+        let baseline = host
+            .call_tool("mrt-native-mcp", "mrt_compare_process_snapshots", json!({}))
+            .await
+            .unwrap();
+        assert!(baseline.content[0].text.contains("Saved a baseline"));
+        let delta = host
+            .call_tool("mrt-native-mcp", "mrt_compare_process_snapshots", json!({}))
+            .await
+            .unwrap();
+        assert!(delta.content[0].text.contains("Process Snapshot Delta"));
+    }
+
+    #[tokio::test]
+    async fn test_mcp_kill_tool_stops_owned_pty_but_blocks_foreign_processes_headless() {
+        let state = MrtMcpServerState::default();
+        let host = McpHostManager::new(state.clone());
+        let Some(shell) = state.shells.first().cloned() else {
+            return;
+        };
+        let cwd = std::env::current_dir().unwrap();
+        let pty = mrt_core::InteractivePty::spawn(&shell, &cwd, 80, 24).unwrap();
+        let Some(pid) = pty.process_id() else {
+            return;
+        };
+        state.owned_processes.lock().unwrap().insert(
+            pid,
+            mrt_tools::OwnedProcess {
+                pid,
+                label: "test pty".into(),
+                tab_id: None,
+                kind: mrt_tools::OwnedProcessKind::Pty,
+            },
+        );
+        let res = host
+            .call_tool("mrt-native-mcp", "mrt_kill_process", json!({ "pid": pid, "force": true, "tree": true }))
+            .await
+            .unwrap();
+        assert!(!res.is_error, "{}", res.content[0].text);
+        assert!(res.content[0].text.contains("Stopped") || res.content[0].text.contains("NotFound"));
+        let _ = pty.kill();
+    }
 }

@@ -16,6 +16,12 @@ pub struct PortEntry {
 /// Inspects active listening TCP/UDP ports on the host OS and returns both a structured
 /// table (`StructuredOutput::Table`) and a plain text summary.
 pub async fn inspect_listening_ports() -> Result<(StructuredOutput, String)> {
+    let entries = list_listening_ports().await?;
+    Ok(ports_to_table(entries))
+}
+
+/// Lists active listening TCP/UDP sockets with their owning PID (`netstat`, `lsof` or `ss`).
+pub async fn list_listening_ports() -> Result<Vec<PortEntry>> {
     let entries = if cfg!(target_os = "windows") {
         let mut cmd = Command::new("netstat");
         cmd.args(["-ano"])
@@ -61,7 +67,10 @@ pub async fn inspect_listening_ports() -> Result<(StructuredOutput, String)> {
         ensure_success("ss", &output)?;
         parse_unix_ss(&String::from_utf8_lossy(&output.stdout))
     };
+    Ok(entries)
+}
 
+fn ports_to_table(entries: Vec<PortEntry>) -> (StructuredOutput, String) {
     let headers = vec![
         "Protocol".to_string(),
         "Local Address".to_string(),
@@ -87,7 +96,7 @@ pub async fn inspect_listening_ports() -> Result<(StructuredOutput, String)> {
         ]);
     }
 
-    Ok((StructuredOutput::Table { headers, rows }, csv_text))
+    (StructuredOutput::Table { headers, rows }, csv_text)
 }
 
 pub fn parse_windows_netstat(text: &str) -> Vec<PortEntry> {

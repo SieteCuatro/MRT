@@ -65,14 +65,20 @@ pub fn assess_command(command: &str) -> SafetyAssessment {
         }
     }
 
+    if let Some((risk, reason)) = assess_process_control(&lower) {
+        return SafetyAssessment {
+            command: command.to_string(),
+            risk,
+            reason,
+            requires_approval: true,
+        };
+    }
+
     let moderate_rules: &[(&str, &str)] = &[
         ("sudo ", "Executes command with elevated superuser privileges"),
         ("rm ", "Deletes one or more files"),
         ("del ", "Deletes one or more files in CMD/PowerShell"),
         ("remove-item ", "Deletes items in PowerShell"),
-        ("kill -9", "Forcefully terminates a running process"),
-        ("stop-process", "Terminates a running process in PowerShell"),
-        ("taskkill /f", "Forcefully terminates a process in Windows"),
         ("chmod 777", "Grants world-writable permissions"),
         ("curl ", "Performs outbound network transfer"),
         ("invoke-webrequest", "Performs outbound network request"),
@@ -97,10 +103,163 @@ pub fn assess_command(command: &str) -> SafetyAssessment {
     }
 }
 
+/// Process names whose termination can crash the session, log the user out, or destabilise
+/// the OS (Windows, macOS and Linux). Compared after [`normalize_process_name`].
+pub const PROTECTED_PROCESS_NAMES: &[&str] = &[
+    // Windows
+    "system",
+    "system idle process",
+    "idle",
+    "registry",
+    "secure system",
+    "memory compression",
+    "smss",
+    "csrss",
+    "wininit",
+    "winlogon",
+    "services",
+    "lsass",
+    "lsaiso",
+    "svchost",
+    "fontdrvhost",
+    "dwm",
+    "ntoskrnl",
+    // macOS
+    "kernel_task",
+    "launchd",
+    "windowserver",
+    "loginwindow",
+    "opendirectoryd",
+    // Linux / Unix
+    "init",
+    "systemd",
+    "systemd-journald",
+    "systemd-logind",
+    "kthreadd",
+    "dbus-daemon",
+    "xorg",
+    "gnome-shell",
+    "kwin_x11",
+    "kwin_wayland",
+];
+
+/// Lower-cases a process name and strips a trailing `.exe` and surrounding quotes, so
+/// `"LSASS.EXE"`, `lsass.exe` and `lsass` compare equal.
+pub fn normalize_process_name(name: &str) -> String {
+    let lower = name.trim().trim_matches(|c| c == '"' || c == '\'').to_lowercase();
+    lower.strip_suffix(".exe").map(str::to_string).unwrap_or(lower)
+}
+
+/// True when the process is critical to the OS session (see [`PROTECTED_PROCESS_NAMES`]).
+pub fn is_protected_process_name(name: &str) -> bool {
+    let normalized = normalize_process_name(name);
+    PROTECTED_PROCESS_NAMES.contains(&normalized.as_str())
+}
+
+const KILL_VERBS: &[&str] = &[
+    "kill", "pkill", "killall", "taskkill", "tskill", "stop-process", "spps", "xkill",
+];
+const KILL_BY_NAME_VERBS: &[&str] = &["pkill", "killall"];
+
+/// Detects process-termination commands (`kill`, `pkill`, `killall`, `taskkill`,
+/// `Stop-Process`, ...) in command position of any pipeline segment, so every shell
+/// command that stops processes passes through the Safety Approval Gate. Targets that
+/// are OS-critical processes, PID 1, or "every process" (`-1`) are Critical.
+fn assess_process_control(lower: &str) -> Option<(RiskLevel, String)> {
+    let mut found: Option<(RiskLevel, String)> = None;
+    for segment in lower.split(['\n', ';', '|', '&']) {
+        let mut tokens = segment.split_whitespace().peekable();
+        while let Some(tok) = tokens.peek() {
+            if matches!(*tok, "sudo" | "doas" | "exec" | "command" | "builtin") {
+                tokens.next();
+            } else {
+                break;
+            }
+        }
+        let Some(verb_token) = tokens.next() else {
+            continue;
+        };
+        let verb = std::path::Path::new(verb_token)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(verb_token)
+            .to_string();
+        if !KILL_VERBS.contains(&verb.as_str()) {
+            continue;
+        }
+        let args: Vec<&str> = tokens.collect();
+        let protected = args.iter().find(|arg| {
+            let value = arg.rsplit(['=', ':']).next().unwrap_or(arg);
+            value.split(',').any(is_protected_process_name)
+        });
+        let assessment = if let Some(target) = protected {
+            (
+                RiskLevel::Critical,
+                format!("Terminates an OS-critical process ({target}); this can crash or log out the session"),
+            )
+        } else if verb == "kill" && args.iter().any(|a| *a == "1" || *a == "-1") {
+            (
+                RiskLevel::Critical,
+                "Signals PID 1 (init) or every process the user owns (-1)".to_string(),
+            )
+        } else if KILL_BY_NAME_VERBS.contains(&verb.as_str())
+            || (verb == "taskkill" && args.iter().any(|a| *a == "/im"))
+            || ((verb == "stop-process" || verb == "spps") && args.iter().any(|a| a.starts_with("-n")))
+        {
+            (
+                RiskLevel::Moderate,
+                "Terminates every process matching a name; several processes may be stopped".to_string(),
+            )
+        } else {
+            (RiskLevel::Moderate, "Terminates a running process".to_string())
+        };
+        if found.as_ref().map(|(risk, _)| assessment.0 > *risk).unwrap_or(true) {
+            found = Some(assessment);
+        }
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::block::{classify_output, StructuredOutput};
+
+    #[test]
+    fn test_process_control_commands_require_approval() {
+        let a = assess_command("kill 4242");
+        assert_eq!(a.risk, RiskLevel::Moderate);
+        assert!(a.requires_approval);
+
+        let b = assess_command("Get-Process node | Stop-Process -Force");
+        assert_eq!(b.risk, RiskLevel::Moderate);
+        assert!(b.requires_approval);
+
+        let c = assess_command("taskkill /F /IM lsass.exe");
+        assert_eq!(c.risk, RiskLevel::Critical);
+
+        let d = assess_command("sudo kill -9 1");
+        assert_eq!(d.risk, RiskLevel::Critical);
+
+        let e = assess_command("pkill -f launchd");
+        assert_eq!(e.risk, RiskLevel::Critical);
+
+        let f = assess_command("killall node");
+        assert_eq!(f.risk, RiskLevel::Moderate);
+        assert!(f.reason.contains("matching a name"));
+
+        // Mentions of "kill" outside command position are not process control.
+        let g = assess_command("git commit -m \"kill the flaky test\"");
+        assert_eq!(g.risk, RiskLevel::Safe);
+    }
+
+    #[test]
+    fn test_protected_process_names_are_normalized() {
+        assert!(is_protected_process_name("LSASS.EXE"));
+        assert!(is_protected_process_name("launchd"));
+        assert!(!is_protected_process_name("node.exe"));
+        assert_eq!(normalize_process_name("\"Code.exe\""), "code");
+    }
     use crate::vt::parse_ansi_text;
 
     #[test]

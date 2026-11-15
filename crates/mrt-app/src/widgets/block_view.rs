@@ -11,6 +11,10 @@ pub enum BlockAction {
     DiagnoseError(uuid::Uuid),
     ApplySuggestedFix(String),
     CopyBugReport(uuid::Uuid),
+    /// A PID cell was clicked in a table block (`:ports`, `:ps`): open it in the Task Manager.
+    InspectProcess(u32),
+    /// Stop a running block: kills the command's whole process tree, or ends a live `:top`.
+    StopBlock(uuid::Uuid),
 }
 
 fn format_duration(ms: u64) -> String {
@@ -77,6 +81,14 @@ pub fn render_command_block(
                         {
                             triggered_action = Some(BlockAction::Compare(previous_id, block.id));
                         }
+                    }
+                    if block.exit_code.is_none()
+                        && ui
+                            .add(ghost_button("■ Stop"))
+                            .on_hover_text("Stop this command and every process it started")
+                            .clicked()
+                    {
+                        triggered_action = Some(BlockAction::StopBlock(block.id));
                     }
                     if icon_button(ui, "🔁", "Rerun").clicked() {
                         triggered_action = Some(BlockAction::Rerun(block.command.clone()));
@@ -201,7 +213,9 @@ pub fn render_command_block(
                                 });
                         }
                         (ViewMode::Structured, StructuredOutput::Table { headers, rows }) => {
-                            render_structured_table(ui, block.id, headers, rows, table_filter);
+                            if let Some(pid) = render_structured_table(ui, block.id, headers, rows, table_filter) {
+                                triggered_action = Some(BlockAction::InspectProcess(pid));
+                            }
                         }
                         (ViewMode::Structured, StructuredOutput::HttpResult(http)) => {
                             render_http_exchange(ui, http);
@@ -512,13 +526,22 @@ fn render_json_tree(ui: &mut Ui, key: &str, value: &Value, default_open: bool) {
     }
 }
 
+/// Renders a table block. Cells in a `PID` / `PPID` column are links; the clicked PID is
+/// returned so the caller can open it in the Task Manager.
 fn render_structured_table(
     ui: &mut Ui,
     block_id: uuid::Uuid,
     headers: &[String],
     rows: &[Vec<String>],
     filter: &mut String,
-) {
+) -> Option<u32> {
+    let mut clicked_pid = None;
+    let pid_columns: Vec<usize> = headers
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| h.eq_ignore_ascii_case("pid") || h.eq_ignore_ascii_case("ppid"))
+        .map(|(i, _)| i)
+        .collect();
     ui.horizontal(|ui| {
         ui.label(
             RichText::new(format!("📊 {} rows", rows.len()))
@@ -555,16 +578,37 @@ fn render_structured_table(
                 if !q.is_empty() && !row.iter().any(|c| c.to_lowercase().contains(&q)) {
                     continue;
                 }
-                for cell in row {
-                    ui.label(
-                        RichText::new(cell)
-                            .monospace()
-                            .color(Color32::from_rgb(220, 225, 235)),
-                    );
+                for (col, cell) in row.iter().enumerate() {
+                    let pid = pid_columns
+                        .contains(&col)
+                        .then(|| cell.trim().parse::<u32>().ok())
+                        .flatten()
+                        .filter(|pid| *pid > 0);
+                    if let Some(pid) = pid {
+                        let link = ui
+                            .add(
+                                egui::Label::new(
+                                    RichText::new(cell).monospace().underline().color(Palette::ACCENT_TEXT),
+                                )
+                                .sense(egui::Sense::click()),
+                            )
+                            .on_hover_text("Open this process in the Task Manager")
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        if link.clicked() {
+                            clicked_pid = Some(pid);
+                        }
+                    } else {
+                        ui.label(
+                            RichText::new(cell)
+                                .monospace()
+                                .color(Color32::from_rgb(220, 225, 235)),
+                        );
+                    }
                 }
                 ui.end_row();
             }
         });
+    clicked_pid
 }
 
 fn render_http_exchange(ui: &mut Ui, http: &HttpExchangeSummary) {
@@ -752,6 +796,32 @@ pub fn render_comparison(ui: &mut Ui, previous: &CommandBlock, current: &Command
                         RichText::new(format!("- {removed}"))
                             .monospace()
                             .color(Palette::ACCENT_RED),
+                    );
+                }
+            }
+            StructuredDiffKind::ProcessesDelta {
+                started,
+                exited,
+                memory_grown,
+                unchanged_count,
+            } => {
+                ui.label(
+                    RichText::new(format!("Process Snapshot Delta · {unchanged_count} unchanged"))
+                        .size(11.5)
+                        .italics()
+                        .color(Palette::TEXT_SECONDARY),
+                );
+                for line in started {
+                    ui.label(RichText::new(format!("+ started  {line}")).monospace().color(Palette::ACCENT_GREEN));
+                }
+                for line in exited {
+                    ui.label(RichText::new(format!("- exited   {line}")).monospace().color(Palette::ACCENT_RED));
+                }
+                for line in memory_grown {
+                    ui.label(
+                        RichText::new(format!("▲ memory   {line}"))
+                            .monospace()
+                            .color(Color32::from_rgb(253, 224, 138)),
                     );
                 }
             }

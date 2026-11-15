@@ -264,7 +264,7 @@ pub async fn execute_command_in_shell(
     command: &str,
     cwd: &Path,
 ) -> Result<CommandExecutionResult> {
-    execute_command_impl(shell, command, cwd, None).await
+    execute_command_impl(shell, command, cwd, None, None).await
 }
 
 /// Streams decoded stdout and stderr as they become available. Programs control
@@ -275,7 +275,20 @@ pub async fn execute_command_streaming(
     cwd: &Path,
     mut on_output: impl FnMut(&str) + Send,
 ) -> Result<CommandExecutionResult> {
-    execute_command_impl(shell, command, cwd, Some(&mut on_output)).await
+    execute_command_impl(shell, command, cwd, Some(&mut on_output), None).await
+}
+
+/// Like [`execute_command_streaming`], but reports the OS process id of the spawned shell
+/// through `on_spawn` so callers (the MRT Task Manager, the block "Stop" button) can track
+/// and stop the whole process tree. `on_spawn` is not called for built-in `cd` handling.
+pub async fn execute_command_streaming_with_pid(
+    shell: &ShellProfile,
+    command: &str,
+    cwd: &Path,
+    mut on_spawn: impl FnMut(u32) + Send,
+    mut on_output: impl FnMut(&str) + Send,
+) -> Result<CommandExecutionResult> {
+    execute_command_impl(shell, command, cwd, Some(&mut on_output), Some(&mut on_spawn)).await
 }
 
 async fn execute_command_impl(
@@ -283,6 +296,7 @@ async fn execute_command_impl(
     command: &str,
     cwd: &Path,
     on_output: Option<&mut (dyn FnMut(&str) + Send)>,
+    on_spawn: Option<&mut (dyn FnMut(u32) + Send)>,
 ) -> Result<CommandExecutionResult> {
     let start = Instant::now();
     let trimmed = command.trim();
@@ -342,6 +356,9 @@ async fn execute_command_impl(
             .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("Failed to spawn shell '{}'", shell.program))?;
+        if let (Some(report), Some(pid)) = (on_spawn, child.id()) {
+            report(pid);
+        }
         let mut stdout = child.stdout.take().context("Missing stdout pipe")?;
         let mut stderr = child.stderr.take().context("Missing stderr pipe")?;
         let mut stdout_raw = Vec::new();
@@ -639,6 +656,11 @@ impl InteractivePty {
         } else {
             Ok(None)
         }
+    }
+
+    /// OS process id of the PTY child, when the platform reports one.
+    pub fn process_id(&self) -> Option<u32> {
+        self.child.lock().ok().and_then(|guard| guard.process_id())
     }
 
     pub fn kill(&self) -> Result<()> {

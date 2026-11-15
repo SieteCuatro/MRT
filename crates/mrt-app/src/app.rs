@@ -10,30 +10,40 @@ use crate::widgets::chrome::{
 use crate::widgets::runbooks::{
     render_runbooks_panel, ReplayStatusView, RunbookAction, RunbooksUiState,
 };
-use crate::widgets::side_panels::{
-    render_internet_side_panel, render_mcp_side_panel, SidePanelEvent, SidePanelState,
-};
+use crate::widgets::side_panels::{render_mcp_side_panel, SidePanelEvent, SidePanelState};
+use crate::widgets::task_manager::TaskManagerEvent;
+use crate::widgets::toolbox::{render_toolbox_side_panel, ToolboxTab};
 use egui::{Color32, Key, Modifiers, RichText};
 use mrt_ai::{
     diagnose_command_error_streaming, translate_nl_to_command,
     AiCommandProposal,
 };
 use mrt_core::{
-    assess_command, discover_shells, execute_command_streaming, CommandBlock, InteractivePty,
-    RiskLevel, SafetyAssessment, ShellProfile, StructuredOutput,
+    assess_command, discover_shells, execute_command_streaming_with_pid, CommandBlock,
+    InteractivePty, RiskLevel, SafetyAssessment, ShellProfile, StructuredOutput,
 };
 use mrt_mcp::{
     start_gui_bridge_listener, GuiUiCommand, McpHostManager, McpTabSession, MrtMcpServerState,
 };
 use mrt_tools::{
     execute_http_request, fetch_url_as_markdown, generate_markdown_bug_report, inspect_dns,
-    inspect_listening_ports, inspect_websocket, parse_http_command,
+    inspect_listening_ports, inspect_process, inspect_websocket, is_process_block,
+    kill_outcomes_markdown, parse_http_command, parse_kill_command, parse_ps_command,
+    parse_watch_command, plan_kill, process_details_markdown, processes_to_table,
+    query_processes, KillPlan, KillRequest, OwnedProcess, OwnedProcessKind,
+    OwnedProcessMap, PortEntry, ProcessQuery, ProcessSelector, ProcessSnapshot, ProcessWatch,
+    SharedProcessSampler, PROCESS_BLOCK_SHELL,
 };
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use uuid::Uuid;
+
+/// How often the Task Manager, live `:top` blocks and `:watch-proc` watches resample.
+const PROCESS_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SplitDirection {
@@ -134,6 +144,56 @@ pub enum AsyncWorkerEvent {
         entries: Result<Vec<(PathBuf, bool)>, String>,
     },
     ExternalMcpConnected(mrt_mcp::McpServerStatus),
+    /// Periodic process sample for the Task Manager, live `:top` blocks and watches.
+    /// Background events do not count towards `busy_count`.
+    ProcessSnapshot(Result<Arc<ProcessSnapshot>, String>),
+    /// A `:kill` request (prompt, Task Manager or MCP) was resolved against a fresh snapshot
+    /// and is ready for the Safety Approval Gate.
+    KillPlanned {
+        tab_id: Uuid,
+        cwd: PathBuf,
+        plan: Result<KillPlan, String>,
+    },
+    /// The block "Stop" button finished stopping a command's process tree.
+    StopFinished {
+        tab_id: Uuid,
+        error: Option<String>,
+    },
+}
+
+/// Returns the arguments of `input` when its first word is exactly `name`
+/// (so `:ps` matches `:ps node` but not `:psql`).
+fn command_args<'a>(input: &'a str, name: &str) -> Option<&'a str> {
+    let rest = input.strip_prefix(name)?;
+    if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+        Some(rest)
+    } else {
+        None
+    }
+}
+
+fn shorten(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_string()
+    } else {
+        let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
+}
+
+impl AsyncWorkerEvent {
+    fn is_background(&self) -> bool {
+        matches!(self, AsyncWorkerEvent::ProcessSnapshot(_))
+    }
+}
+
+/// Processes approved for stopping once the user confirms the Safety Gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingKill {
+    pub pids: Vec<u32>,
+    pub force: bool,
+    pub tree: bool,
 }
 
 pub struct PendingSafetyApproval {
@@ -141,6 +201,20 @@ pub struct PendingSafetyApproval {
     pub assessment: SafetyAssessment,
     pub shell: ShellProfile,
     pub cwd: PathBuf,
+    /// `Some` when the approval stops processes instead of running a shell command.
+    pub kill: Option<PendingKill>,
+}
+
+/// A `:top` block that is refreshed in place until stopped.
+pub struct LiveTopBlock {
+    pub tab_id: Uuid,
+    pub block_id: Uuid,
+    pub query: ProcessQuery,
+}
+
+pub struct ActiveProcessWatch {
+    pub tab_id: Uuid,
+    pub watch: ProcessWatch,
 }
 
 pub struct ActiveRunbookReplay {
@@ -191,6 +265,19 @@ pub struct MrtGuiApp {
     explorer_path: Option<PathBuf>,
     explorer_entries: Result<Vec<(PathBuf, bool)>, String>,
     sidebar_collapsed: bool,
+    /// Shared with the MCP server so both see the same CPU baselines.
+    process_sampler: SharedProcessSampler,
+    /// OS PID of the shell behind each running command block.
+    running_pids: Arc<Mutex<HashMap<Uuid, u32>>>,
+    live_top: Option<LiveTopBlock>,
+    process_watches: Vec<ActiveProcessWatch>,
+    next_watch_id: usize,
+    process_tick_last: Option<Instant>,
+    process_tick_in_flight: bool,
+    /// Sample on the next frame even if no live view needs it (Refresh, `:top`, PID links).
+    force_process_tick: bool,
+    /// Tab whose next `:ps` block should be diffed against its previous `:ps` block.
+    pending_ps_compare: Option<Uuid>,
 }
 
 impl MrtGuiApp {
@@ -230,6 +317,7 @@ impl MrtGuiApp {
             .ok()
             .map(|addr| addr.port());
 
+        let process_sampler = mcp_state.process_sampler.clone();
         let mcp_host = McpHostManager::new(mcp_state);
 
         let (tx, rx) = channel();
@@ -279,6 +367,15 @@ impl MrtGuiApp {
             explorer_path: None,
             explorer_entries: Ok(Vec::new()),
             sidebar_collapsed: false,
+            process_sampler,
+            running_pids: Arc::new(Mutex::new(HashMap::new())),
+            live_top: None,
+            process_watches: Vec::new(),
+            next_watch_id: 1,
+            process_tick_last: None,
+            process_tick_in_flight: false,
+            force_process_tick: false,
+            pending_ps_compare: None,
         }
     }
 
@@ -359,6 +456,591 @@ impl MrtGuiApp {
                     }
                 }
             }
+            BlockAction::InspectProcess(pid) => {
+                self.open_task_manager(Some(pid));
+            }
+            BlockAction::StopBlock(block_id) => {
+                self.stop_block(block_id);
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Task Manager and process tools (`:ps`, `:top`, `:proc`, `:kill`, `:watch-proc`)
+    // ---------------------------------------------------------------------
+
+    fn open_task_manager(&mut self, focus: Option<u32>) {
+        self.side_state.show_toolbox_panel = true;
+        self.side_state.toolbox_tab = ToolboxTab::TaskManager;
+        if let Some(pid) = focus {
+            self.side_state.task_manager.focus_pid(pid);
+        }
+        self.force_process_tick = true;
+    }
+
+    fn wants_process_ticks(&self) -> bool {
+        let tm = &self.side_state.task_manager;
+        let task_manager_visible =
+            self.side_state.show_toolbox_panel && self.side_state.toolbox_tab == ToolboxTab::TaskManager;
+        self.live_top.is_some()
+            || !self.process_watches.is_empty()
+            || (task_manager_visible && (tm.live || tm.snapshot.is_none()))
+    }
+
+    fn maybe_spawn_process_tick(&mut self) {
+        if self.process_tick_in_flight {
+            return;
+        }
+        let due = self
+            .process_tick_last
+            .map(|t| t.elapsed() >= PROCESS_REFRESH_INTERVAL)
+            .unwrap_or(true);
+        if !(self.force_process_tick || (due && self.wants_process_ticks())) {
+            return;
+        }
+        self.force_process_tick = false;
+        self.process_tick_in_flight = true;
+        self.side_state.task_manager.refreshing = true;
+        let sampler = self.process_sampler.clone();
+        let tx = self.tx.clone();
+        self.runtime.spawn(async move {
+            let result = sampler.snapshot().await.map(Arc::new).map_err(|e| e.to_string());
+            let _ = tx.send(AsyncWorkerEvent::ProcessSnapshot(result));
+        });
+    }
+
+    /// Processes MRT started: running command blocks, the TUI overlay, and MCP PTYs.
+    fn owned_processes(&self) -> OwnedProcessMap {
+        let mut map: OwnedProcessMap = self
+            .mcp_host
+            .local_server_state
+            .owned_processes
+            .lock()
+            .map(|g| {
+                g.iter()
+                    .filter(|(_, o)| o.kind == OwnedProcessKind::Pty)
+                    .map(|(pid, o)| (*pid, o.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Ok(pids) = self.running_pids.lock() {
+            for (block_id, pid) in pids.iter() {
+                let found = self.tabs.iter().find_map(|t| {
+                    t.blocks
+                        .iter()
+                        .chain(t.secondary_pane.iter().flat_map(|p| p.blocks.iter()))
+                        .find(|b| b.id == *block_id)
+                        .map(|b| (t.id, format!("{} · {}", t.title, shorten(&b.command, 40))))
+                });
+                let (tab_id, label) = match found {
+                    Some((tab_id, label)) => (Some(tab_id.to_string()), label),
+                    None => (None, "MRT command".to_string()),
+                };
+                map.insert(
+                    *pid,
+                    OwnedProcess {
+                        pid: *pid,
+                        label,
+                        tab_id,
+                        kind: OwnedProcessKind::Command,
+                    },
+                );
+            }
+        }
+        if let Some(tui) = &self.active_tui {
+            if let Some(pid) = tui.pty.process_id() {
+                map.insert(
+                    pid,
+                    OwnedProcess {
+                        pid,
+                        label: format!("TUI · {}", shorten(&tui.command, 40)),
+                        tab_id: Some(tui.tab_id.to_string()),
+                        kind: OwnedProcessKind::Tui,
+                    },
+                );
+            }
+        }
+        map
+    }
+
+    fn with_block_mut(&mut self, tab_id: Uuid, block_id: Uuid, f: impl FnOnce(&mut CommandBlock)) -> bool {
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) else {
+            return false;
+        };
+        let block = tab
+            .blocks
+            .iter_mut()
+            .chain(tab.secondary_pane.iter_mut().flat_map(|p| p.blocks.iter_mut()))
+            .find(|b| b.id == block_id);
+        match block {
+            Some(block) => {
+                f(block);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn push_block(&mut self, tab_id: Uuid, block: CommandBlock) {
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+            tab.blocks.push(block);
+        }
+    }
+
+    fn process_error_block(command: &str, cwd: &std::path::Path, message: impl Into<String>) -> CommandBlock {
+        CommandBlock::new_completed(command, PROCESS_BLOCK_SHELL, cwd.display().to_string(), message.into(), 1, 0)
+    }
+
+    fn on_process_snapshot(&mut self, result: Result<Arc<ProcessSnapshot>, String>) {
+        self.process_tick_in_flight = false;
+        self.process_tick_last = Some(Instant::now());
+        let snapshot = match result {
+            Ok(s) => s,
+            Err(e) => {
+                self.side_state.task_manager.error = Some(e);
+                self.side_state.task_manager.refreshing = false;
+                return;
+            }
+        };
+        let owned = self.owned_processes();
+        self.side_state
+            .task_manager
+            .apply_snapshot(snapshot.clone(), owned.clone());
+
+        // Live `:top` block
+        if let Some(live) = &self.live_top {
+            let (tab_id, block_id) = (live.tab_id, live.block_id);
+            let rows = query_processes(&snapshot, &live.query, &owned);
+            let (structured, csv) = processes_to_table(&rows);
+            let updated = self.with_block_mut(tab_id, block_id, |block| {
+                let elapsed = (chrono::Local::now() - block.timestamp).num_milliseconds().max(0) as u64;
+                let mut fresh = CommandBlock::new_structured(
+                    &block.command,
+                    PROCESS_BLOCK_SHELL,
+                    block.cwd.clone(),
+                    csv,
+                    structured,
+                    0,
+                    elapsed,
+                );
+                fresh.id = block.id;
+                fresh.timestamp = block.timestamp;
+                fresh.exit_code = None;
+                fresh.pinned = block.pinned;
+                fresh.view_mode = block.view_mode.clone();
+                *block = fresh;
+            });
+            if !updated {
+                self.live_top = None;
+            }
+        }
+
+        // `:watch-proc` alerts
+        let mut alerts: Vec<(Uuid, usize, String)> = Vec::new();
+        let mut finished = Vec::new();
+        for (idx, active) in self.process_watches.iter_mut().enumerate() {
+            for alert in active.watch.evaluate(&snapshot) {
+                if matches!(alert, mrt_tools::WatchAlert::Exited { .. })
+                    && matches!(active.watch.spec.selector, ProcessSelector::Pid(_))
+                {
+                    finished.push(idx);
+                }
+                alerts.push((active.tab_id, active.watch.id, alert.message()));
+            }
+        }
+        for (tab_id, watch_id, message) in alerts {
+            let cwd = self
+                .tabs
+                .iter()
+                .find(|t| t.id == tab_id)
+                .map(|t| t.cwd.clone())
+                .unwrap_or_default();
+            let block = CommandBlock::new_completed(
+                format!(":watch-proc #{watch_id}"),
+                PROCESS_BLOCK_SHELL,
+                cwd.display().to_string(),
+                format!("⏱ {message}"),
+                0,
+                0,
+            );
+            self.push_block(tab_id, block);
+        }
+        for idx in finished.into_iter().rev() {
+            self.process_watches.remove(idx);
+        }
+        let open_tabs: Vec<Uuid> = self.tabs.iter().map(|t| t.id).collect();
+        self.process_watches.retain(|w| open_tabs.contains(&w.tab_id));
+    }
+
+    fn spawn_ps_command(&mut self, tab_id: Uuid, cwd: PathBuf, cmd: String, query: ProcessQuery) {
+        let sampler = self.process_sampler.clone();
+        let owned = self.owned_processes();
+        let tx = self.tx.clone();
+        self.busy_count += 1;
+        self.runtime.spawn(async move {
+            let start = Instant::now();
+            let cwd_str = cwd.display().to_string();
+            let block = match sampler.snapshot().await {
+                Ok(snapshot) => {
+                    let rows = query_processes(&snapshot, &query, &owned);
+                    let (structured, csv) = processes_to_table(&rows);
+                    CommandBlock::new_structured(
+                        &cmd,
+                        PROCESS_BLOCK_SHELL,
+                        cwd_str,
+                        csv,
+                        structured,
+                        0,
+                        start.elapsed().as_millis() as u64,
+                    )
+                }
+                Err(e) => CommandBlock::new_completed(
+                    &cmd,
+                    PROCESS_BLOCK_SHELL,
+                    cwd_str,
+                    format!("Process listing failed: {e}"),
+                    1,
+                    start.elapsed().as_millis() as u64,
+                ),
+            };
+            let _ = tx.send(AsyncWorkerEvent::BlockCompleted { tab_id, block, updated_cwd: None });
+        });
+    }
+
+    fn start_live_top(&mut self, tab_id: Uuid, cwd: PathBuf, cmd: String, query: ProcessQuery) {
+        self.stop_live_top();
+        let mut block = CommandBlock::new_structured(
+            &cmd,
+            PROCESS_BLOCK_SHELL,
+            cwd.display().to_string(),
+            String::new(),
+            StructuredOutput::Table {
+                headers: mrt_tools::process_inspector::PROCESS_TABLE_HEADERS
+                    .iter()
+                    .map(|h| h.to_string())
+                    .collect(),
+                rows: Vec::new(),
+            },
+            0,
+            0,
+        );
+        block.exit_code = None;
+        let block_id = block.id;
+        self.push_block(tab_id, block);
+        self.live_top = Some(LiveTopBlock { tab_id, block_id, query });
+        self.force_process_tick = true;
+    }
+
+    fn stop_live_top(&mut self) {
+        if let Some(live) = self.live_top.take() {
+            self.with_block_mut(live.tab_id, live.block_id, |block| {
+                block.exit_code = Some(0);
+                block.duration_ms = (chrono::Local::now() - block.timestamp).num_milliseconds().max(0) as u64;
+            });
+        }
+    }
+
+    fn spawn_proc_command(&mut self, tab_id: Uuid, cwd: PathBuf, cmd: String, pid: u32) {
+        let sampler = self.process_sampler.clone();
+        let owned = self.owned_processes();
+        let tx = self.tx.clone();
+        self.busy_count += 1;
+        self.runtime.spawn(async move {
+            let start = Instant::now();
+            let cwd_str = cwd.display().to_string();
+            let block = match inspect_process(&sampler, pid, &owned).await {
+                Ok(details) => {
+                    let md = process_details_markdown(&details);
+                    CommandBlock::new_structured(
+                        &cmd,
+                        PROCESS_BLOCK_SHELL,
+                        cwd_str,
+                        md.clone(),
+                        StructuredOutput::Markdown(md),
+                        0,
+                        start.elapsed().as_millis() as u64,
+                    )
+                }
+                Err(e) => CommandBlock::new_completed(&cmd, PROCESS_BLOCK_SHELL, cwd_str, e.to_string(), 1, 0),
+            };
+            let _ = tx.send(AsyncWorkerEvent::BlockCompleted { tab_id, block, updated_cwd: None });
+        });
+    }
+
+    /// Resolves a kill request against a fresh snapshot; the result opens the Safety Gate.
+    fn spawn_kill_plan(&mut self, tab_id: Uuid, cwd: PathBuf, request: KillRequest) {
+        let sampler = self.process_sampler.clone();
+        let owned = self.owned_processes();
+        let tx = self.tx.clone();
+        self.busy_count += 1;
+        self.runtime.spawn(async move {
+            let plan = match sampler.snapshot().await {
+                Ok(snapshot) => plan_kill(&snapshot, &request, &owned).map_err(|e| e.to_string()),
+                Err(e) => Err(format!("Process snapshot failed: {e}")),
+            };
+            let _ = tx.send(AsyncWorkerEvent::KillPlanned { tab_id, cwd, plan });
+        });
+    }
+
+    fn on_kill_planned(&mut self, tab_id: Uuid, cwd: PathBuf, plan: Result<KillPlan, String>) {
+        match plan {
+            Err(message) => {
+                self.push_block(tab_id, Self::process_error_block(":kill", &cwd, message));
+            }
+            Ok(plan) => {
+                if self.pending_safety.is_some() {
+                    self.push_block(
+                        tab_id,
+                        Self::process_error_block(
+                            &plan.assessment.command,
+                            &cwd,
+                            "Another Safety Gate approval is pending; answer it first, then retry.",
+                        ),
+                    );
+                    return;
+                }
+                let shell = self
+                    .tabs
+                    .iter()
+                    .find(|t| t.id == tab_id)
+                    .and_then(|t| self.shells.get(t.active_shell_idx))
+                    .cloned()
+                    .unwrap_or_else(|| self.shells[0].clone());
+                self.pending_safety = Some(PendingSafetyApproval {
+                    tab_id,
+                    kill: Some(PendingKill {
+                        pids: plan.pids(),
+                        force: plan.request.force,
+                        tree: plan.request.tree,
+                    }),
+                    assessment: plan.assessment,
+                    shell,
+                    cwd,
+                });
+            }
+        }
+    }
+
+    fn spawn_kill_execution(&mut self, tab_id: Uuid, cwd: PathBuf, command: String, kill: PendingKill) {
+        let sampler = self.process_sampler.clone();
+        let tx = self.tx.clone();
+        self.busy_count += 1;
+        self.runtime.spawn(async move {
+            let start = Instant::now();
+            let cwd_str = cwd.display().to_string();
+            let block = match sampler.terminate(kill.pids, kill.force, kill.tree).await {
+                Ok(outcomes) => {
+                    let md = kill_outcomes_markdown(&outcomes);
+                    let ok = outcomes.iter().all(|o| o.succeeded());
+                    CommandBlock::new_structured(
+                        &command,
+                        PROCESS_BLOCK_SHELL,
+                        cwd_str,
+                        md.clone(),
+                        StructuredOutput::Markdown(md),
+                        if ok { 0 } else { 1 },
+                        start.elapsed().as_millis() as u64,
+                    )
+                }
+                Err(e) => CommandBlock::new_completed(&command, PROCESS_BLOCK_SHELL, cwd_str, e.to_string(), 1, 0),
+            };
+            let _ = tx.send(AsyncWorkerEvent::BlockCompleted { tab_id, block, updated_cwd: None });
+        });
+    }
+
+    /// The block "Stop" button: ends a live `:top`, or force-stops the command's process tree.
+    /// The command's own block then completes normally with the exit status.
+    fn stop_block(&mut self, block_id: Uuid) {
+        if self.live_top.as_ref().map(|l| l.block_id) == Some(block_id) {
+            self.stop_live_top();
+            return;
+        }
+        let Some(pid) = self.running_pids.lock().ok().and_then(|g| g.get(&block_id).copied()) else {
+            return;
+        };
+        let tab_id = self
+            .tabs
+            .iter()
+            .find(|t| {
+                t.blocks
+                    .iter()
+                    .chain(t.secondary_pane.iter().flat_map(|p| p.blocks.iter()))
+                    .any(|b| b.id == block_id)
+            })
+            .map(|t| t.id)
+            .unwrap_or(self.tabs[self.active_tab].id);
+        let sampler = self.process_sampler.clone();
+        let tx = self.tx.clone();
+        self.busy_count += 1;
+        self.runtime.spawn(async move {
+            let error = match sampler.terminate(vec![pid], true, true).await {
+                Ok(outcomes) => outcomes
+                    .iter()
+                    .find(|o| !o.succeeded())
+                    .map(|o| format!("Could not stop {} (PID {}): {:?}", o.name, o.pid, o.status)),
+                Err(e) => Some(e.to_string()),
+            };
+            let _ = tx.send(AsyncWorkerEvent::StopFinished { tab_id, error });
+        });
+    }
+
+    /// Handles `:toolbox`, `:ps`, `:top`, `:proc`, `:kill` and `:watch-proc`.
+    /// Returns `false` when `raw_input` is not a process/toolbox command.
+    fn try_process_command(&mut self, tab_id: Uuid, cwd: &std::path::Path, raw_input: &str) -> bool {
+        let cwd = cwd.to_path_buf();
+        if let Some(rest) = command_args(raw_input, ":toolbox") {
+            match rest.trim() {
+                "close" | "hide" => self.side_state.show_toolbox_panel = false,
+                "" => self.side_state.show_toolbox_panel = !self.side_state.show_toolbox_panel,
+                name => match ToolboxTab::parse(name) {
+                    Some(ToolboxTab::TaskManager) => self.open_task_manager(None),
+                    Some(tab) => {
+                        self.side_state.show_toolbox_panel = true;
+                        self.side_state.toolbox_tab = tab;
+                    }
+                    None => self.push_block(
+                        tab_id,
+                        Self::process_error_block(raw_input, &cwd, format!("Unknown Toolbox tab '{name}' (use network or task-manager)")),
+                    ),
+                },
+            }
+            return true;
+        }
+        if command_args(raw_input, ":ps").is_some() {
+            match parse_ps_command(raw_input) {
+                Ok(query) => self.spawn_ps_command(tab_id, cwd, raw_input.to_string(), query),
+                Err(e) => self.push_block(tab_id, Self::process_error_block(raw_input, &cwd, e.to_string())),
+            }
+            return true;
+        }
+        if let Some(rest) = command_args(raw_input, ":top") {
+            if rest.trim().eq_ignore_ascii_case("stop") {
+                self.stop_live_top();
+                return true;
+            }
+            match parse_ps_command(raw_input) {
+                Ok(mut query) => {
+                    if query.limit.is_none() {
+                        query.limit = Some(25);
+                    }
+                    self.start_live_top(tab_id, cwd, raw_input.to_string(), query);
+                }
+                Err(e) => self.push_block(tab_id, Self::process_error_block(raw_input, &cwd, e.to_string())),
+            }
+            return true;
+        }
+        if let Some(rest) = command_args(raw_input, ":proc") {
+            match rest.trim().parse::<u32>() {
+                Ok(pid) => self.spawn_proc_command(tab_id, cwd, raw_input.to_string(), pid),
+                Err(_) => self.push_block(tab_id, Self::process_error_block(raw_input, &cwd, "Usage: :proc <pid>")),
+            }
+            return true;
+        }
+        if let Some(rest) = command_args(raw_input, ":kill") {
+            if rest.trim().is_empty() {
+                self.open_task_manager(None);
+                return true;
+            }
+            match parse_kill_command(raw_input) {
+                Ok(request) => self.spawn_kill_plan(tab_id, cwd, request),
+                Err(e) => self.push_block(tab_id, Self::process_error_block(raw_input, &cwd, e.to_string())),
+            }
+            return true;
+        }
+        let unwatch = command_args(raw_input, ":unwatch-proc").map(|r| format!("stop {r}"));
+        if let Some(rest) = command_args(raw_input, ":watch-proc").map(str::to_string).or(unwatch) {
+            let rest = rest.trim();
+            let mut words = rest.split_whitespace();
+            match words.next() {
+                Some("list") | None => {
+                    let text = if self.process_watches.is_empty() {
+                        "No active process watches. Start one with :watch-proc <pid|name> [--mem 2GB] [--cpu 90].".to_string()
+                    } else {
+                        self.process_watches
+                            .iter()
+                            .map(|w| w.watch.describe())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    };
+                    self.push_block(
+                        tab_id,
+                        CommandBlock::new_completed(raw_input, PROCESS_BLOCK_SHELL, cwd.display().to_string(), text, 0, 0),
+                    );
+                }
+                Some("clear") => {
+                    let count = self.process_watches.len();
+                    self.process_watches.clear();
+                    self.push_block(
+                        tab_id,
+                        CommandBlock::new_completed(raw_input, PROCESS_BLOCK_SHELL, cwd.display().to_string(), format!("Stopped {count} watch(es)."), 0, 0),
+                    );
+                }
+                Some("stop") => {
+                    let target = words.next().unwrap_or("").trim_start_matches('#');
+                    let before = self.process_watches.len();
+                    if target == "all" {
+                        self.process_watches.clear();
+                    } else if let Ok(id) = target.parse::<usize>() {
+                        self.process_watches.retain(|w| w.watch.id != id);
+                    }
+                    let removed = before - self.process_watches.len();
+                    self.push_block(
+                        tab_id,
+                        CommandBlock::new_completed(
+                            raw_input,
+                            PROCESS_BLOCK_SHELL,
+                            cwd.display().to_string(),
+                            format!("Stopped {removed} watch(es)."),
+                            if removed > 0 { 0 } else { 1 },
+                            0,
+                        ),
+                    );
+                }
+                Some(_) => match parse_watch_command(raw_input) {
+                    Ok(spec) => {
+                        let id = self.next_watch_id;
+                        self.next_watch_id += 1;
+                        let watch = ProcessWatch::new(id, spec);
+                        let text = format!(
+                            "Watching {}. Alerts appear in this tab; stop it with :watch-proc stop {id}.",
+                            watch.describe()
+                        );
+                        self.process_watches.push(ActiveProcessWatch { tab_id, watch });
+                        self.force_process_tick = true;
+                        self.push_block(
+                            tab_id,
+                            CommandBlock::new_completed(raw_input, PROCESS_BLOCK_SHELL, cwd.display().to_string(), text, 0, 0),
+                        );
+                    }
+                    Err(e) => self.push_block(tab_id, Self::process_error_block(raw_input, &cwd, e.to_string())),
+                },
+            }
+            return true;
+        }
+        false
+    }
+
+    fn handle_task_manager_event(&mut self, tab_id: Uuid, cwd: PathBuf, event: TaskManagerEvent) {
+        match event {
+            TaskManagerEvent::Refresh => self.force_process_tick = true,
+            TaskManagerEvent::Stop { pid, force, tree } => self.spawn_kill_plan(
+                tab_id,
+                cwd,
+                KillRequest {
+                    selectors: vec![ProcessSelector::Pid(pid)],
+                    force,
+                    tree,
+                },
+            ),
+            TaskManagerEvent::Inspect(pid) => self.submit_input(Some(format!(":proc {pid}")), false),
+            TaskManagerEvent::Watch(pid) => self.submit_input(Some(format!(":watch-proc {pid}")), false),
+            TaskManagerEvent::SnapshotToTab { command, compare } => {
+                if compare {
+                    self.pending_ps_compare = Some(tab_id);
+                }
+                self.submit_input(Some(command), false);
+            }
+            TaskManagerEvent::ScanPorts => self.spawn_port_scanner(tab_id, cwd),
         }
     }
 
@@ -402,6 +1084,10 @@ impl MrtGuiApp {
         {
             self.stop_runbook_replay(Some("Runbook stopped because its target tab was closed.".into()));
         }
+        if self.live_top.as_ref().is_some_and(|live| live.tab_id == id) {
+            self.live_top = None;
+        }
+        self.process_watches.retain(|w| w.tab_id != id);
     }
 
     fn add_mosaic_terminal(&mut self) {
@@ -855,6 +1541,10 @@ impl MrtGuiApp {
 
     pub fn sync_mcp_from_gui(&self) {
         let state = &self.mcp_host.local_server_state;
+        let owned = self.owned_processes();
+        if let Ok(mut guard) = state.owned_processes.lock() {
+            *guard = owned;
+        }
         if let Some(active) = self.tabs.get(self.active_tab) {
             if let Ok(mut guard) = state.active_tab_id.lock() {
                 *guard = active.id;
@@ -970,6 +1660,29 @@ impl MrtGuiApp {
                         tab.comparison = Some((previous_block_id, current_block_id));
                     }
                 }
+                GuiUiCommand::SetToolbox { visible, tab } => {
+                    self.side_state.show_toolbox_panel = visible;
+                    if let Some(tab) = tab.as_deref().and_then(ToolboxTab::parse) {
+                        self.side_state.toolbox_tab = tab;
+                        if tab == ToolboxTab::TaskManager && visible {
+                            self.force_process_tick = true;
+                        }
+                    }
+                }
+                GuiUiCommand::RequestProcessKill { pids, force, tree } => {
+                    if let Some(tab) = self.tabs.get(self.active_tab) {
+                        let (tab_id, cwd) = (tab.id, tab.cwd.clone());
+                        self.spawn_kill_plan(
+                            tab_id,
+                            cwd,
+                            KillRequest {
+                                selectors: pids.into_iter().map(ProcessSelector::Pid).collect(),
+                                force,
+                                tree,
+                            },
+                        );
+                    }
+                }
             }
         }
         if let Some(cmd_text) = pending_submit {
@@ -994,14 +1707,42 @@ impl MrtGuiApp {
             }
         }
         while let Ok(ev) = self.rx.try_recv() {
-            self.busy_count = self.busy_count.saturating_sub(1);
+            if !ev.is_background() {
+                self.busy_count = self.busy_count.saturating_sub(1);
+            }
             match ev {
+                AsyncWorkerEvent::ProcessSnapshot(result) => self.on_process_snapshot(result),
+                AsyncWorkerEvent::KillPlanned { tab_id, cwd, plan } => self.on_kill_planned(tab_id, cwd, plan),
+                AsyncWorkerEvent::StopFinished { tab_id, error } => {
+                    if let Some(message) = error {
+                        let cwd = self.tabs.iter().find(|t| t.id == tab_id).map(|t| t.cwd.clone()).unwrap_or_default();
+                        self.push_block(tab_id, Self::process_error_block(":stop", &cwd, message));
+                    }
+                }
                 AsyncWorkerEvent::BlockCompleted {
                     tab_id,
                     block,
                     updated_cwd,
                 } => {
                     self.running_output.remove(&block.id);
+                    if let Ok(mut pids) = self.running_pids.lock() {
+                        pids.remove(&block.id);
+                    }
+                    if block.shell_name == "mrt-net" {
+                        if let StructuredOutput::Table { rows, .. } = &block.structured {
+                            self.side_state.last_ports = rows
+                                .iter()
+                                .filter(|r| r.len() >= 5)
+                                .map(|r| PortEntry {
+                                    protocol: r[0].clone(),
+                                    local_address: r[1].clone(),
+                                    port: r[2].clone(),
+                                    state: r[3].clone(),
+                                    pid: r[4].clone(),
+                                })
+                                .collect();
+                        }
+                    }
                     if let Some(worker) = &self.history {
                         if worker.send(crate::history::HistoryRequest::Save(block.clone())) {
                             self.history_pending += 1;
@@ -1030,6 +1771,27 @@ impl MrtGuiApp {
                             tab.secondary_pane.as_mut().unwrap().blocks.push(block.clone());
                         } else {
                             tab.blocks.push(block.clone());
+                        }
+                        // "Compare with last snapshot" from the Task Manager
+                        if self.pending_ps_compare == Some(tab_id)
+                            && is_process_block(&block.command, &block.shell_name)
+                            && block.command.starts_with(":ps")
+                        {
+                            self.pending_ps_compare = None;
+                            let previous = tab
+                                .blocks
+                                .iter()
+                                .rev()
+                                .filter(|b| b.id != block.id)
+                                .find(|b| {
+                                    is_process_block(&b.command, &b.shell_name)
+                                        && b.command.starts_with(":ps")
+                                        && b.exit_code == Some(0)
+                                })
+                                .map(|b| b.id);
+                            if let Some(previous) = previous {
+                                tab.comparison = Some((previous, block.id));
+                            }
                         }
                     }
                     self.sync_mcp_from_gui();
@@ -1164,6 +1926,14 @@ impl MrtGuiApp {
             return;
         }
 
+        // 3. Toolbox and Task Manager commands (`:toolbox`, `:ps`, `:top`, `:proc`, `:kill`, `:watch-proc`)
+        if raw_input.starts_with(':') && self.try_process_command(tab_id, &cwd, &raw_input) {
+            return;
+        }
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) else {
+            return;
+        };
+
         if raw_input.eq_ignore_ascii_case(":report") || raw_input.eq_ignore_ascii_case(":bug") {
             let last_failed_idx = tab
                 .blocks
@@ -1246,6 +2016,7 @@ impl MrtGuiApp {
                     assessment,
                     shell,
                     cwd,
+                    kill: None,
                 });
                 return;
             }
@@ -1303,6 +2074,12 @@ impl MrtGuiApp {
 
     fn approve_pending_command(&mut self) {
         if let Some(pending) = self.pending_safety.take() {
+            if let Some(kill) = pending.kill {
+                if self.tabs.iter().any(|tab| tab.id == pending.tab_id) {
+                    self.spawn_kill_execution(pending.tab_id, pending.cwd, pending.assessment.command, kill);
+                }
+                return;
+            }
             if self.tabs.iter().any(|tab| tab.id == pending.tab_id) {
                 let block_id = self.spawn_shell_command(
                     pending.tab_id,
@@ -1422,6 +2199,7 @@ impl MrtGuiApp {
                 assessment,
                 shell,
                 cwd,
+                kill: None,
             });
             return;
         }
@@ -1442,11 +2220,17 @@ impl MrtGuiApp {
         }
         let output = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         self.running_output.insert(block_id, (tab_id, output.clone()));
+        let running_pids = self.running_pids.clone();
         let tx = self.tx.clone();
         self.busy_count += 1;
         self.runtime.spawn(async move {
             let cwd_str = cwd.display().to_string();
-            match execute_command_streaming(&shell, &raw_input, &cwd, |chunk| {
+            let on_spawn = |pid: u32| {
+                if let Ok(mut pids) = running_pids.lock() {
+                    pids.insert(block_id, pid);
+                }
+            };
+            match execute_command_streaming_with_pid(&shell, &raw_input, &cwd, on_spawn, |chunk| {
                 if let Ok(mut pending) = output.lock() { pending.push_str(chunk); }
             }).await {
                 Ok(res) => {
@@ -1675,6 +2459,8 @@ impl MrtGuiApp {
         let cwd = tab.cwd.clone();
 
         match event {
+            SidePanelEvent::OpenProcessInTaskManager(pid) => self.open_task_manager(Some(pid)),
+            SidePanelEvent::TaskManager(ev) => self.handle_task_manager_event(tab_id, cwd, ev),
             SidePanelEvent::InvokeMcpTool {
                 server_name,
                 tool_name,
@@ -2228,8 +3014,8 @@ impl MrtGuiApp {
                 if nav_row(ui, "🔌", "MCP Hub", None, self.side_state.show_mcp_panel, compact).clicked() {
                     self.side_state.show_mcp_panel = !self.side_state.show_mcp_panel;
                 }
-                if nav_row(ui, "🌐", "Internet Studio", None, self.side_state.show_internet_panel, compact).clicked() {
-                    self.side_state.show_internet_panel = !self.side_state.show_internet_panel;
+                if nav_row(ui, "🧰", "Toolbox", None, self.side_state.show_toolbox_panel, compact).clicked() {
+                    self.side_state.show_toolbox_panel = !self.side_state.show_toolbox_panel;
                 }
                 if nav_row(ui, "⊞", "Mosaic", None, self.mosaic, compact).clicked() {
                     self.mosaic = !self.mosaic;
@@ -2366,6 +3152,7 @@ impl eframe::App for MrtGuiApp {
         self.process_history_events();
         self.process_mcp_ui_commands();
         self.process_tui_session(ctx);
+        self.maybe_spawn_process_tick();
 
         ctx.request_repaint_after(std::time::Duration::from_millis(if self.busy_count > 0 || self.history_pending > 0 {
             50
@@ -2514,7 +3301,7 @@ impl eframe::App for MrtGuiApp {
             }
         }
 
-        // Right-hand Side Panels (MCP Hub & Internet Studio)
+        // Right-hand Side Panels (MCP Hub & Toolbox)
         let mut panel_event = None;
         if self.side_state.show_mcp_panel {
             egui::SidePanel::right("mrt_mcp_panel").frame(panel_frame())
@@ -2531,12 +3318,12 @@ impl eframe::App for MrtGuiApp {
                     }
                 });
         }
-        if self.side_state.show_internet_panel {
-            egui::SidePanel::right("mrt_internet_panel").frame(panel_frame())
-                .default_width(330.0)
+        if self.side_state.show_toolbox_panel {
+            egui::SidePanel::right("mrt_toolbox_panel").frame(panel_frame())
+                .default_width(380.0)
                 .resizable(true)
                 .show(ctx, |ui| {
-                    if let Some(ev) = render_internet_side_panel(ui, &mut self.side_state) {
+                    if let Some(ev) = render_toolbox_side_panel(ui, &mut self.side_state) {
                         panel_event = Some(ev);
                     }
                 });
@@ -2918,6 +3705,7 @@ impl eframe::App for MrtGuiApp {
                                     for (keys, hint) in [
                                         ("#", "Describe what you want and AI writes the command"),
                                         (":http  :dns  :ports  :web", "Built-in network tools"),
+                                        (":ps  :top  :kill", "Task Manager and process tools"),
                                         ("Ctrl K", "Command palette"),
                                     ] {
                                         ui.horizontal(|ui| {
@@ -2973,6 +3761,7 @@ impl eframe::App for MrtGuiApp {
 
             if let Some(ref pending) = self.pending_safety {
                 let critical = pending.assessment.risk == RiskLevel::Critical;
+                let is_kill = pending.kill.is_some();
                 let width = (ctx.screen_rect().width() - 80.0).clamp(320.0, 720.0);
                 egui::Window::new("MRT Safety Gate")
                     .title_bar(false)
@@ -3002,10 +3791,11 @@ impl eframe::App for MrtGuiApp {
                             ui.vertical(|ui| {
                                 ui.horizontal(|ui| {
                                     ui.label(
-                                        RichText::new(if critical {
-                                            "This command can’t be undone"
-                                        } else {
-                                            "Check this command before it runs"
+                                        RichText::new(match (is_kill, critical) {
+                                            (true, true) => "Stopping this can destabilise your system",
+                                            (true, false) => "Stop these processes?",
+                                            (false, true) => "This command can’t be undone",
+                                            (false, false) => "Check this command before it runs",
                                         })
                                         .size(16.0)
                                         .strong()
@@ -3040,8 +3830,17 @@ impl eframe::App for MrtGuiApp {
                                 );
                             });
                         ui.add_space(6.0);
+                        let context_line = match &pending.kill {
+                            Some(kill) => format!(
+                                "Task Manager · {} target(s) · {}{}",
+                                kill.pids.len(),
+                                if kill.force { "force" } else { "graceful" },
+                                if kill.tree { " · whole tree" } else { "" }
+                            ),
+                            None => format!("{} · {}", pending.shell.name, pending.cwd.display()),
+                        };
                         ui.label(
-                            RichText::new(format!("{} · {}", pending.shell.name, pending.cwd.display()))
+                            RichText::new(context_line)
                                 .size(12.0)
                                 .monospace()
                                 .color(Color32::from_rgb(189, 179, 172)),
@@ -3051,7 +3850,7 @@ impl eframe::App for MrtGuiApp {
                             ui.label(RichText::new("Esc to cancel").size(12.0).color(Color32::from_rgb(189, 179, 172)));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 let run = egui::Button::new(
-                                    RichText::new("Run anyway")
+                                    RichText::new(if is_kill { "Stop process" } else { "Run anyway" })
                                         .strong()
                                         .color(Color32::from_rgb(31, 10, 10)),
                                 )
@@ -3166,7 +3965,7 @@ impl eframe::App for MrtGuiApp {
                         .show(ui, |ui| {
                             egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
                                 ui.set_width(ui.available_width());
-                                let sections: [(&str, &str, &[(&str, &str)]); 3] = [
+                                let sections: [(&str, &str, &[(&str, &str)]); 4] = [
                                     (
                                         "Layout",
                                         "‖",
@@ -3181,11 +3980,25 @@ impl eframe::App for MrtGuiApp {
                                         "Tools",
                                         "🌐",
                                         &[
+                                            ("Open Toolbox network tools", ":toolbox network"),
                                             ("Scan listening TCP/UDP ports", ":ports"),
                                             ("DNS and latency trace", ":dns google.com"),
                                             ("HTTP GET sample JSON API", ":http GET https://httpbin.org/json"),
                                             ("Read a web page as Markdown", ":web https://www.rust-lang.org"),
                                             ("Test the Safety Gate", "rm -rf ./important_production_data"),
+                                        ],
+                                    ),
+                                    (
+                                        "Processes",
+                                        "📈",
+                                        &[
+                                            ("Show processes (Task Manager)", ":toolbox task-manager"),
+                                            ("List processes by CPU", ":ps"),
+                                            ("List processes by memory", ":ps --sort mem"),
+                                            ("Processes started by MRT", ":ps --mrt --tree"),
+                                            ("Live process monitor", ":top"),
+                                            ("Kill process…", ":kill"),
+                                            ("List process watches", ":watch-proc list"),
                                         ],
                                     ),
                                     (
@@ -3349,6 +4162,7 @@ mod tests {
             assessment: assess_command("echo approval-test"),
             shell: shell.clone(),
             cwd: cwd.clone(),
+            kill: None,
         });
         app.tabs.push(TerminalTab::new("Other".into(), 0, cwd.join("missing-directory")));
         app.active_tab = 1;
@@ -3375,6 +4189,7 @@ mod tests {
             assessment: assess_command("echo approval-test"),
             shell: app.shells[0].clone(),
             cwd: app.tabs[0].cwd.clone(),
+            kill: None,
         });
         app.approve_pending_command();
         assert_eq!(app.busy_count, 0);
@@ -3743,5 +4558,196 @@ mod tests {
         assert!(!app.tabs[0].blocks.is_empty());
         let last_blk = app.tabs[0].blocks.last().unwrap();
         assert!(last_blk.command.contains("interactive_tui_test"));
+    }
+
+    /// Waits for the next worker event and feeds it back through the GUI event loop.
+    fn pump_one(app: &mut MrtGuiApp) {
+        let event = app
+            .rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("worker event");
+        app.tx.send(event).unwrap();
+        app.process_async_events();
+    }
+
+    fn spawn_sleeper() -> std::process::Child {
+        let mut cmd = if cfg!(target_os = "windows") {
+            let mut c = std::process::Command::new("ping");
+            c.args(["-n", "60", "127.0.0.1"]);
+            c
+        } else {
+            let mut c = std::process::Command::new("sleep");
+            c.arg("60");
+            c
+        };
+        cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000);
+        }
+        cmd.spawn().expect("spawn sleeper")
+    }
+
+    #[test]
+    fn command_args_matches_whole_words_only() {
+        assert_eq!(command_args(":ps node", ":ps"), Some(" node"));
+        assert_eq!(command_args(":ps", ":ps"), Some(""));
+        assert_eq!(command_args(":psql", ":ps"), None);
+    }
+
+    #[test]
+    fn ps_command_renders_a_process_table_block() {
+        let mut app = MrtGuiApp::new();
+        let me = std::process::id();
+        app.submit_input(Some(format!(":ps {me}")), false);
+        pump_one(&mut app);
+        let block = app.tabs[0].blocks.last().unwrap();
+        assert_eq!(block.shell_name, PROCESS_BLOCK_SHELL);
+        assert_eq!(block.exit_code, Some(0));
+        match &block.structured {
+            StructuredOutput::Table { headers, rows } => {
+                assert_eq!(headers[0], "PID");
+                assert!(rows.iter().any(|r| r[0] == me.to_string()));
+            }
+            other => panic!("expected table, got {other:?}"),
+        }
+        assert_eq!(app.busy_count, 0);
+    }
+
+    #[test]
+    fn proc_command_renders_details() {
+        let mut app = MrtGuiApp::new();
+        app.submit_input(Some(format!(":proc {}", std::process::id())), false);
+        pump_one(&mut app);
+        let block = app.tabs[0].blocks.last().unwrap();
+        assert_eq!(block.exit_code, Some(0), "{}", block.plain_output);
+        assert!(block.plain_output.contains("Listening ports"));
+    }
+
+    #[test]
+    fn killing_mrt_itself_is_critical_and_waits_for_approval() {
+        let mut app = MrtGuiApp::new();
+        app.submit_input(Some(format!(":kill {}", std::process::id())), false);
+        pump_one(&mut app);
+        let pending = app.pending_safety.as_ref().expect("Safety Gate opened");
+        assert_eq!(pending.assessment.risk, RiskLevel::Critical);
+        assert!(pending.kill.is_some());
+        // Cancelling leaves MRT running and adds no block.
+        app.pending_safety = None;
+        assert!(app.tabs[0].blocks.is_empty());
+    }
+
+    #[test]
+    fn approved_kill_stops_a_child_process() {
+        let mut app = MrtGuiApp::new();
+        let mut child = spawn_sleeper();
+        let pid = child.id();
+        app.submit_input(Some(format!(":kill {pid} --force")), false);
+        pump_one(&mut app);
+        let pending = app.pending_safety.as_ref().expect("Safety Gate opened");
+        assert_eq!(pending.assessment.risk, RiskLevel::Moderate, "{}", pending.assessment.reason);
+        assert!(pending.assessment.requires_approval);
+        app.approve_pending_command();
+        pump_one(&mut app);
+        let block = app.tabs[0].blocks.last().unwrap();
+        assert_eq!(block.exit_code, Some(0), "{}", block.plain_output);
+        assert!(block.plain_output.contains("stopped"));
+        let status = child.wait().expect("child reaped");
+        assert!(!status.success());
+    }
+
+    #[test]
+    fn gui_kill_request_from_mcp_opens_the_safety_gate() {
+        let mut app = MrtGuiApp::new();
+        let mut child = spawn_sleeper();
+        let gui_tx = app.mcp_host.local_server_state.gui_tx.clone().unwrap();
+        gui_tx
+            .send(GuiUiCommand::RequestProcessKill { pids: vec![child.id()], force: true, tree: false })
+            .unwrap();
+        app.process_mcp_ui_commands();
+        pump_one(&mut app);
+        assert!(app.pending_safety.as_ref().is_some_and(|p| p.kill.is_some()));
+        app.pending_safety = None;
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn stop_button_kills_a_running_command_tree() {
+        let mut app = MrtGuiApp::new();
+        let cmd = if cfg!(target_os = "windows") { "ping -n 60 127.0.0.1" } else { "sleep 60" };
+        let block_id = app.spawn_shell_command(
+            app.tabs[0].id,
+            app.shells[0].clone(),
+            app.tabs[0].cwd.clone(),
+            cmd.to_string(),
+        );
+        let start = Instant::now();
+        while app.running_pids.lock().unwrap().get(&block_id).is_none() && start.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let pid = *app.running_pids.lock().unwrap().get(&block_id).expect("shell pid recorded");
+        assert!(app.owned_processes().contains_key(&pid));
+        app.handle_block_action(BlockAction::StopBlock(block_id));
+        let start = Instant::now();
+        loop {
+            pump_one(&mut app);
+            let done = app.tabs[0]
+                .blocks
+                .iter()
+                .find(|b| b.id == block_id)
+                .is_some_and(|b| b.exit_code.is_some());
+            if done || start.elapsed() > Duration::from_secs(20) {
+                break;
+            }
+        }
+        let block = app.tabs[0].blocks.iter().find(|b| b.id == block_id).unwrap();
+        assert!(block.exit_code.is_some_and(|c| c != 0), "stopped command should report failure");
+        assert!(app.running_pids.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn watches_and_toolbox_commands() {
+        let mut app = MrtGuiApp::new();
+        app.submit_input(Some(":toolbox task-manager".into()), false);
+        assert!(app.side_state.show_toolbox_panel);
+        assert_eq!(app.side_state.toolbox_tab, ToolboxTab::TaskManager);
+        assert!(app.force_process_tick);
+
+        app.submit_input(Some(":watch-proc node --mem 2GB".into()), false);
+        assert_eq!(app.process_watches.len(), 1);
+        app.submit_input(Some(":watch-proc list".into()), false);
+        assert!(app.tabs[0].blocks.last().unwrap().plain_output.contains("mem >"));
+        app.submit_input(Some(":watch-proc --cpu".into()), false);
+        assert_eq!(app.tabs[0].blocks.last().unwrap().exit_code, Some(1));
+        app.submit_input(Some(":unwatch-proc 1".into()), false);
+        assert!(app.process_watches.is_empty());
+
+        // A snapshot tick feeds the Task Manager without touching busy_count.
+        app.maybe_spawn_process_tick();
+        assert!(app.process_tick_in_flight);
+        pump_one(&mut app);
+        assert!(!app.process_tick_in_flight);
+        assert!(app.side_state.task_manager.snapshot.is_some());
+        assert_eq!(app.busy_count, 0);
+    }
+
+    #[test]
+    fn live_top_updates_in_place_and_stops() {
+        let mut app = MrtGuiApp::new();
+        app.submit_input(Some(":top --limit 5".into()), false);
+        let block_id = app.live_top.as_ref().unwrap().block_id;
+        app.maybe_spawn_process_tick();
+        pump_one(&mut app);
+        let block = app.tabs[0].blocks.iter().find(|b| b.id == block_id).unwrap();
+        assert!(block.exit_code.is_none());
+        match &block.structured {
+            StructuredOutput::Table { rows, .. } => assert!(!rows.is_empty() && rows.len() <= 5),
+            other => panic!("expected table, got {other:?}"),
+        }
+        app.handle_block_action(BlockAction::StopBlock(block_id));
+        assert!(app.live_top.is_none());
+        assert_eq!(app.tabs[0].blocks.iter().find(|b| b.id == block_id).unwrap().exit_code, Some(0));
     }
 }

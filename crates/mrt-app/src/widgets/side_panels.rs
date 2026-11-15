@@ -1,9 +1,15 @@
 use crate::theme::Palette;
+use crate::widgets::task_manager::{TaskManagerEvent, TaskManagerState};
+use crate::widgets::toolbox::ToolboxTab;
 use egui::{RichText, Ui};
 use mrt_mcp::McpHostManager;
+use mrt_tools::{PortEntry, ProcessSnapshot};
 use serde_json::Value;
 
 pub enum SidePanelEvent {
+    /// A PID link was clicked: open the Toolbox on the Task Manager tab with it selected.
+    OpenProcessInTaskManager(u32),
+    TaskManager(TaskManagerEvent),
     InvokeMcpTool {
         server_name: String,
         tool_name: String,
@@ -34,7 +40,12 @@ pub enum SidePanelEvent {
 
 pub struct SidePanelState {
     pub show_mcp_panel: bool,
-    pub show_internet_panel: bool,
+    pub show_toolbox_panel: bool,
+    pub toolbox_tab: ToolboxTab,
+    pub task_manager: TaskManagerState,
+    /// Rows of the most recent `:ports` scan, shown in the Network tab and used by the
+    /// Task Manager to list what the selected process listens on.
+    pub last_ports: Vec<PortEntry>,
     pub new_mcp_name: String,
     pub new_mcp_cmd: String,
     pub new_mcp_args: String,
@@ -52,7 +63,10 @@ impl Default for SidePanelState {
     fn default() -> Self {
         Self {
             show_mcp_panel: false,
-            show_internet_panel: false,
+            show_toolbox_panel: false,
+            toolbox_tab: ToolboxTab::default(),
+            task_manager: TaskManagerState::default(),
+            last_ports: Vec::new(),
             new_mcp_name: "custom-mcp".to_string(),
             new_mcp_cmd: "mrt".to_string(),
             new_mcp_args: "--mcp-server".to_string(),
@@ -286,20 +300,17 @@ pub fn render_mcp_side_panel(
     event
 }
 
-pub fn render_internet_side_panel(
+/// Network tab of the Toolbox: HTTP inspector, web reader, port scanner, DNS tracer and
+/// WebSocket inspector. `processes` (when available) names the PIDs in the port list.
+pub fn render_network_tab(
     ui: &mut Ui,
     state: &mut SidePanelState,
+    processes: Option<&ProcessSnapshot>,
 ) -> Option<SidePanelEvent> {
     let mut event = None;
 
     ui.label(
-        RichText::new("Internet & Network")
-            .size(15.0)
-            .strong()
-            .color(Palette::TEXT_PRIMARY),
-    );
-    ui.label(
-        RichText::new("Built-in HTTP client, web reader, and port scanner")
+        RichText::new("HTTP client, web reader, ports, DNS and WebSocket tools")
             .size(11.5)
             .color(Palette::TEXT_SECONDARY),
     );
@@ -381,6 +392,50 @@ pub fn render_internet_side_panel(
     );
     if ui.button("Scan Ports").clicked() {
         event = Some(SidePanelEvent::RunPortScanner);
+    }
+    if !state.last_ports.is_empty() {
+        ui.label(
+            RichText::new(format!("Last scan · {} listeners · click a PID to open it in the Task Manager", state.last_ports.len()))
+                .size(11.0)
+                .color(Palette::TEXT_MUTED),
+        );
+        egui::ScrollArea::vertical()
+            .id_salt("network_last_ports")
+            .max_height(160.0)
+            .show(ui, |ui| {
+                egui::Grid::new("network_last_ports_grid")
+                    .striped(true)
+                    .spacing([10.0, 2.0])
+                    .show(ui, |ui| {
+                        for p in &state.last_ports {
+                            ui.label(
+                                RichText::new(format!("{} {}:{}", p.protocol, p.local_address, p.port))
+                                    .monospace()
+                                    .size(11.5)
+                                    .color(Palette::TEXT_BODY),
+                            );
+                            match p.pid.trim().parse::<u32>().ok().filter(|pid| *pid > 0) {
+                                Some(pid) => {
+                                    let name = processes
+                                        .and_then(|s| s.get(pid))
+                                        .map(|e| format!("{pid} · {}", e.name))
+                                        .unwrap_or_else(|| pid.to_string());
+                                    if ui
+                                        .link(RichText::new(name).size(11.5))
+                                        .on_hover_text("Open in the Task Manager")
+                                        .clicked()
+                                    {
+                                        event = Some(SidePanelEvent::OpenProcessInTaskManager(pid));
+                                    }
+                                }
+                                None => {
+                                    ui.label(RichText::new(&p.pid).size(11.5).color(Palette::TEXT_MUTED));
+                                }
+                            }
+                            ui.end_row();
+                        }
+                    });
+            });
     }
 
     ui.add_space(10.0);
@@ -481,6 +536,9 @@ fn default_args_for_tool(tool_name: &str) -> String {
                 .collect(),
         ))
         .unwrap_or_else(|_| "{}".into()),
+        "mrt_list_processes" => serde_json::json!({ "sort": "cpu", "limit": 20 }).to_string(),
+        "mrt_inspect_process" => serde_json::json!({ "pid": std::process::id() }).to_string(),
+        "mrt_kill_process" => serde_json::json!({ "name": "process-name-here", "force": false }).to_string(),
         _ => "{}".to_string(),
     }
 }

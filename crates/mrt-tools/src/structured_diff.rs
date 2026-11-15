@@ -33,6 +33,13 @@ pub enum StructuredDiffKind {
         removed_listeners: Vec<String>,
         unchanged_count: usize,
     },
+    /// Two `:ps` / `:top` snapshots: processes started, exited, or whose memory grew.
+    ProcessesDelta {
+        started: Vec<String>,
+        exited: Vec<String>,
+        memory_grown: Vec<String>,
+        unchanged_count: usize,
+    },
     Text {
         diff_lines: Vec<(String, ChangeType)>,
     },
@@ -114,6 +121,38 @@ pub fn diff_json_paths(
 
 /// Compares two command blocks with awareness of JSON and port snapshots.
 pub fn compare_blocks_structured(prev: &CommandBlock, curr: &CommandBlock) -> StructuredDiffReport {
+    // 0. Process snapshots (`:ps` / `:top`)
+    if crate::process_inspector::is_process_block(&prev.command, &prev.shell_name)
+        && crate::process_inspector::is_process_block(&curr.command, &curr.shell_name)
+    {
+        if let (Some(before), Some(after)) = (
+            crate::process_inspector::entries_from_table(&prev.structured),
+            crate::process_inspector::entries_from_table(&curr.structured),
+        ) {
+            let report = crate::process_inspector::compare_process_snapshots(&before, &after);
+            let kind = if report.is_empty() {
+                StructuredDiffKind::Identical {
+                    summary: format!(
+                        "Process snapshots identical ({} processes unchanged).",
+                        report.unchanged_count
+                    ),
+                }
+            } else {
+                StructuredDiffKind::ProcessesDelta {
+                    started: report.started_lines(),
+                    exited: report.exited_lines(),
+                    memory_grown: report.memory_lines(),
+                    unchanged_count: report.unchanged_count,
+                }
+            };
+            return StructuredDiffReport {
+                previous_cmd: prev.command.clone(),
+                current_cmd: curr.command.clone(),
+                kind,
+            };
+        }
+    }
+
     // 1. Check for JSON comparison
     let prev_json = match &prev.structured {
         StructuredOutput::Json(v) => Some(v.clone()),
@@ -290,6 +329,49 @@ mod tests {
                 assert!(modified_paths.iter().any(|m| m.path == "theme"));
             }
             _ => panic!("Expected JSON diff"),
+        }
+    }
+
+    #[test]
+    fn test_compare_process_snapshots_delta() {
+        let headers: Vec<String> = crate::process_inspector::PROCESS_TABLE_HEADERS
+            .iter()
+            .map(|h| h.to_string())
+            .collect();
+        let row = |pid: &str, name: &str, mem: &str| -> Vec<String> {
+            vec![pid.into(), "1".into(), name.into(), "0.0".into(), mem.into(), "dev".into(), "Run".into(), "".into(), name.into()]
+        };
+        let b1 = CommandBlock::new_structured(
+            ":ps",
+            "mrt-proc",
+            ".",
+            String::new(),
+            StructuredOutput::Table {
+                headers: headers.clone(),
+                rows: vec![row("10", "node", "100.0 MB"), row("11", "vite", "50.0 MB")],
+            },
+            0,
+            5,
+        );
+        let b2 = CommandBlock::new_structured(
+            ":ps",
+            "mrt-proc",
+            ".",
+            String::new(),
+            StructuredOutput::Table {
+                headers,
+                rows: vec![row("10", "node", "400.0 MB"), row("12", "cargo", "20.0 MB")],
+            },
+            0,
+            5,
+        );
+        match compare_blocks_structured(&b1, &b2).kind {
+            StructuredDiffKind::ProcessesDelta { started, exited, memory_grown, .. } => {
+                assert!(started[0].contains("cargo"));
+                assert!(exited[0].contains("vite"));
+                assert!(memory_grown[0].contains("node"));
+            }
+            other => panic!("Expected ProcessesDelta, got {other:?}"),
         }
     }
 

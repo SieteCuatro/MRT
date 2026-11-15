@@ -2,6 +2,7 @@ pub mod bug_reporter;
 pub mod dns_inspector;
 pub mod http_inspector;
 pub mod net_inspector;
+pub mod process_inspector;
 pub mod structured_diff;
 pub mod web_fetch;
 pub mod ws_inspector;
@@ -9,7 +10,16 @@ pub mod ws_inspector;
 pub use bug_reporter::{generate_markdown_bug_report, redact_sensitive_text};
 pub use dns_inspector::{inspect_dns, parse_dns_query, DnsRecordEntry, DnsTraceReport};
 pub use http_inspector::{execute_http_request, parse_http_command, HttpRequestSpec};
-pub use net_inspector::{inspect_listening_ports, PortEntry};
+pub use net_inspector::{inspect_listening_ports, list_listening_ports, PortEntry};
+pub use process_inspector::{
+    compare_process_snapshots, entries_from_table, format_bytes, inspect_process,
+    is_process_block, kill_outcomes_markdown, owner_label, parse_kill_command, parse_ps_command,
+    parse_watch_command, plan_kill, process_details_markdown, processes_to_table,
+    query_processes, snapshot_summary, KillOutcome, KillPlan, KillRequest, KillStatus,
+    OwnedProcess, OwnedProcessKind, OwnedProcessMap, ProcessDetails, ProcessDiffReport,
+    ProcessEntry, ProcessQuery, ProcessRow, ProcessSelector, ProcessSnapshot, ProcessSort,
+    ProcessWatch, ProcessWatchSpec, SharedProcessSampler, WatchAlert, PROCESS_BLOCK_SHELL,
+};
 pub use structured_diff::{
     canonicalize_json, compare_blocks_structured, ChangeType, JsonFieldChange, StructuredDiffKind,
     StructuredDiffReport,

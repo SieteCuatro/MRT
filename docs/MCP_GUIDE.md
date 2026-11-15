@@ -1,7 +1,7 @@
 # In-Depth MCP Guide (`mrt-mcp`)
 
 **Modern Rust Terminal (MRT)** implements a **Dual-Mode Model Context Protocol (MCP)** engine in [`crates/mrt-mcp`](../crates/mrt-mcp). MRT acts as both:
-1. **An MCP Server (`mrt --mcp-server` + Live GUI Bridge)**: Exposes multi-tab session management, polyglot command execution (protected by the MRT Safety Gate), interactive PTY sessions, block inspection/diffing/AI diagnosis, live GUI control, and built-in internet tools to external AI agents (Antigravity, Claude Desktop, Cursor, Windsurf, Codex, OpenHands).
+1. **An MCP Server (`mrt --mcp-server` + Live GUI Bridge)**: Exposes multi-tab session management, polyglot command execution (protected by the MRT Safety Gate), interactive PTY sessions, block inspection/diffing/AI diagnosis, live GUI control, built-in network tools, and a Task Manager to external AI agents (Antigravity, Claude Desktop, Cursor, Windsurf, Codex, OpenHands).
 2. **An MCP Host / Client**: Connects to external MCP servers (`stdio` JSON-RPC 2.0) directly inside the MRT GUI's **MCP Hub** side panel and makes their tools callable from your terminal blocks and AI assistant.
 
 ---
@@ -54,7 +54,7 @@ Open the **MCP Hub** side panel inside MRT and click **Copy MCP Config**, or add
 
 ---
 
-## 3. Complete MCP Server Tool Reference (27 Tools)
+## 3. Complete MCP Server Tool Reference (31 Tools)
 
 All built-in tools are defined in [`MrtMcpServerState::built_in_tools()`](../crates/mrt-mcp/src/server.rs).
 
@@ -68,7 +68,7 @@ All built-in tools are defined in [`MrtMcpServerState::built_in_tools()`](../cra
 | **`mrt_switch_tab`** | Switches the active terminal tab by UUID, 0-based index, or title substring. | `tab_id` *(required)* |
 | **`mrt_close_tab`** | Closes a tab by UUID, index, or title substring (always keeps at least 1 tab open). | `tab_id` *(required)* |
 | **`mrt_configure_tab`** | Updates a tab's shell profile, working directory (`cwd`), or title. | `tab_id?`, `shell?`, `cwd?`, `title?` |
-| **`mrt_control_gui`** | Controls the live MRT GUI: sets/submits the prompt bar (honoring the GUI Safety Gate modal), toggles Mosaic mode with its arrangement (`grid`, `columns`, `rows`, `focus`) and grid columns, or toggles the Folder Explorer. | `tab_id?`, `input_text?`, `submit_input?`, `mosaic?`, `mosaic_columns?`, `mosaic_layout?`, `explorer?` |
+| **`mrt_control_gui`** | Controls the live MRT GUI: sets/submits the prompt bar (honoring the GUI Safety Gate modal), toggles Mosaic mode with its arrangement (`grid`, `columns`, `rows`, `focus`) and grid columns, toggles the Folder Explorer, or opens the Toolbox panel on a tab (`"network"`, `"task_manager"`, `true`/`false`, `"hidden"`). | `tab_id?`, `input_text?`, `submit_input?`, `mosaic?`, `mosaic_columns?`, `mosaic_layout?`, `explorer?`, `toolbox?` |
 
 ### 3.2 Command Execution & Block Inspection
 
@@ -82,7 +82,7 @@ All built-in tools are defined in [`MrtMcpServerState::built_in_tools()`](../cra
 | **`mrt_diagnose_block`** | Runs MRT's shell-aware AI Error Triage on a `CommandBlock` and attaches the explanation and suggested fix to the block. | `block_id` *(required)* |
 | **`mrt_clear_blocks`** | Clears command blocks in a target tab or across all tabs (`all: true`). | `tab_id?`, `all?` |
 
-> **Safety Gate Protection**: `mrt_run_command`, `mrt_pty_spawn`, and `mrt_pty_write` evaluate commands with `mrt_core::assess_command`. Commands classified as `RiskLevel::Critical` (e.g., `rm -rf`, `Remove-Item -Recurse -Force`, `del /s /q`, `DROP TABLE`, `git reset --hard`) are blocked with `isError: true`. When using `mrt_control_gui` with `submit_input: true`, `Critical` commands trigger the interactive Safety Approval Gate modal inside the MRT GUI for human confirmation.
+> **Safety Gate Protection**: `mrt_run_command`, `mrt_pty_spawn`, and `mrt_pty_write` evaluate commands with `mrt_core::assess_command`. Commands classified as `RiskLevel::Critical` (e.g., `rm -rf`, `Remove-Item -Recurse -Force`, `del /s /q`, `DROP TABLE`, `git reset --hard`) are blocked with `isError: true`. When using `mrt_control_gui` with `submit_input: true`, `Critical` commands trigger the interactive Safety Approval Gate modal inside the MRT GUI for human confirmation. Process-control commands (`kill`, `pkill`, `taskkill`, `Stop-Process`, …) aimed at OS-critical processes are Critical too; use `mrt_kill_process` to stop processes through the Gate.
 
 ### 3.3 Interactive PTY & Background Process Control
 
@@ -107,11 +107,22 @@ All built-in tools are defined in [`MrtMcpServerState::built_in_tools()`](../cra
 | **`mrt_generate_bug_report`** | Generates a GitHub-flavored Markdown issue report for a failed command block with automatic secret token redaction. | `block_id` *(required)* |
 | **`mrt_inspect_ws`** | Connects to a WebSocket endpoint (`ws://` or `wss://`), measures handshake latency, logs frames with timestamps, and optionally sends an initial probe frame. | `url` *(required)*, `initial_message?`, `timeout_ms?` (default `3000`) |
 
+### 3.5 Task Manager & Process Control
+
+| Tool | Description | Key Parameters |
+| :--- | :--- | :--- |
+| **`mrt_list_processes`** | Lists running processes (PID, parent, name, CPU %, memory, user, status, command line) with `mrt_owner` naming the MRT tab, TUI overlay or PTY that started each one. | `filter?`, `sort?` (`cpu`, `mem`, `pid`, `name`), `limit?` (default `50`), `tree?`, `only_mrt?` |
+| **`mrt_inspect_process`** | Details of one process: command line, executable, working directory, user, CPU/memory, ancestors, child tree, listening ports, MRT ownership. | `pid` *(required)* |
+| **`mrt_kill_process`** | Requests stopping processes through the Safety Approval Gate. Critical targets (OS processes, MRT itself or its parents, other users' processes, names matching several PIDs) are always blocked. With the GUI attached, the request opens the approval modal and returns `pending_approval`; headless, only processes MRT started can be stopped. | `pid?` or `name?`, `force?`, `tree?` |
+| **`mrt_compare_process_snapshots`** | Lists processes that started, exited or grew in memory, between two `:ps` blocks or between now and the baseline saved by the previous call. | `previous_block_id?`, `current_block_id?`, `reset_baseline?` |
+
+See the [Toolbox guide](TOOLBOX.md#6-task-manager--process-tools-process_inspectorrs) for the classification rules.
+
 ---
 
 ## 4. MCP Resources Exposed by MRT
 
-External MCP clients can list and read four native MCP resources via `resources/list` and `resources/read`:
+External MCP clients can list and read five native MCP resources via `resources/list` and `resources/read`:
 
 | Resource URI | MIME Type | Description |
 | :--- | :--- | :--- |
@@ -119,6 +130,7 @@ External MCP clients can list and read four native MCP resources via `resources/
 | `mrt://session/tabs` | `application/json` | Structured list of all open terminal tabs, active shell per tab, CWD, and block counts. |
 | `mrt://session/blocks` | `application/json` | Full serialized array of `CommandBlock` structs in the current session. |
 | `mrt://session/ptys` | `application/json` | Active and exited interactive PTY sessions with dimensions and exit status. |
+| `mrt://processes` | `application/json` | Top 100 running processes by CPU with memory, user, command line, and the MRT tab/PTY that started each one. |
 
 ---
 
@@ -126,7 +138,7 @@ External MCP clients can list and read four native MCP resources via `resources/
 
 Inside the MRT GUI, open the **MCP Hub** side panel on the right:
 1. **Live GUI Bridge Indicator**: Shows the active `127.0.0.1:<port>` bridge address and a **Copy MCP Config** button for external agents.
-2. **Built-in Loopback Server (`mrt-native-mcp`)**: Connected automatically on startup so you can test and invoke all 27 MRT MCP tools directly from the GUI.
+2. **Built-in Loopback Server (`mrt-native-mcp`)**: Connected automatically on startup so you can test and invoke all 31 MRT MCP tools directly from the GUI.
 3. **One-Click Server Presets**:
    - Quick-load preconfigured profiles for popular MCP servers:
      - **Filesystem**: `@modelcontextprotocol/server-filesystem`

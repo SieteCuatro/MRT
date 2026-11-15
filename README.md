@@ -18,11 +18,19 @@ Licensed under the [MIT License](LICENSE).
   - `:dns` — Resolves IPv4 (A) and IPv6 (AAAA) records, measures DNS lookup duration, and traces concurrent TCP handshake latency to all endpoints.
   - `:ws` — WebSocket client inspecting handshake latency, logging real-time frames with timing offsets, and sending probe messages.
   - `:report` / `:bug` — Generates GitHub-flavored Markdown bug reports with automatic redaction of sensitive credentials (API keys, tokens, private keys).
-  - `:diff` — Compares two command blocks with canonical JSON key ordering and listening port snapshot delta detection.
-- **MCP Host & Server (27 Native Tools)**:
-  - **MCP Server (`mrt --mcp-server`)**: Exposes 27 tools and 4 resources over JSON-RPC 2.0 (`stdio`), transparently proxying to a running GUI window via a local TCP bridge (`mcp-bridge.json`) or running standalone headless.
+  - `:diff` — Compares two command blocks with canonical JSON key ordering, listening port snapshot deltas, and process snapshot deltas.
+- **Task Manager & Process Tools**: A cross-platform task manager (`sysinfo`) in the **Toolbox** panel and at the prompt:
+  - `:ps` — Sortable, filterable process table (tree view, `--mrt` for processes started by MRT tabs, TUI overlays and PTYs).
+  - `:top` — Live process table refreshed in place every 2 seconds.
+  - `:proc <pid>` — Details, child tree, ancestors and listening ports of one process.
+  - `:kill <pid|name> [--force] [--tree]` — Stops processes through the Safety Approval Gate (OS-critical processes, MRT itself and other users' processes are Critical).
+  - `:watch-proc <pid|name> [--mem 2GB] [--cpu 90]` — Notifies the tab when a process crosses a threshold, starts, or exits.
+  - Running command blocks get a **■ Stop** button that stops the command's whole process tree; PIDs in `:ports` / `:ps` tables open the process in the Task Manager.
+- **Toolbox Panel**: One side panel with a **Network** tab (HTTP, web reader, ports, DNS, WebSocket) and a **Task Manager** tab, linked by PID.
+- **MCP Host & Server (31 Native Tools)**:
+  - **MCP Server (`mrt --mcp-server`)**: Exposes 31 tools and 5 resources over JSON-RPC 2.0 (`stdio`), transparently proxying to a running GUI window via a local TCP bridge (`mcp-bridge.json`) or running standalone headless.
   - **MCP Host**: Connects to external `stdio` MCP servers from the GUI's MCP Hub panel, with one-click presets for common servers (Filesystem, Git, Memory Graph, SQLite, Fetch).
-- **Safety Approval Gate**: Classifies commands (`Safe`, `Moderate`, `Critical`) across Bash, PowerShell, CMD/Batch, Git, SQL, and Kubernetes; prompts for confirmation in the GUI and blocks unapproved `Critical` commands over MCP.
+- **Safety Approval Gate**: Classifies commands (`Safe`, `Moderate`, `Critical`) across Bash, PowerShell, CMD/Batch, Git, SQL, Kubernetes, and process control (`kill`, `pkill`, `taskkill`, `Stop-Process`, …); prompts for confirmation in the GUI and blocks unapproved `Critical` commands over MCP.
 - **Provider-Agnostic AI with Streaming**: Translates natural-language prompts (`#` or `?`) into shell-specific commands and streams AI error diagnoses token-by-token directly into failed blocks, with an offline heuristic fallback when no API key is configured.
 - **Automated CI/CD Distribution**: Multi-platform release matrix in GitHub Actions publishing ready-to-use binaries for Windows (x86_64 ZIP), Linux (Ubuntu tar.gz), and macOS (Intel & Apple Silicon tar.gz).
 
@@ -62,7 +70,7 @@ MRT checks configured environment variables in the following order and falls bac
 - [Architecture Overview](docs/ARCHITECTURE.md) — 5-crate workspace design and data flow.
 - [MCP Guide](docs/MCP_GUIDE.md) — Tool schemas, resources, Live GUI Bridge, and client setup.
 - [Core & Polyglot Shells](docs/CORE_AND_SHELLS.md) — Shell discovery, PTY engine, VT parser, blocks, and Safety Gate.
-- [Internet & Network Tools](docs/INTERNET_TOOLS.md) — `:http`, `:web`, and `:ports` internals.
+- [Toolbox: Network Tools & Task Manager](docs/TOOLBOX.md) — `:http`, `:web`, `:ports`, `:dns`, `:ws`, `:ps`, `:top`, `:proc`, `:kill`, and `:watch-proc` internals.
 - [AI Providers & Error Triage](docs/AI_PROVIDERS_AND_AGENTS.md) — Provider resolution and command diagnosis.
 - [GUI & Widgets](docs/GUI_AND_WIDGETS.md) — Async architecture, block viewers, and side panels.
 - [Roadmap](ROADMAP.md) — Planned milestones and project ideas.

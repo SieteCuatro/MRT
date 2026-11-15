@@ -9,9 +9,12 @@ use mrt_core::{
     InteractivePty, RiskLevel, ShellProfile,
 };
 use mrt_tools::{
-    compare_blocks_structured, execute_http_request, fetch_url_as_markdown,
-    generate_markdown_bug_report, inspect_dns, inspect_listening_ports, inspect_websocket,
-    ChangeType, HttpRequestSpec, StructuredDiffKind,
+    compare_blocks_structured, compare_process_snapshots, execute_http_request,
+    fetch_url_as_markdown, generate_markdown_bug_report, inspect_dns, inspect_listening_ports,
+    inspect_process, inspect_websocket, owner_label, plan_kill, query_processes, ChangeType,
+    HttpRequestSpec, KillRequest, OwnedProcess, OwnedProcessKind, OwnedProcessMap,
+    ProcessQuery, ProcessSelector, ProcessSnapshot, ProcessSort, SharedProcessSampler,
+    StructuredDiffKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -54,6 +57,18 @@ pub enum GuiUiCommand {
         previous_block_id: Uuid,
         current_block_id: Uuid,
     },
+    /// Shows or hides the Toolbox side panel, optionally on a tab ("network", "task_manager").
+    SetToolbox {
+        visible: bool,
+        tab: Option<String>,
+    },
+    /// Asks the GUI to stop processes. The GUI re-plans the request against a fresh
+    /// snapshot and opens the Safety Approval Gate; nothing is stopped without approval.
+    RequestProcessKill {
+        pids: Vec<u32>,
+        force: bool,
+        tree: bool,
+    },
 }
 
 #[derive(Clone)]
@@ -65,6 +80,12 @@ pub struct MrtMcpServerState {
     pub ptys: Arc<Mutex<HashMap<Uuid, Arc<InteractivePty>>>>,
     pub shells: Vec<ShellProfile>,
     pub gui_tx: Option<Sender<GuiUiCommand>>,
+    /// Shared process sampler for the Task Manager tools.
+    pub process_sampler: SharedProcessSampler,
+    /// Processes started by MRT (GUI command blocks, TUI overlays, MCP PTYs), by PID.
+    pub owned_processes: Arc<Mutex<OwnedProcessMap>>,
+    /// Baseline for `mrt_compare_process_snapshots` when no block ids are given.
+    pub process_baseline: Arc<Mutex<Option<ProcessSnapshot>>>,
 }
 
 impl Default for MrtMcpServerState {
@@ -95,6 +116,9 @@ impl Default for MrtMcpServerState {
             ptys: Arc::new(Mutex::new(HashMap::new())),
             shells,
             gui_tx: None,
+            process_sampler: SharedProcessSampler::new(),
+            owned_processes: Arc::new(Mutex::new(HashMap::new())),
+            process_baseline: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -411,7 +435,8 @@ impl MrtMcpServerState {
                         "mosaic": { "type": "boolean", "description": "Optional toggle for Mosaic multi-terminal grid mode" },
                         "mosaic_columns": { "type": "integer", "description": "Optional column count (1..=6) for Mosaic grid mode" },
                         "mosaic_layout": { "type": "string", "enum": ["grid", "columns", "rows", "focus"], "description": "Optional Mosaic arrangement: even grid, side-by-side columns, stacked rows, or focus (active terminal large, others beside it)" },
-                        "explorer": { "type": "boolean", "description": "Optional toggle for the left Folder Explorer side panel" }
+                        "explorer": { "type": "boolean", "description": "Optional toggle for the left Folder Explorer side panel" },
+                        "toolbox": { "type": ["boolean", "string"], "description": "Optional: true/false toggles the Toolbox side panel; \"network\" or \"task_manager\" opens it on that tab; \"hidden\" closes it" }
                     }
                 }),
             },
@@ -494,7 +519,62 @@ impl MrtMcpServerState {
                     "required": ["url"]
                 }),
             },
+            McpTool {
+                name: "mrt_list_processes".into(),
+                description: "List running processes (PID, parent, name, CPU %, memory, user, status, command line) with the MRT tab/PTY that started each one, if any. Supports filtering, sorting, a process tree, and MRT-owned-only views.".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "filter": { "type": "string", "description": "Optional case-insensitive match on PID, name or command line" },
+                        "sort": { "type": "string", "enum": ["cpu", "mem", "pid", "name"], "description": "Sort order (default cpu)" },
+                        "limit": { "type": "integer", "description": "Maximum rows (default 50)" },
+                        "tree": { "type": "boolean", "description": "Arrange results as a parent/child tree (adds a depth field)" },
+                        "only_mrt": { "type": "boolean", "description": "Only processes started by MRT (tabs, TUI overlays, PTYs) and their children" }
+                    }
+                }),
+            },
+            McpTool {
+                name: "mrt_inspect_process".into(),
+                description: "Inspect one process: command line, executable, working directory, user, CPU/memory, ancestors, child tree, listening ports, and whether MRT started it.".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "pid": { "type": "integer", "description": "Process id" }
+                    },
+                    "required": ["pid"]
+                }),
+            },
+            McpTool {
+                name: "mrt_kill_process".into(),
+                description: "Request stopping processes through the MRT Safety Approval Gate. Critical targets (OS processes, MRT itself, other users' processes, names matching several PIDs) are always blocked. With the GUI attached, the request opens the approval modal and nothing stops until the user approves. Headless, only processes started by MRT can be stopped.".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "pid": { "type": "integer", "description": "Process id to stop" },
+                        "name": { "type": "string", "description": "Process name to stop (alternative to pid)" },
+                        "force": { "type": "boolean", "description": "Force kill (SIGKILL / TerminateProcess) instead of a graceful stop" },
+                        "tree": { "type": "boolean", "description": "Also stop all child processes" }
+                    }
+                }),
+            },
+            McpTool {
+                name: "mrt_compare_process_snapshots".into(),
+                description: "Compare process snapshots: processes started, exited, or whose memory grew. Pass two ':ps' block ids, or omit them to compare the current processes with the baseline saved by the previous call (the first call only saves a baseline).".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "previous_block_id": { "type": "string", "description": "Optional UUID of an earlier :ps block" },
+                        "current_block_id": { "type": "string", "description": "Optional UUID of a later :ps block" },
+                        "reset_baseline": { "type": "boolean", "description": "Save a new baseline without comparing" }
+                    }
+                }),
+            },
         ]
+    }
+
+    /// Owned-process map including live MCP PTYs.
+    pub fn owned_process_map(&self) -> OwnedProcessMap {
+        self.owned_processes.lock().map(|g| g.clone()).unwrap_or_default()
     }
 
     pub fn built_in_resources() -> Vec<McpResource> {
@@ -521,6 +601,12 @@ impl MrtMcpServerState {
                 uri: "mrt://session/ptys".into(),
                 name: "Interactive PTY Sessions".into(),
                 description: "Active and exited interactive background PTY sessions.".into(),
+                mime_type: "application/json".into(),
+            },
+            McpResource {
+                uri: "mrt://processes".into(),
+                name: "Running Processes".into(),
+                description: "Top 100 running processes by CPU with memory, user, command line and MRT ownership.".into(),
                 mime_type: "application/json".into(),
             },
         ]
@@ -614,6 +700,16 @@ pub async fn handle_mcp_jsonrpc(
                         })
                         .collect();
                     serde_json::to_string_pretty(&list).unwrap_or_else(|_| "[]".into())
+                }
+                "mrt://processes" => {
+                    let query = ProcessQuery {
+                        limit: Some(100),
+                        ..Default::default()
+                    };
+                    match list_processes_value(state, &query).await {
+                        Ok(v) => serde_json::to_string_pretty(&v).unwrap_or_else(|_| "[]".into()),
+                        Err(e) => serde_json::to_string(&json!({ "error": e.to_string() })).unwrap_or_default(),
+                    }
                 }
                 _ => {
                     let cwd = state.cwd.lock().unwrap().display().to_string();
@@ -1155,6 +1251,9 @@ pub async fn execute_mrt_mcp_tool(
                     }
                     (s, false)
                 }
+                StructuredDiffKind::ProcessesDelta { started, exited, memory_grown, unchanged_count } => {
+                    (format_processes_delta(started, exited, memory_grown, *unchanged_count), false)
+                }
                 StructuredDiffKind::Text { diff_lines } => {
                     let mut s = String::new();
                     for (line, tag) in diff_lines {
@@ -1177,6 +1276,7 @@ pub async fn execute_mrt_mcp_tool(
                     StructuredDiffKind::Identical { .. } => "identical",
                     StructuredDiffKind::Json { .. } => "json",
                     StructuredDiffKind::PortsDelta { .. } => "ports_delta",
+                    StructuredDiffKind::ProcessesDelta { .. } => "processes_delta",
                     StructuredDiffKind::Text { .. } => "text",
                 },
                 "diff": diff_text,
@@ -1412,6 +1512,17 @@ pub async fn execute_mrt_mcp_tool(
             match InteractivePty::spawn_with_command(&shell, &cwd, cols, rows, initial_cmd) {
                 Ok(pty) => {
                     let pty_id = pty.id;
+                    if let Some(pid) = pty.process_id() {
+                        state.owned_processes.lock().unwrap().insert(
+                            pid,
+                            OwnedProcess {
+                                pid,
+                                label: format!("MCP PTY {}", &pty_id.to_string()[..8]),
+                                tab_id: None,
+                                kind: OwnedProcessKind::Pty,
+                            },
+                        );
+                    }
                     let arc_pty = Arc::new(pty);
                     state.ptys.lock().unwrap().insert(pty_id, Arc::clone(&arc_pty));
                     if wait_ms > 0 {
@@ -1614,6 +1725,9 @@ pub async fn execute_mrt_mcp_tool(
             let Some(pty) = pty else {
                 return McpToolCallResult::text(format!("PTY session not found: {pty_id}"), true);
             };
+            if let Some(pid) = pty.process_id() {
+                state.owned_processes.lock().unwrap().remove(&pid);
+            }
             let _ = pty.kill();
             McpToolCallResult::text(
                 serde_json::to_string_pretty(&json!({
@@ -1658,6 +1772,17 @@ pub async fn execute_mrt_mcp_tool(
             }
             if let Some(explorer) = args.get("explorer").and_then(|v| v.as_bool()) {
                 state.notify_gui(GuiUiCommand::SetExplorer { visible: explorer });
+            }
+            match args.get("toolbox") {
+                Some(Value::Bool(visible)) => state.notify_gui(GuiUiCommand::SetToolbox {
+                    visible: *visible,
+                    tab: None,
+                }),
+                Some(Value::String(tab)) => state.notify_gui(GuiUiCommand::SetToolbox {
+                    visible: !tab.eq_ignore_ascii_case("hidden"),
+                    tab: Some(tab.clone()),
+                }),
+                _ => {}
             }
             McpToolCallResult::text(
                 serde_json::to_string_pretty(&json!({
@@ -1805,8 +1930,241 @@ pub async fn execute_mrt_mcp_tool(
                 Err(e) => McpToolCallResult::text(format!("WebSocket inspection error: {e}"), true),
             }
         }
+        "mrt_list_processes" => {
+            let mut query = ProcessQuery {
+                filter: args
+                    .get("filter")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                    .filter(|f| !f.trim().is_empty()),
+                limit: Some(args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50).clamp(1, 2000) as usize),
+                tree: args.get("tree").and_then(|v| v.as_bool()).unwrap_or(false),
+                only_mrt: args.get("only_mrt").and_then(|v| v.as_bool()).unwrap_or(false),
+                ..Default::default()
+            };
+            if let Some(sort) = args.get("sort").and_then(|v| v.as_str()) {
+                match ProcessSort::parse(sort) {
+                    Some(s) => query.sort = s,
+                    None => {
+                        return McpToolCallResult::text(
+                            format!("Unknown sort '{sort}' (use cpu, mem, pid or name)"),
+                            true,
+                        )
+                    }
+                }
+            }
+            match list_processes_value(state, &query).await {
+                Ok(v) => McpToolCallResult::text(serde_json::to_string_pretty(&v).unwrap_or_default(), false),
+                Err(e) => McpToolCallResult::text(format!("Process listing error: {e}"), true),
+            }
+        }
+        "mrt_inspect_process" => {
+            let Some(pid) = args.get("pid").and_then(|v| v.as_u64()) else {
+                return McpToolCallResult::text("Missing required integer 'pid'", true);
+            };
+            let owned = state.owned_process_map();
+            match inspect_process(&state.process_sampler, pid as u32, &owned).await {
+                Ok(details) => McpToolCallResult::text(
+                    serde_json::to_string_pretty(&details).unwrap_or_default(),
+                    false,
+                ),
+                Err(e) => McpToolCallResult::text(format!("Process inspection error: {e}"), true),
+            }
+        }
+        "mrt_kill_process" => {
+            let mut selectors = Vec::new();
+            if let Some(pid) = args.get("pid").and_then(|v| v.as_u64()) {
+                selectors.push(ProcessSelector::Pid(pid as u32));
+            }
+            if let Some(name) = args.get("name").and_then(|v| v.as_str()).filter(|n| !n.trim().is_empty()) {
+                selectors.push(ProcessSelector::Name(name.trim().to_string()));
+            }
+            if selectors.is_empty() {
+                return McpToolCallResult::text("Provide 'pid' or 'name'", true);
+            }
+            let request = KillRequest {
+                selectors,
+                force: args.get("force").and_then(|v| v.as_bool()).unwrap_or(false),
+                tree: args.get("tree").and_then(|v| v.as_bool()).unwrap_or(false),
+            };
+            let snapshot = match state.process_sampler.snapshot().await {
+                Ok(s) => s,
+                Err(e) => return McpToolCallResult::text(format!("Process snapshot error: {e}"), true),
+            };
+            let owned = state.owned_process_map();
+            let plan = match plan_kill(&snapshot, &request, &owned) {
+                Ok(p) => p,
+                Err(e) => return McpToolCallResult::text(e.to_string(), true),
+            };
+            if plan.assessment.risk == RiskLevel::Critical {
+                return McpToolCallResult::text(
+                    format!(
+                        "BLOCKED BY MRT SAFETY GATE: '{}' flagged as {}.\n{}",
+                        plan.assessment.command,
+                        plan.assessment.risk.label(),
+                        plan.assessment.reason
+                    ),
+                    true,
+                );
+            }
+            if state.gui_tx.is_some() {
+                state.notify_gui(GuiUiCommand::RequestProcessKill {
+                    pids: plan.pids(),
+                    force: request.force,
+                    tree: request.tree,
+                });
+                return McpToolCallResult::text(
+                    serde_json::to_string_pretty(&json!({
+                        "status": "pending_approval",
+                        "message": "The MRT Safety Approval Gate is asking the user to approve this stop request in the GUI. Check the result later with mrt_list_processes or mrt_inspect_process.",
+                        "command": plan.assessment.command,
+                        "risk": plan.assessment.risk.label(),
+                        "reason": plan.assessment.reason,
+                    }))
+                    .unwrap_or_default(),
+                    false,
+                );
+            }
+            let all_owned = plan
+                .targets
+                .iter()
+                .all(|t| owner_label(&snapshot, t.pid, &owned).is_some());
+            if !all_owned {
+                return McpToolCallResult::text(
+                    format!(
+                        "BLOCKED BY MRT SAFETY GATE: '{}' targets processes MRT did not start. Stopping them requires interactive approval inside the MRT GUI.\n{}",
+                        plan.assessment.command, plan.assessment.reason
+                    ),
+                    true,
+                );
+            }
+            match state
+                .process_sampler
+                .terminate(plan.pids(), request.force, request.tree)
+                .await
+            {
+                Ok(outcomes) => {
+                    let failed = outcomes.iter().any(|o| !o.succeeded());
+                    McpToolCallResult::text(serde_json::to_string_pretty(&outcomes).unwrap_or_default(), failed)
+                }
+                Err(e) => McpToolCallResult::text(format!("Process termination error: {e}"), true),
+            }
+        }
+        "mrt_compare_process_snapshots" => {
+            let prev_id = args
+                .get("previous_block_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| Uuid::parse_str(s.trim()).ok());
+            let curr_id = args
+                .get("current_block_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| Uuid::parse_str(s.trim()).ok());
+            if let (Some(prev_id), Some(curr_id)) = (prev_id, curr_id) {
+                let find = |id: Uuid| -> Option<CommandBlock> {
+                    let tabs = state.tabs.lock().unwrap();
+                    tabs.iter()
+                        .flat_map(|t| t.blocks.iter())
+                        .chain(state.blocks.lock().unwrap().iter())
+                        .find(|b| b.id == id)
+                        .cloned()
+                };
+                let (Some(prev), Some(curr)) = (find(prev_id), find(curr_id)) else {
+                    return McpToolCallResult::text("One or both block ids were not found", true);
+                };
+                let report = compare_blocks_structured(&prev, &curr);
+                let text = match &report.kind {
+                    StructuredDiffKind::ProcessesDelta { started, exited, memory_grown, unchanged_count } => {
+                        format_processes_delta(started, exited, memory_grown, *unchanged_count)
+                    }
+                    StructuredDiffKind::Identical { summary } => summary.clone(),
+                    _ => {
+                        return McpToolCallResult::text(
+                            "Both blocks must be :ps or :top process snapshots",
+                            true,
+                        )
+                    }
+                };
+                return McpToolCallResult::text(text, false);
+            }
+
+            let snapshot = match state.process_sampler.snapshot().await {
+                Ok(s) => s,
+                Err(e) => return McpToolCallResult::text(format!("Process snapshot error: {e}"), true),
+            };
+            let reset = args.get("reset_baseline").and_then(|v| v.as_bool()).unwrap_or(false);
+            let previous = state.process_baseline.lock().unwrap().replace(snapshot.clone());
+            match previous {
+                Some(before) if !reset => {
+                    let report = compare_process_snapshots(&before.entries, &snapshot.entries);
+                    let mut text = format_processes_delta(
+                        &report.started_lines(),
+                        &report.exited_lines(),
+                        &report.memory_lines(),
+                        report.unchanged_count,
+                    );
+                    text.push_str("\nThe current snapshot is now the baseline for the next comparison.\n");
+                    McpToolCallResult::text(text, false)
+                }
+                _ => McpToolCallResult::text(
+                    format!(
+                        "Saved a baseline of {} processes. Call mrt_compare_process_snapshots again to see what changed.",
+                        snapshot.entries.len()
+                    ),
+                    false,
+                ),
+            }
+        }
         other => McpToolCallResult::text(format!("Unknown MCP tool: {other}"), true),
     }
+}
+
+async fn list_processes_value(state: &MrtMcpServerState, query: &ProcessQuery) -> Result<Value> {
+    let snapshot = state.process_sampler.snapshot().await?;
+    let owned = state.owned_process_map();
+    let rows = query_processes(&snapshot, query, &owned);
+    let processes: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "pid": r.entry.pid,
+                "parent_pid": r.entry.parent_pid,
+                "name": r.entry.name,
+                "cpu_percent": (r.entry.cpu_percent * 10.0).round() / 10.0,
+                "memory_bytes": r.entry.memory_bytes,
+                "memory": mrt_tools::format_bytes(r.entry.memory_bytes),
+                "user": r.entry.user,
+                "status": r.entry.status,
+                "command_line": r.entry.command_line,
+                "run_time_secs": r.entry.run_time_secs,
+                "mrt_owner": r.owner,
+                "depth": r.depth,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "summary": mrt_tools::snapshot_summary(&snapshot, rows.len()),
+        "total_processes": snapshot.entries.len(),
+        "processes": processes,
+    }))
+}
+
+fn format_processes_delta(
+    started: &[String],
+    exited: &[String],
+    memory_grown: &[String],
+    unchanged_count: usize,
+) -> String {
+    let mut s = format!("Process Snapshot Delta ({unchanged_count} unchanged):\n");
+    for line in started {
+        s.push_str(&format!("+ started: {line}\n"));
+    }
+    for line in exited {
+        s.push_str(&format!("- exited: {line}\n"));
+    }
+    for line in memory_grown {
+        s.push_str(&format!("▲ memory: {line}\n"));
+    }
+    s
 }
 
 fn format_block_summary(b: &CommandBlock, tab_id: Option<Uuid>) -> Value {

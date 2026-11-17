@@ -292,6 +292,8 @@ pub struct MrtGuiApp {
     pending_ps_compare: Option<Uuid>,
     /// The loaded configuration file and its watcher (see `config_runtime.rs`).
     pub config_state: crate::config_runtime::ConfigState,
+    /// Desktop notifications and sidebar badges for commands that finish in the background.
+    notifier: crate::notifications::CommandNotifier,
 }
 
 impl MrtGuiApp {
@@ -403,6 +405,7 @@ impl MrtGuiApp {
             process_tick_in_flight: false,
             force_process_tick: false,
             pending_ps_compare: None,
+            notifier: crate::notifications::CommandNotifier::new(),
             config_state,
         };
         app.apply_config_side_effects();
@@ -3229,6 +3232,7 @@ impl MrtGuiApp {
                     } else {
                         format!("{shell} · {folder}")
                     };
+                    let badge_top = crate::notifications::row_top(ui);
                     let row = tab_row(
                         ui,
                         &title,
@@ -3238,6 +3242,7 @@ impl MrtGuiApp {
                         closable,
                         compact,
                     );
+                    self.notifier.paint_badge(ui, badge_top, tab.id, compact);
                     if row.close {
                         tab_to_close = Some(tab.id);
                     } else if row.selected {
@@ -3268,6 +3273,9 @@ impl MrtGuiApp {
                 }
                 if nav_row(ui, "⊞", "Mosaic", None, self.mosaic, compact).clicked() {
                     self.mosaic = !self.mosaic;
+                }
+                if nav_row(ui, "🔔", "Notifications", None, self.notifier.show_settings, compact).clicked() {
+                    self.notifier.show_settings = !self.notifier.show_settings;
                 }
 
                 // Status card pinned to the bottom
@@ -3414,6 +3422,9 @@ impl eframe::App for MrtGuiApp {
         self.handle_keybindings(ctx);
         self.process_tui_session(ctx);
         self.maybe_spawn_process_tick();
+        if let Some(idx) = self.notifier.update(ctx, &self.tabs, self.active_tab, self.mosaic) {
+            self.active_tab = idx;
+        }
 
         ctx.request_repaint_after(std::time::Duration::from_millis(if self.busy_count > 0 || self.history_pending > 0 {
             50
@@ -4405,6 +4416,7 @@ impl eframe::App for MrtGuiApp {
             }
         }
 
+        self.notifier.render_settings(ctx);
         self.render_tui_overlay(ctx);
         self.render_key_indicator(ctx);
         self.sync_mcp_from_gui();

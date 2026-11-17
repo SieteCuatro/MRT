@@ -5,6 +5,7 @@ mod app;
 mod config_runtime;
 mod history;
 mod keymap;
+mod notifications;
 mod theme;
 mod widgets;
 

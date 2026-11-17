@@ -101,6 +101,14 @@ Commands that may be destructive open the **Safety Approval Gate** first (see [C
 | `:watch-proc <pid\|name> [--mem 2GB] [--cpu 90]` | Posts a notice when a process crosses a threshold, starts, or exits. |
 | `:watch-proc list \| clear \| stop <id>`, `:unwatch-proc <id\|all>` | Manages watches. |
 
+### Notifications for long commands
+
+When a command (including runbook steps and interactive TUI sessions) takes longer than **10 seconds** and finishes while the MRT window is unfocused or minimized, or while its tab is not on screen, MRT shows a desktop notification with the result (finished, or failed with its exit code), the command, how long it took, and the tab. On Linux, clicking the notification brings MRT to the front on that tab; on Windows and macOS the notification is informational only.
+
+Tabs that are not on screen when one of their commands finishes get a numbered badge in the sidebar (any duration). The badge clears when you open the tab. In Mosaic every tab is on screen, so no badges appear.
+
+Click **🔔 Notifications** in the sidebar to turn desktop notifications off, change the threshold, or send a test notification. These settings are not saved yet: they reset to on / 10 s when MRT restarts.
+
 ---
 
 ## 3. Keyboard Shortcuts
@@ -321,6 +329,8 @@ With no AI variables set, MRT uses its offline heuristic engine, so `#` prompts 
 | The AI answer looks generic | No provider key is set, or the provider failed and MRT fell back to the offline engine. Check the provider name in the proposal card. |
 | An MCP client cannot see the open GUI | Make sure the GUI is running and that the client starts the same `mrt` binary with `--mcp-server`. Use **Copy MCP Config** in the MCP Hub for the exact path. If you moved or rebuilt `mrt` elsewhere, run `mrt agent setup` again to update the path. |
 | `mrt agent setup` says *skipped* | The agent already has an `mrt` MCP server or `mrt` skill that MRT did not write. MRT leaves it alone; rename or delete it, then run setup again. |
+| No desktop notification appears | Check that **🔔 Notifications** is on and the command ran longer than the threshold. Use **Send test notification**. Windows: allow notifications in *Settings → System → Notifications* (they are listed under Windows PowerShell). macOS: they are listed under Finder in *System Settings → Notifications*. Linux: a notification daemon must be running (most desktops have one). |
+| An MCP client cannot see the open GUI | Make sure the GUI is running and that the client starts the same `mrt` binary with `--mcp-server`. Use **Copy MCP Config** in the MCP Hub for the exact path. |
 | Linux build fails with missing `xcb` / `X11` / `udev` | Install the packages listed in [§1](#1-install). |
 
 Bug reports are welcome: run `:report` on the failed block and paste the result (secrets are redacted, but review it first) into a GitHub issue.

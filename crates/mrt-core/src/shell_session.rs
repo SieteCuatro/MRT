@@ -822,6 +822,12 @@ impl Shared {
                         if matches!(state.phase, Phase::Running | Phase::Draining) {
                             if let Some(active) = state.active.as_mut() {
                                 active.output.push_str(&text);
+                                // Keep memory bounded for huge outputs: the block keeps
+                                // only the end anyway (trim in steps, not per chunk).
+                                let max = crate::block::max_block_output_bytes();
+                                if max > 0 && active.output.len() > max + max / 4 {
+                                    crate::block::keep_tail(&mut active.output, max);
+                                }
                                 let _ = active.tx.send(CommandEvent::Output(text));
                             }
                         }
@@ -913,9 +919,7 @@ fn reader_loop(shared: Arc<Shared>, mut reader: Box<dyn Read + Send>) {
             Ok(count) => count,
         };
         normalizer.rows = shared.rows.load(Ordering::Relaxed);
-        for byte in &buffer[..count] {
-            parser.advance(&mut normalizer, *byte);
-        }
+        normalizer.advance(&mut parser, &buffer[..count]);
         normalizer.flush_text();
         shared.apply(std::mem::take(&mut normalizer.pieces), &buffer[..count]);
     }
@@ -941,6 +945,10 @@ struct Normalizer {
     pending_cr: bool,
     text: String,
     pieces: Vec<Piece>,
+    /// Kitty graphics come as APC strings, which `vte` skips; found here and passed on.
+    apc: crate::images::ApcScanner,
+    /// Data of a Sixel DCS being passed through (`None` outside one).
+    sixel: Option<Vec<u8>>,
 }
 
 impl Normalizer {
@@ -952,6 +960,22 @@ impl Normalizer {
             pending_cr: false,
             text: String::new(),
             pieces: Vec::new(),
+            apc: crate::images::ApcScanner::default(),
+            sixel: None,
+        }
+    }
+
+    fn advance(&mut self, parser: &mut vte::Parser, bytes: &[u8]) {
+        for &byte in bytes {
+            if let Some(apc) = self.apc.advance(byte) {
+                // Kitty graphics pass through to the block's parser unchanged.
+                if apc.first() == Some(&b'G') {
+                    self.text.push_str("\x1b_");
+                    self.text.push_str(&String::from_utf8_lossy(&apc));
+                    self.text.push_str("\x1b\\");
+                }
+            }
+            parser.advance(self, byte);
         }
     }
 
@@ -1084,7 +1108,39 @@ impl Perform for Normalizer {
                     self.push_piece(Piece::Cwd(path));
                 }
             }
+            // Hyperlinks, clipboard requests and inline images are for the block's own
+            // parser (`vt.rs`): pass them on as they came.
+            Some(b"8" | b"52" | b"1337") => {
+                self.text.push_str("\x1b]");
+                self.text.push_str(&String::from_utf8_lossy(&params.join(&b';')));
+                self.text.push_str("\x1b\\");
+            }
             _ => {}
+        }
+    }
+
+    fn hook(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
+        if action == 'q' && intermediates.is_empty() {
+            let mut head = String::from("\x1bP");
+            let values: Vec<String> = params.iter().map(|p| p.first().copied().unwrap_or(0).to_string()).collect();
+            head.push_str(&values.join(";"));
+            head.push('q');
+            self.sixel = Some(head.into_bytes());
+        }
+    }
+
+    fn put(&mut self, byte: u8) {
+        if let Some(data) = self.sixel.as_mut() {
+            if data.len() < crate::images::MAX_IMAGE_PAYLOAD {
+                data.push(byte);
+            }
+        }
+    }
+
+    fn unhook(&mut self) {
+        if let Some(data) = self.sixel.take() {
+            self.text.push_str(&String::from_utf8_lossy(&data));
+            self.text.push_str("\x1b\\");
         }
     }
 }
@@ -1097,11 +1153,35 @@ mod tests {
     fn normalize(input: &[u8]) -> Vec<Piece> {
         let mut parser = vte::Parser::new();
         let mut normalizer = Normalizer::new(24);
-        for byte in input {
-            parser.advance(&mut normalizer, *byte);
-        }
+        normalizer.advance(&mut parser, input);
         normalizer.flush_text();
         normalizer.pieces
+    }
+
+    #[test]
+    fn normalizer_passes_links_clipboard_and_images_through() {
+        let stream = b"\x1b]8;;https://a.io\x07L\x1b]8;;\x07 \x1b]52;c;aGk=\x07\x1b]1337;File=inline=1:AAAA\x07\x1b_Ga=T,f=24;AAAA\x1b\\\x1bP0;1;0q#1~-\x1b\\\x1b]0;title\x07";
+        let pieces = normalize(stream);
+        let text: String = pieces
+            .iter()
+            .filter_map(|p| match p {
+                Piece::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        let st = "\x1b\\";
+        assert_eq!(
+            text,
+            format!(
+                "\x1b]8;;https://a.io{st}L\x1b]8;;{st} \x1b]52;c;aGk={st}\x1b]1337;File=inline=1:AAAA{st}\x1b_Ga=T,f=24;AAAA{st}\x1bP0;1;0q#1~-{st}"
+            )
+        );
+        let parsed = crate::vt::parse_ansi_rich(&text);
+        assert!(parsed.plain_text.starts_with("L "), "{:?}", parsed.plain_text);
+        assert_eq!(parsed.plain_text.matches("[image not shown").count(), 2, "{:?}", parsed.plain_text);
+        assert!(parsed.spans.iter().any(|s| s.link.as_deref() == Some("https://a.io")));
+        assert_eq!(parsed.events.len(), 1, "clipboard request survives");
+        assert_eq!(parsed.images.len(), 1, "the sixel decodes; the fake PNG and RGB payloads are reported");
     }
 
     #[test]
@@ -1373,6 +1453,28 @@ mod tests {
         if let Some(shell) = shell {
             check_remote(&shell.program, &["--norc", "--noprofile", "-i"], "bash");
         }
+    }
+
+    /// An image printed in a session reaches the block's parser (ConPTY on Windows
+    /// passes OSC 1337 through too).
+    #[test]
+    fn inline_images_pass_through_a_session() {
+        let shell = if cfg!(windows) { find_shell(ShellKind::GitBash) } else { find_shell(ShellKind::Bash) };
+        let Some(shell) = shell else { return };
+        let options = ShellSessionOptions { ready_timeout: TEST_TIMEOUT, ..Default::default() };
+        let args: Vec<String> = ["--norc", "--noprofile", "-i"].iter().map(|a| a.to_string()).collect();
+        let session = ShellSession::spawn_remote(&shell.program, &args, &std::env::temp_dir(), options).expect("session");
+        let mut png = Vec::new();
+        image::RgbaImage::from_raw(1, 1, vec![1, 2, 3, 255])
+            .unwrap()
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let b64 = crate::shell_integration::base64_encode(&png);
+        let out = run(&session, &format!(r"printf 'before\n\033]1337;File=inline=1:{b64}\a\nafter\n'"));
+        let parsed = crate::vt::parse_ansi_rich(&out.output);
+        assert_eq!(parsed.images.len(), 1, "{:?}", out.output);
+        assert_eq!(&parsed.images[0].rgba[..], &[1, 2, 3, 255]);
+        assert!(parsed.plain_text.contains("before") && parsed.plain_text.contains("after"));
     }
 
     #[cfg(unix)]

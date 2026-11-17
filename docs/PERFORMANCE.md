@@ -9,8 +9,8 @@ child process ──pipe──▶ execute_command_streaming_with_pid   (mrt-core
                         │ on_output(chunk)
                         ▼
               GUI: process_async_events, once per frame     (mrt-app/src/app.rs)
-                raw_output.push_str(chunk)
-                parse_ansi_text(&raw_output)  ◀── the whole output, every frame
+                CommandBlock::append_output(chunk, &mut VtStream)
+                (only the new chunk is parsed; output over the block limit is dropped)
                         │
                         ▼
               render_ansi_spans → one egui LayoutJob for the whole block (widgets/block_view.rs)
@@ -157,7 +157,9 @@ This replicates `render_ansi_spans`: one `LayoutJob` for the whole block, shown 
 
 ## 4. Recommended fixes, ranked by impact
 
-None of these are implemented in the benchmark PR. Items 1–3 touch `app.rs`, `block_view.rs`, `vt.rs`, and `pty.rs`, which other work is changing at the same time, so they should land as their own changes and be checked against these benchmarks.
+**Status (Milestone 3):** fix 1 is implemented (`VtStream` + `CommandBlock::append_output`). Fix 2 is implemented as tail rendering rather than full virtualization: a block draws its last 2,000 lines (`tail_spans`, cost independent of output size) with "Show more" / "Show all". Fix 3 is implemented for the limit (`terminal.max_block_output_mb`, default 32 MiB, applied while streaming, in `ShellSession` and in `new_completed`); sharing blocks through `Arc` and dropping spans from history are not done yet. Fix 7 is implemented (no structured classification above 4 MiB). Fixes 4–6 are open. The idle UI now repaints once a second instead of four times, and worker / MCP events wake it immediately.
+
+None of these were implemented in the benchmark PR. Items 1–3 touch `app.rs`, `block_view.rs`, `vt.rs`, and `pty.rs`, which other work is changing at the same time, so they should land as their own changes and be checked against these benchmarks.
 
 | # | Fix | Where | Expected impact | Effort |
 | :-: | :--- | :--- | :--- | :--- |

@@ -1,7 +1,8 @@
 use crate::theme::{chip, ghost_button, icon_button, primary_button, secondary_button, Palette, Radius};
 use crate::widgets::links::{render_spans_with_links, LinkRequest, SpanStyle};
 use egui::{Color32, RichText, Ui};
-use mrt_core::{ClipboardDecision, CommandBlock, HttpExchangeSummary, StructuredOutput, ViewMode};
+use mrt_core::{AnsiSpan, ClipboardDecision, CommandBlock, HttpExchangeSummary, StructuredOutput, ViewMode};
+use std::borrow::Cow;
 use mrt_tools::{compare_blocks_structured, ChangeType, StructuredDiffKind};
 use serde_json::Value;
 
@@ -350,10 +351,11 @@ pub fn render_compact_block(ui: &mut Ui, block: &CommandBlock) -> Option<BlockAc
             block.timestamp.format("%H:%M:%S")
         ));
     });
-    if block.ansi_spans.iter().any(|s| !s.text.trim().is_empty()) {
+    if !block.plain_output.trim().is_empty() {
+        let (_, spans) = tail_spans(&block.ansi_spans, block.plain_output.len(), COMPACT_LINES);
         if let Some(link_action) = render_spans_with_links(
             ui,
-            &block.ansi_spans,
+            &spans,
             &SpanStyle { font_size: 12.0, backgrounds: false },
             block_cwd(block),
             egui::Id::new(("link_error_compact", block.id)),
@@ -432,14 +434,110 @@ fn link_request_action(request: LinkRequest) -> BlockAction {
     }
 }
 
+/// Lines of a block's output drawn at first; "Show more" adds this many again.
+/// Laying out millions of lines every frame would freeze the window.
+pub const RENDERED_LINES_STEP: usize = 2_000;
+
+/// Lines drawn for a block in a Mosaic tile.
+const COMPACT_LINES: usize = 200;
+
+/// The last `lines` lines of `spans` (whose texts add up to `total_len` bytes),
+/// and the byte length of the text before them. The search runs from the end,
+/// so its cost depends on the lines kept, not on the size of the output.
+pub fn tail_spans(spans: &[AnsiSpan], total_len: usize, lines: usize) -> (usize, Cow<'_, [AnsiSpan]>) {
+    let mut newlines = 0;
+    let mut after = 0; // bytes of the spans after the current one
+    for (i, span) in spans.iter().enumerate().rev() {
+        for (pos, _) in span.text.rmatch_indices('\n') {
+            // A newline that ends the whole output does not start another line.
+            if after == 0 && pos + 1 == span.text.len() {
+                continue;
+            }
+            newlines += 1;
+            if newlines == lines {
+                let mut first = span.clone();
+                first.text = span.text[pos + 1..].to_string();
+                let mut tail = Vec::with_capacity(spans.len() - i);
+                tail.push(first);
+                tail.extend_from_slice(&spans[i + 1..]);
+                let prefix = total_len - after - (span.text.len() - pos - 1);
+                return (prefix, Cow::Owned(tail));
+            }
+        }
+        after += span.text.len();
+    }
+    (0, Cow::Borrowed(spans))
+}
+
+fn format_bytes(bytes: u64) -> String {
+    match bytes {
+        b if b >= 1 << 30 => format!("{:.1} GB", b as f64 / (1u64 << 30) as f64),
+        b if b >= 1 << 20 => format!("{:.1} MB", b as f64 / (1u64 << 20) as f64),
+        b if b >= 1 << 10 => format!("{:.1} KB", b as f64 / (1u64 << 10) as f64),
+        b => format!("{b} bytes"),
+    }
+}
+
 fn render_ansi_spans(ui: &mut Ui, block: &CommandBlock) -> Option<BlockAction> {
     let highlight = find_highlight(ui);
+    let shown_id = egui::Id::new(("block_shown_lines", block.id));
+    let mut shown: usize = ui.ctx().data(|d| d.get_temp(shown_id)).unwrap_or(RENDERED_LINES_STEP);
+    let mut current = highlight.as_ref().and_then(|h| h.current).filter(|(id, _)| *id == block.id).map(|(_, n)| n);
+    let (mut prefix, mut spans) = tail_spans(&block.ansi_spans, block.plain_output.len(), shown);
+    // The current find match may be in the hidden part: show enough lines to reach it.
+    if let (Some(h), Some(n)) = (&highlight, current) {
+        if prefix > 0 {
+            let hidden = crate::find::match_ranges(&block.plain_output[..prefix], &h.query);
+            if let Some(m) = hidden.get(n) {
+                let extra = block.plain_output[m.start..prefix].matches('\n').count() + 1;
+                shown += extra.div_ceil(RENDERED_LINES_STEP) * RENDERED_LINES_STEP;
+                ui.ctx().data_mut(|d| d.insert_temp(shown_id, shown));
+                (prefix, spans) = tail_spans(&block.ansi_spans, block.plain_output.len(), shown);
+            }
+            let before = crate::find::match_ranges(&block.plain_output[..prefix], &h.query).len();
+            current = current.map(|n| n.saturating_sub(before));
+        }
+    }
     let find = highlight.as_ref().map(|h| crate::widgets::links::FindView {
         query: &h.query,
-        current: h.current.filter(|(id, _)| *id == block.id).map(|(_, n)| n),
+        current,
         scroll: h.scroll,
     });
-    if block.ansi_spans.is_empty() {
+    if block.truncated_bytes > 0 || prefix > 0 {
+        ui.horizontal_wrapped(|ui| {
+            if block.truncated_bytes > 0 {
+                ui.label(
+                    RichText::new(format!(
+                        "{} of earlier output was not kept (limit: terminal.max_block_output_mb).",
+                        format_bytes(block.truncated_bytes)
+                    ))
+                    .size(11.5)
+                    .color(Palette::TEXT_MUTED),
+                );
+            }
+            if prefix > 0 {
+                ui.label(
+                    RichText::new(format!("Showing the last {shown} lines; {} above.", format_bytes(prefix as u64)))
+                        .size(11.5)
+                        .color(Palette::TEXT_MUTED),
+                );
+                if ui.add(ghost_button(&format!("Show {RENDERED_LINES_STEP} more"))).clicked() {
+                    ui.ctx().data_mut(|d| d.insert_temp(shown_id, shown + RENDERED_LINES_STEP));
+                }
+                if ui
+                    .add(ghost_button("Show all"))
+                    .on_hover_text("Laying out a very long output can take a while")
+                    .clicked()
+                {
+                    ui.ctx().data_mut(|d| d.insert_temp(shown_id, usize::MAX));
+                }
+            }
+        });
+        ui.add_space(4.0);
+    }
+    let images: Vec<(usize, &mrt_core::InlineImage)> =
+        block.images.iter().enumerate().filter(|(_, image)| image.anchor >= prefix).collect();
+    if block.ansi_spans.is_empty() && images.is_empty() {
         ui.label(
             RichText::new("(no output)")
                 .italics()
@@ -447,15 +545,148 @@ fn render_ansi_spans(ui: &mut Ui, block: &CommandBlock) -> Option<BlockAction> {
         );
         return None;
     }
-    render_spans_with_links(
-        ui,
-        &block.ansi_spans,
-        &SpanStyle { font_size: 13.0, backgrounds: true },
-        block_cwd(block),
-        egui::Id::new(("link_error", block.id)),
-        find.as_ref(),
-    )
-    .map(link_request_action)
+    let style = SpanStyle { font_size: 13.0, backgrounds: true };
+    if images.is_empty() {
+        return render_spans_with_links(
+            ui,
+            &spans,
+            &style,
+            block_cwd(block),
+            egui::Id::new(("link_error", block.id)),
+            find.as_ref(),
+        )
+        .map(link_request_action);
+    }
+
+    // Text and images in output order: each text segment is its own galley.
+    let cuts: Vec<usize> = images.iter().map(|(_, image)| image.anchor - prefix).collect();
+    let segments = split_spans_at(&spans, &cuts);
+    let mut action = None;
+    let mut matches_before = 0;
+    for (n, segment) in segments.iter().enumerate() {
+        let text: String = segment.iter().map(|s| s.text.as_str()).collect();
+        if !text.is_empty() {
+            let count = find.as_ref().map(|f| crate::find::match_ranges(&text, f.query).len()).unwrap_or(0);
+            let segment_find = find.as_ref().map(|f| crate::widgets::links::FindView {
+                query: f.query,
+                current: f.current.and_then(|c| c.checked_sub(matches_before)).filter(|c| *c < count),
+                scroll: f.scroll,
+            });
+            matches_before += count;
+            if let Some(request) = render_spans_with_links(
+                ui,
+                segment,
+                &style,
+                block_cwd(block),
+                egui::Id::new(("link_error", block.id, n)),
+                segment_find.as_ref(),
+            ) {
+                action = Some(link_request_action(request));
+            }
+        }
+        if let Some((index, image)) = images.get(n) {
+            render_inline_image(ui, block.id, *index, image);
+        }
+    }
+    action
+}
+
+/// Splits `spans` at byte offsets `cuts` (sorted) of their joined text. Returns
+/// `cuts.len() + 1` segments; a line break right before a cut is dropped, because
+/// the image that follows starts on its own line anyway.
+pub fn split_spans_at(spans: &[AnsiSpan], cuts: &[usize]) -> Vec<Vec<AnsiSpan>> {
+    let mut segments: Vec<Vec<AnsiSpan>> = vec![Vec::new()];
+    let mut offset = 0;
+    let mut next_cut = cuts.iter().copied().peekable();
+    for span in spans {
+        let mut start = 0;
+        let end = span.text.len();
+        while let Some(&cut) = next_cut.peek() {
+            if cut > offset + end {
+                break;
+            }
+            let at = cut.saturating_sub(offset).max(start).min(end);
+            if at > start {
+                let mut piece = span.clone();
+                piece.text = span.text[start..at].to_string();
+                segments.last_mut().unwrap().push(piece);
+            }
+            start = at;
+            segments.push(Vec::new());
+            next_cut.next();
+        }
+        if start < end {
+            let mut piece = span.clone();
+            piece.text = span.text[start..].to_string();
+            segments.last_mut().unwrap().push(piece);
+        }
+        offset += end;
+    }
+    // Cuts past the end of the text still get their (empty) segment.
+    for _ in next_cut {
+        segments.push(Vec::new());
+    }
+    let last = segments.len() - 1;
+    for segment in &mut segments[..last] {
+        if let Some(span) = segment.last_mut() {
+            if span.text.ends_with('\n') {
+                span.text.pop();
+            }
+        }
+        segment.retain(|s| !s.text.is_empty());
+    }
+    segments
+}
+
+/// Display size of an inline image: the size the program asked for (cells,
+/// pixels or percent), else its pixel size, fitted to the available width and at
+/// most 600 points high, keeping the aspect ratio.
+pub fn inline_image_size(
+    image: &mrt_core::InlineImage,
+    available_width: f32,
+    cell: egui::Vec2,
+    pixels_per_point: f32,
+) -> egui::Vec2 {
+    use mrt_core::ImageSize;
+    let natural = egui::vec2(image.width as f32, image.height as f32) / pixels_per_point.max(0.5);
+    let resolve = |size: Option<ImageSize>, per_cell: f32, full: f32| -> Option<f32> {
+        match size? {
+            ImageSize::Cells(n) => Some(n as f32 * per_cell),
+            ImageSize::Pixels(px) => Some(px as f32 / pixels_per_point.max(0.5)),
+            ImageSize::Percent(p) => Some(full * p as f32 / 100.0),
+        }
+    };
+    let aspect = natural.y / natural.x.max(1.0);
+    let mut size = match (
+        resolve(image.requested_width, cell.x, available_width),
+        resolve(image.requested_height, cell.y, 600.0),
+    ) {
+        (Some(w), Some(h)) => egui::vec2(w, h),
+        (Some(w), None) => egui::vec2(w, w * aspect),
+        (None, Some(h)) => egui::vec2(h / aspect.max(0.0001), h),
+        (None, None) => natural,
+    };
+    let scale = (available_width / size.x.max(1.0)).min(600.0 / size.y.max(1.0)).min(1.0);
+    size *= scale;
+    size.max(egui::vec2(1.0, 1.0))
+}
+
+fn render_inline_image(ui: &mut Ui, block_id: uuid::Uuid, index: usize, image: &mrt_core::InlineImage) {
+    let id = egui::Id::new(("block_image", block_id, index, image.anchor));
+    let texture = match ui.ctx().data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        Some(texture) => texture,
+        None => {
+            let pixels = egui::ColorImage::from_rgba_unmultiplied([image.width as usize, image.height as usize], &image.rgba);
+            let texture = ui.ctx().load_texture(format!("block-image-{block_id}-{index}"), pixels, egui::TextureOptions::LINEAR);
+            ui.ctx().data_mut(|d| d.insert_temp(id, texture.clone()));
+            texture
+        }
+    };
+    let font = egui::TextStyle::Monospace.resolve(ui.style());
+    let cell = egui::vec2(font.size * 0.6, font.size * 1.35);
+    let size = inline_image_size(image, ui.available_width(), cell, ui.ctx().pixels_per_point());
+    ui.add(egui::Image::new((texture.id(), size)))
+        .on_hover_text(format!("{}×{} image", image.width, image.height));
 }
 
 /// The find-in-output highlight for this frame, if the find bar is open.
@@ -942,4 +1173,78 @@ pub fn render_comparison(ui: &mut Ui, previous: &CommandBlock, current: &Command
         }
     });
     close
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spans(parts: &[&str]) -> Vec<AnsiSpan> {
+        parts.iter().map(|t| AnsiSpan { text: t.to_string(), ..AnsiSpan::default() }).collect()
+    }
+
+    fn text(spans: &[AnsiSpan]) -> String {
+        spans.iter().map(|s| s.text.as_str()).collect()
+    }
+
+    #[test]
+    fn tail_spans_keeps_the_last_lines_across_spans() {
+        let all = spans(&["a\nb", "\nc\n", "d\ne\n"]);
+        let total = text(&all).len();
+        let (prefix, tail) = tail_spans(&all, total, 2);
+        assert_eq!(text(&tail), "d\ne\n");
+        assert_eq!(prefix, "a\nb\nc\n".len());
+        let (prefix, tail) = tail_spans(&all, total, 4);
+        assert_eq!(text(&tail), "b\nc\nd\ne\n");
+        assert_eq!(prefix, 2);
+        let (prefix, tail) = tail_spans(&all, total, 10);
+        assert_eq!(prefix, 0);
+        assert_eq!(text(&tail), text(&all));
+    }
+
+    #[test]
+    fn split_spans_at_cuts_inside_and_between_spans() {
+        let all = spans(&["ab\n", "cd\nef"]);
+        let parts = split_spans_at(&all, &[3, 5, 8]);
+        let texts: Vec<String> = parts.iter().map(|p| text(p)).collect();
+        assert_eq!(texts, vec!["ab", "cd", "\nef", ""]);
+        let parts = split_spans_at(&all, &[0]);
+        assert_eq!(parts.len(), 2);
+        assert!(parts[0].is_empty());
+        assert_eq!(text(&parts[1]), "ab\ncd\nef");
+    }
+
+    #[test]
+    fn inline_images_fit_the_width_and_honour_requests() {
+        use mrt_core::{ImageSize, InlineImage};
+        let image = |w, h, rw, rh| InlineImage {
+            width: w,
+            height: h,
+            rgba: std::sync::Arc::new(Vec::new()),
+            anchor: 0,
+            requested_width: rw,
+            requested_height: rh,
+        };
+        let cell = egui::vec2(8.0, 16.0);
+        assert_eq!(inline_image_size(&image(200, 100, None, None), 1000.0, cell, 1.0), egui::vec2(200.0, 100.0));
+        assert_eq!(inline_image_size(&image(200, 100, None, None), 1000.0, cell, 2.0), egui::vec2(100.0, 50.0));
+        assert_eq!(inline_image_size(&image(2000, 1000, None, None), 500.0, cell, 1.0), egui::vec2(500.0, 250.0));
+        assert_eq!(
+            inline_image_size(&image(200, 100, Some(ImageSize::Cells(10)), None), 1000.0, cell, 1.0),
+            egui::vec2(80.0, 40.0)
+        );
+        assert_eq!(
+            inline_image_size(&image(200, 100, Some(ImageSize::Percent(50)), None), 1000.0, cell, 1.0),
+            egui::vec2(500.0, 250.0)
+        );
+        assert_eq!(inline_image_size(&image(100, 4000, None, None), 1000.0, cell, 1.0).y, 600.0);
+    }
+
+    #[test]
+    fn tail_spans_without_a_final_newline() {
+        let all = spans(&["x\ny\nz"]);
+        let (prefix, tail) = tail_spans(&all, 5, 1);
+        assert_eq!(text(&tail), "z");
+        assert_eq!(prefix, 4);
+    }
 }

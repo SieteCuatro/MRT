@@ -1,4 +1,4 @@
-use egui::{Color32, FontData, FontDefinitions, FontFamily, Margin, Rounding, Stroke, Visuals};
+use egui::{Color32, Margin, Rounding, Stroke, Visuals};
 
 pub struct Palette;
 
@@ -111,10 +111,9 @@ pub fn secondary_button(text: &str) -> egui::Button<'static> {
         .min_size(egui::vec2(0.0, 32.0))
 }
 
-/// Applies MRT's "Graphite Calm" theme, spacing, typography, and system fonts to `egui::Context`.
+/// Applies MRT's "Graphite Calm" theme, spacing and typography to `egui::Context`.
+/// Fonts are installed from the config by `config_runtime` (`fonts.rs`).
 pub fn apply_mrt_theme(ctx: &egui::Context) {
-    install_system_fonts(ctx);
-
     let mut style = (*ctx.style()).clone();
     style.spacing.item_spacing = egui::vec2(8.0, 6.0);
     style.spacing.button_padding = egui::vec2(12.0, 6.0);
@@ -204,70 +203,4 @@ pub fn apply_mrt_theme(ctx: &egui::Context) {
 
     style.visuals = visuals;
     ctx.set_style(style);
-}
-
-fn install_system_fonts(ctx: &egui::Context) {
-    let mut fonts = FontDefinitions::default();
-
-    let mono_candidates: &[&str] = if cfg!(target_os = "windows") {
-        &[
-            r"C:\Windows\Fonts\CascadiaMono.ttf",
-            r"C:\Windows\Fonts\CascadiaCode.ttf",
-            r"C:\Windows\Fonts\consola.ttf",
-        ]
-    } else if cfg!(target_os = "macos") {
-        &[
-            "/System/Library/Fonts/SFNSMono.ttf",
-            "/System/Library/Fonts/Menlo.ttc",
-        ]
-    } else {
-        &[
-            "/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-        ]
-    };
-
-    for path in mono_candidates {
-        if let Ok(bytes) = std::fs::read(path) {
-            fonts
-                .font_data
-                .insert("mrt_mono".to_owned(), FontData::from_owned(bytes));
-            if let Some(list) = fonts.families.get_mut(&FontFamily::Monospace) {
-                list.insert(0, "mrt_mono".to_owned());
-            }
-            break;
-        }
-    }
-
-    let ui_candidates: &[&str] = if cfg!(target_os = "windows") {
-        &[
-            r"C:\Windows\Fonts\segoeui.ttf",
-            r"C:\Windows\Fonts\arial.ttf",
-        ]
-    } else if cfg!(target_os = "macos") {
-        &[
-            "/System/Library/Fonts/SFNS.ttf",
-            "/System/Library/Fonts/Helvetica.ttc",
-        ]
-    } else {
-        &[
-            "/usr/share/fonts/truetype/inter/Inter-Regular.ttf",
-            "/usr/share/fonts/opentype/inter/Inter-Regular.otf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        ]
-    };
-
-    for path in ui_candidates {
-        if let Ok(bytes) = std::fs::read(path) {
-            fonts
-                .font_data
-                .insert("mrt_ui".to_owned(), FontData::from_owned(bytes));
-            if let Some(list) = fonts.families.get_mut(&FontFamily::Proportional) {
-                list.insert(0, "mrt_ui".to_owned());
-            }
-            break;
-        }
-    }
-
-    ctx.set_fonts(fonts);
 }

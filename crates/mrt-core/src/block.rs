@@ -1,4 +1,5 @@
-use crate::vt::{parse_ansi_rich, AnsiSpan, ParsedAnsi, VtEvent};
+use crate::vt::{parse_ansi_rich, AnsiSpan, ParsedAnsi, VtEvent, VtStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -74,6 +75,52 @@ pub struct CommandBlock {
     /// Never applied without the user's approval.
     #[serde(default)]
     pub clipboard_requests: Vec<ClipboardRequest>,
+    /// Bytes of earlier output that were dropped to keep the block under the
+    /// output limit ([`set_max_block_output_bytes`]); the block keeps the end.
+    #[serde(default)]
+    pub truncated_bytes: u64,
+    /// Inline images in the output, anchored at byte offsets of `plain_output`.
+    /// Not saved in history (they are rebuilt from `raw_output` when needed).
+    #[serde(skip)]
+    pub images: Vec<crate::images::InlineImage>,
+}
+
+/// Default limit for the output one block keeps (32 MiB of text).
+pub const DEFAULT_MAX_BLOCK_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
+
+/// Output above this size is not checked for JSON / CSV / Markdown: parsing it
+/// costs seconds and a table of millions of rows is not useful to look at.
+pub const STRUCTURED_CLASSIFY_LIMIT: usize = 4 * 1024 * 1024;
+
+static MAX_BLOCK_OUTPUT_BYTES: AtomicUsize = AtomicUsize::new(DEFAULT_MAX_BLOCK_OUTPUT_BYTES);
+
+/// Sets how much output each block keeps (`0` keeps everything). Applies to
+/// blocks created or appended to afterwards; older blocks keep what they have.
+pub fn set_max_block_output_bytes(bytes: usize) {
+    MAX_BLOCK_OUTPUT_BYTES.store(bytes, Ordering::Relaxed);
+}
+
+/// The current per-block output limit in bytes (`0` means no limit).
+pub fn max_block_output_bytes() -> usize {
+    MAX_BLOCK_OUTPUT_BYTES.load(Ordering::Relaxed)
+}
+
+/// Bytes cut off the front of `text` so that what is left starts at a line
+/// boundary near `text.len() - keep`. Returns the number of bytes removed.
+pub(crate) fn keep_tail(text: &mut String, keep: usize) -> usize {
+    if text.len() <= keep {
+        return 0;
+    }
+    let mut cut = text.len() - keep;
+    while !text.is_char_boundary(cut) {
+        cut += 1;
+    }
+    // Start at a line when one begins soon, so the kept part has no half line.
+    if let Some(nl) = text[cut..].bytes().take(4096).position(|b| b == b'\n') {
+        cut += nl + 1;
+    }
+    text.drain(..cut);
+    cut
 }
 
 /// The user's answer to an OSC 52 clipboard write request.
@@ -131,6 +178,76 @@ impl CommandBlock {
         self.clipboard_requests = requests;
     }
 
+    /// Appends a streamed chunk: only the new text is parsed (`stream` keeps the
+    /// parser state between chunks), so streaming costs O(n) instead of the O(n²)
+    /// of [`refresh_output`](Self::refresh_output) after every chunk. Output over
+    /// the block limit is dropped from the front.
+    pub fn append_output(&mut self, chunk: &str, stream: &mut VtStream) {
+        self.append_output_with_limit(chunk, stream, max_block_output_bytes());
+    }
+
+    fn append_output_with_limit(&mut self, chunk: &str, stream: &mut VtStream, max: usize) {
+        self.raw_output.push_str(chunk);
+        let delta = stream.feed(chunk);
+        let base = self.plain_output.len();
+        self.images.extend(delta.images.into_iter().map(|mut image| {
+            image.anchor += base;
+            image
+        }));
+        self.plain_output.push_str(&delta.plain_text);
+        self.ansi_spans.extend(delta.spans);
+        for event in delta.events {
+            match event {
+                VtEvent::WorkingDirectory { path, .. } => self.reported_cwd = Some(path),
+                VtEvent::ClipboardWrite { selection, text } => self.clipboard_requests.push(ClipboardRequest {
+                    selection,
+                    text,
+                    decision: ClipboardDecision::Pending,
+                }),
+            }
+        }
+        self.enforce_output_limit(max);
+    }
+
+    /// Drops the oldest output once the block holds more than the limit. It trims
+    /// to three quarters of the limit, so the work happens once per quarter of the
+    /// limit and not on every chunk.
+    fn enforce_output_limit(&mut self, max: usize) {
+        if max == 0 {
+            return;
+        }
+        let keep = max / 4 * 3;
+        if self.raw_output.len() > max {
+            keep_tail(&mut self.raw_output, keep);
+        }
+        if self.plain_output.len() <= max {
+            return;
+        }
+        let removed = keep_tail(&mut self.plain_output, keep);
+        // Remove the same bytes from the spans (their texts concatenate to the plain text).
+        let mut left = removed;
+        let mut whole = 0;
+        for span in self.ansi_spans.iter_mut() {
+            if span.text.len() <= left {
+                left -= span.text.len();
+                whole += 1;
+                if left == 0 {
+                    break;
+                }
+            } else {
+                span.text.drain(..left);
+                break;
+            }
+        }
+        self.ansi_spans.drain(..whole);
+        self.images.retain_mut(|image| {
+            let kept = image.anchor >= removed;
+            image.anchor = image.anchor.saturating_sub(removed);
+            kept
+        });
+        self.truncated_bytes += removed as u64;
+    }
+
     /// Clipboard requests still waiting for the user's decision.
     pub fn pending_clipboard_requests(&self) -> usize {
         self.clipboard_requests
@@ -147,10 +264,16 @@ impl CommandBlock {
         exit_code: i32,
         duration_ms: u64,
     ) -> Self {
-        let raw_output = raw_output.into();
-        let ParsedAnsi { spans: ansi_spans, plain_text: plain_output, events } = parse_ansi_rich(&raw_output);
+        let mut raw_output = raw_output.into();
+        let max = max_block_output_bytes();
+        let truncated_bytes = if max == 0 { 0 } else { keep_tail(&mut raw_output, max) as u64 };
+        let ParsedAnsi { spans: ansi_spans, plain_text: plain_output, events, images } = parse_ansi_rich(&raw_output);
         let (reported_cwd, clipboard_requests) = split_events(events, &[]);
-        let structured = classify_output(&plain_output);
+        let structured = if plain_output.len() <= STRUCTURED_CLASSIFY_LIMIT {
+            classify_output(&plain_output)
+        } else {
+            StructuredOutput::RawText
+        };
         let view_mode = if structured.is_structured() {
             ViewMode::Structured
         } else {
@@ -175,6 +298,8 @@ impl CommandBlock {
             ai_suggested_fix: None,
             reported_cwd,
             clipboard_requests,
+            truncated_bytes,
+            images,
         }
     }
 
@@ -188,7 +313,7 @@ impl CommandBlock {
         duration_ms: u64,
     ) -> Self {
         let raw_output = raw_output.into();
-        let ParsedAnsi { spans: ansi_spans, plain_text: plain_output, events } = parse_ansi_rich(&raw_output);
+        let ParsedAnsi { spans: ansi_spans, plain_text: plain_output, events, images } = parse_ansi_rich(&raw_output);
         let (reported_cwd, clipboard_requests) = split_events(events, &[]);
         Self {
             id: Uuid::new_v4(),
@@ -208,6 +333,8 @@ impl CommandBlock {
             ai_suggested_fix: None,
             reported_cwd,
             clipboard_requests,
+            truncated_bytes: 0,
+            images,
         }
     }
 }
@@ -298,6 +425,59 @@ fn looks_like_markdown(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn streaming_block() -> CommandBlock {
+        let mut block = CommandBlock::new_completed("cmd", "sh", "/", "", 0, 0);
+        block.exit_code = None;
+        block
+    }
+
+    #[test]
+    fn appended_chunks_match_a_whole_parse() {
+        let chunks = ["one \x1b[3", "2mgreen\x1b[0m\n\x1b]7;file:///srv/a", "pp\x07two\n", "\x1b]52;c;aGk=\x07"];
+        let mut block = streaming_block();
+        let mut stream = VtStream::new();
+        for chunk in chunks {
+            block.append_output_with_limit(chunk, &mut stream, 0);
+        }
+        let whole = CommandBlock::new_completed("cmd", "sh", "/", chunks.concat(), 0, 0);
+        assert_eq!(block.plain_output, whole.plain_output);
+        assert_eq!(block.raw_output, whole.raw_output);
+        let text: String = block.ansi_spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(text, whole.plain_output);
+        assert_eq!(block.reported_cwd.as_deref(), Some("/srv/app"));
+        assert_eq!(block.clipboard_requests.len(), 1);
+        assert_eq!(block.clipboard_requests[0].text, "hi");
+        assert_eq!(block.truncated_bytes, 0);
+    }
+
+    #[test]
+    fn streamed_output_keeps_the_tail_under_the_limit() {
+        let mut block = streaming_block();
+        let mut stream = VtStream::new();
+        for i in 0..2000 {
+            block.append_output_with_limit(&format!("\x1b[31mline {i:05}\x1b[0m\n"), &mut stream, 4096);
+        }
+        assert!(block.plain_output.len() <= 4096, "{}", block.plain_output.len());
+        assert!(block.raw_output.len() <= 4096);
+        assert!(block.plain_output.ends_with("line 01999\n"));
+        assert!(block.plain_output.starts_with("line "), "starts at a line: {:?}", &block.plain_output[..20]);
+        let text: String = block.ansi_spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(text, block.plain_output);
+        let total: u64 = (0..2000).map(|i| format!("line {i:05}\n").len() as u64).sum();
+        assert_eq!(block.truncated_bytes + block.plain_output.len() as u64, total);
+    }
+
+    #[test]
+    fn keep_tail_cuts_at_a_line_and_a_char_boundary() {
+        let mut text = "ééé\nabc\ndef\n".to_string();
+        let removed = keep_tail(&mut text, 9);
+        assert_eq!(text, "abc\ndef\n");
+        assert_eq!(removed, "ééé\n".len());
+        let mut short = "ok".to_string();
+        assert_eq!(keep_tail(&mut short, 10), 0);
+        assert_eq!(short, "ok");
+    }
 
     #[test]
     fn block_collects_osc_events_and_keeps_decisions() {

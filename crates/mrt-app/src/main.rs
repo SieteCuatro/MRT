@@ -4,6 +4,7 @@ mod agent_setup;
 mod app;
 mod config_runtime;
 mod find;
+mod fonts;
 mod history;
 mod keymap;
 mod notifications;
@@ -77,7 +78,10 @@ fn main() -> Result<()> {
     let res = eframe::run_native(
         "Modern Rust Terminal",
         native_options,
-        Box::new(|_| Ok(Box::new(MrtGuiApp::new()))),
+        Box::new(|cc| {
+            app::set_ui_context(&cc.egui_ctx);
+            Ok(Box::new(MrtGuiApp::new()))
+        }),
     )
     .map_err(|e| anyhow::anyhow!("GUI error: {e}"));
 

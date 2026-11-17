@@ -4,6 +4,7 @@ pub mod pty;
 pub mod safety;
 pub mod shell_integration;
 pub mod term;
+pub mod shell_session;
 pub mod vt;
 
 pub use block::{
@@ -19,7 +20,12 @@ pub use safety::{
     SafetyAssessment, PROTECTED_PROCESS_NAMES,
 };
 pub use shell_integration::{
-    generate_shell_integration_script, parse_osc133_markers, Osc133Event, Osc133Kind,
+    generate_shell_integration_script, parse_osc133_markers, parse_osc7_path, Osc133Event,
+    Osc133Kind,
+};
+pub use shell_session::{
+    CommandEvent, CommandHandle, CommandOutcome, ShellSession, ShellSessionError,
+    ShellSessionOptions,
 };
 pub use vt::{parse_ansi_text, AnsiColor, AnsiSpan, VtParserState};
 pub use term::{

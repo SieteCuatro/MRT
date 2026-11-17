@@ -89,75 +89,210 @@ pub fn parse_osc133_markers(input: &str) -> Vec<Osc133Event> {
     events
 }
 
-/// Generates the shell integration script/hook for the specified shell kind.
-/// These scripts inject OSC 133 sequences into prompt generation and execution hooks.
+/// Extracts the working directory from an OSC 7 payload (`file://<host>/<path>`, the part
+/// after `7;`). Percent escapes are decoded and Windows drive paths (`/C:/x`) lose the
+/// leading slash. Returns `None` for anything that is not a `file://` URL.
+pub fn parse_osc7_path(payload: &str) -> Option<std::path::PathBuf> {
+    let rest = payload.strip_prefix("file://")?;
+    let path = &rest[rest.find('/')?..];
+    let decoded = percent_decode(path);
+    let bytes = decoded.as_bytes();
+    let is_drive_path =
+        bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':';
+    let path = if is_drive_path {
+        decoded[1..].replace('/', "\\")
+    } else {
+        decoded
+    };
+    Some(std::path::PathBuf::from(path))
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+            if let Some(value) = hex.and_then(|hex| u8::from_str_radix(hex, 16).ok()) {
+                out.push(value);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Generates the shell integration script for the specified shell kind.
+///
+/// Each script reports `OSC 133;A` (prompt start), `B` (prompt end), `D;<exit code>`
+/// (command finished) and `OSC 7` (working directory). `OSC 133;C` (output start) is printed
+/// by the `__mrt_c` helper (`__mrt_sb` in PowerShell), which the persistent
+/// [`ShellSession`](crate::shell_session::ShellSession) puts in front of every command it
+/// types, because most shells have no reliable pre-execution hook. CMD has no hooks at all, so
+/// its script only marks the prompt; the session prints `C` and `D` from helper batch files.
+/// The scripts are idempotent: running one twice installs the hooks once.
 pub fn generate_shell_integration_script(kind: ShellKind) -> &'static str {
     match kind {
-        ShellKind::Bash => {
-            r#"# MRT Shell Integration for Bash (OSC 133)
-__mrt_prompt_start() { printf "\e]133;A\e\\"; }
-__mrt_command_start() { printf "\e]133;B\e\\"; }
-__mrt_command_executed() { printf "\e]133;C\e\\"; }
-__mrt_command_finished() { printf "\e]133;D;%s\e\\" "$?"; }
-
-trap '__mrt_command_executed' DEBUG
-PROMPT_COMMAND="__mrt_command_finished; __mrt_prompt_start"
-PS1="\[\e]133;B\e\\\]$PS1"
-"#
-        }
-        ShellKind::Zsh => {
-            r#"# MRT Shell Integration for Zsh (OSC 133)
-precmd() {
-    printf "\e]133;D;%s\e\\" "$?"
-    printf "\e]133;A\e\\"
-}
-preexec() {
-    printf "\e]133;C\e\\"
-}
-PROMPT="%{\e]133;B\e\\%}$PROMPT"
-"#
-        }
-        ShellKind::Fish => {
-            r#"# MRT Shell Integration for Fish (OSC 133)
-function __mrt_postexec --on-event fish_postexec
-    printf "\e]133;D;%s\e\\" $status
-end
-function __mrt_preexec --on-event fish_preexec
-    printf "\e]133;C\e\\"
-end
-functions -c fish_prompt __mrt_original_fish_prompt
-function fish_prompt
-    printf "\e]133;A\e\\"
-    __mrt_original_fish_prompt
-    printf "\e]133;B\e\\"
-end
-"#
-        }
-        ShellKind::PowerShellCore | ShellKind::WindowsPowerShell => {
-            r#"# MRT Shell Integration for PowerShell (OSC 133)
-$Global:__mrt_last_exit = 0
-$ExecutionContext.SessionState.InvokeCommand.PostCommandLookupAction = {
-    param($cmdName, $cmdContext)
-}
-function Global:prompt {
-    $exitCode = $Global:LASTEXITCODE
-    Write-Host -NoNewline "`e]133;D;$exitCode`e\"
-    Write-Host -NoNewline "`e]133;A`e\"
-    $p = "PS " + (Get-Location) + "> "
-    Write-Host -NoNewline $p
-    Write-Host -NoNewline "`e]133;B`e\"
-    return " "
-}
-"#
-        }
-        ShellKind::CmdBatch => {
-            r#"REM MRT Shell Integration for Windows CMD (OSC 133)
-PROMPT $E]133;D$E\$E]133;A$E\$P$G$E]133;B$E\
-"#
-        }
-        _ => "# OSC 133 not supported for this shell kind\n",
+        ShellKind::Bash | ShellKind::GitBash => BASH_SCRIPT,
+        ShellKind::Sh => SH_SCRIPT,
+        ShellKind::Zsh => ZSH_SCRIPT,
+        ShellKind::Fish => FISH_SCRIPT,
+        ShellKind::PowerShellCore | ShellKind::WindowsPowerShell => POWERSHELL_SCRIPT,
+        ShellKind::CmdBatch => CMD_SCRIPT,
+        ShellKind::Wsl | ShellKind::Nushell => "# OSC 133 not supported for this shell kind\n",
     }
 }
+
+const BASH_SCRIPT: &str = r#"# MRT Shell Integration for Bash (OSC 133 + OSC 7)
+if [ -z "${__mrt_installed-}" ]; then
+__mrt_installed=1
+__mrt_running=
+__mrt_user_prompt_command=${PROMPT_COMMAND-}
+__mrt_osc() { printf '\033]%s\007' "$1"; }
+__mrt_c() { __mrt_running=1; __mrt_osc '133;C'; }
+__mrt_status() { return "$1"; }
+__mrt_precmd() {
+    local __mrt_s=$?
+    __mrt_osc "7;file://${HOSTNAME:-localhost}${PWD}"
+    if [ -n "$__mrt_running" ]; then
+        __mrt_running=
+        __mrt_osc "133;D;$__mrt_s"
+    fi
+    if [ -n "$__mrt_user_prompt_command" ]; then
+        __mrt_status "$__mrt_s"
+        eval "$__mrt_user_prompt_command"
+    fi
+    case "$PS1" in
+        *'133;A'*) ;;
+        *) PS1='\[\033]133;A\007\]'"$PS1"'\[\033]133;B\007\]' ;;
+    esac
+    return "$__mrt_s"
+}
+PROMPT_COMMAND=__mrt_precmd
+fi
+"#;
+
+const SH_SCRIPT: &str = r#"# MRT Shell Integration for POSIX sh (OSC 133 + OSC 7)
+# sh has no prompt hook, so commands are wrapped as `__mrt_c; <command>; __mrt_d $?`.
+if [ -z "${__mrt_installed-}" ]; then
+__mrt_installed=1
+__mrt_osc() { printf '\033]%s\007' "$1"; }
+__mrt_c() { __mrt_osc '133;C'; }
+__mrt_d() { __mrt_osc "7;file://${HOSTNAME:-localhost}${PWD}"; __mrt_osc "133;D;$1"; return "$1"; }
+__mrt_e=$(printf '\033')
+__mrt_b=$(printf '\007')
+PS1="${__mrt_e}]133;A${__mrt_b}${PS1-\$ }${__mrt_e}]133;B${__mrt_b}"
+unset __mrt_e __mrt_b
+fi
+"#;
+
+const ZSH_SCRIPT: &str = r#"# MRT Shell Integration for Zsh (OSC 133 + OSC 7)
+if [[ -z ${__mrt_installed-} ]]; then
+typeset -g __mrt_installed=1 __mrt_running=
+__mrt_osc() { printf '\033]%s\007' "$1"; }
+__mrt_c() { __mrt_running=1; __mrt_osc '133;C'; }
+__mrt_precmd() {
+    local __mrt_s=$?
+    __mrt_osc "7;file://${HOST:-localhost}${PWD}"
+    if [[ -n $__mrt_running ]]; then
+        __mrt_running=
+        __mrt_osc "133;D;$__mrt_s"
+    fi
+    return $__mrt_s
+}
+__mrt_prompt_markers() {
+    if [[ $PS1 != *'133;A'* ]]; then
+        PS1=$'%{\e]133;A\a%}'"$PS1"$'%{\e]133;B\a%}'
+    fi
+}
+typeset -ga precmd_functions
+precmd_functions=(__mrt_precmd $precmd_functions __mrt_prompt_markers)
+fi
+"#;
+
+const FISH_SCRIPT: &str = r#"# MRT Shell Integration for Fish (OSC 133 + OSC 7)
+if not set -q __mrt_installed
+    set -g __mrt_installed 1
+    set -g __mrt_running 0
+    function __mrt_osc
+        printf '\e]%s\a' $argv[1]
+    end
+    function __mrt_c
+        set -g __mrt_running 1
+        __mrt_osc '133;C'
+    end
+    function __mrt_postexec --on-event fish_postexec
+        set -l s $status
+        if test "$__mrt_running" = 1
+            set -g __mrt_running 0
+            __mrt_osc "7;file://$hostname$PWD"
+            __mrt_osc "133;D;$s"
+        end
+    end
+    functions -q fish_prompt
+    functions -c fish_prompt __mrt_original_fish_prompt
+    function fish_prompt
+        __mrt_osc '133;A'
+        __mrt_osc "7;file://$hostname$PWD"
+        __mrt_original_fish_prompt
+        __mrt_osc '133;B'
+    end
+end
+"#;
+
+const POWERSHELL_SCRIPT: &str = r#"# MRT Shell Integration for PowerShell (OSC 133 + OSC 7), Windows PowerShell 5.1 and 7+
+if (-not $global:__mrt_installed) {
+    $global:__mrt_installed = $true
+    $global:__mrt_running = $false
+    $global:__mrt_ok = $null
+    $global:__mrt_saved_lec = $null
+    $global:__mrt_original_prompt = $function:prompt
+    function global:__mrt_osc([string]$Payload) {
+        [Console]::Write([string][char]27 + ']' + $Payload + [string][char]27 + '\')
+    }
+    # Returns the command stored in $Path as a script block. The caller dot-sources it
+    # (`. (__mrt_sb <path>)`) so variables, functions and the location persist globally.
+    # `$?` does not survive dot-sourcing, so the block records it itself.
+    function global:__mrt_sb([string]$Path) {
+        $global:__mrt_saved_lec = $global:LASTEXITCODE
+        $global:LASTEXITCODE = $null
+        $global:__mrt_ok = $null
+        $global:__mrt_running = $true
+        __mrt_osc '133;C'
+        [scriptblock]::Create([IO.File]::ReadAllText($Path) + "`n`$global:__mrt_ok = `$?")
+    }
+    function global:prompt {
+        $lastOk = $?
+        $loc = $ExecutionContext.SessionState.Path.CurrentLocation
+        if ($loc.Provider.Name -eq 'FileSystem') {
+            $p = $loc.ProviderPath -replace '\\', '/'
+            if (-not $p.StartsWith('/')) { $p = '/' + $p }
+            __mrt_osc ('7;file://localhost' + $p)
+        }
+        if ($global:__mrt_running) {
+            $global:__mrt_running = $false
+            $ok = if ($null -ne $global:__mrt_ok) { [bool]$global:__mrt_ok } else { $lastOk }
+            $lec = $global:LASTEXITCODE
+            if ($null -eq $lec) { $global:LASTEXITCODE = $global:__mrt_saved_lec }
+            $code = if ($ok) { 0 } elseif ($lec -is [int] -and $lec -ne 0) { $lec } else { 1 }
+            __mrt_osc ('133;D;' + $code)
+        }
+        __mrt_osc '133;A'
+        $text = if ($global:__mrt_original_prompt) { & $global:__mrt_original_prompt } else { 'PS ' + $loc + '> ' }
+        [string]$text + [string][char]27 + ']133;B' + [string][char]27 + '\'
+    }
+}
+"#;
+
+const CMD_SCRIPT: &str = r#"REM MRT Shell Integration for Windows CMD (OSC 133 + OSC 7)
+REM CMD has no command hooks: the prompt marks A and B, and the MRT session prints
+REM 133;C and 133;D;%ERRORLEVEL% from helper batch files around each command.
+PROMPT $E]133;A$E\$E]7;file://localhost/$P$E\$P$G$E]133;B$E\
+"#;
 
 #[cfg(test)]
 mod tests {
@@ -179,15 +314,39 @@ mod tests {
     fn test_generate_shell_integration_scripts() {
         for kind in [
             ShellKind::Bash,
+            ShellKind::GitBash,
+            ShellKind::Sh,
             ShellKind::Zsh,
             ShellKind::Fish,
             ShellKind::PowerShellCore,
+            ShellKind::WindowsPowerShell,
             ShellKind::CmdBatch,
         ] {
-            let script = generate_shell_integration_script(kind);
-            assert!(script.contains("133;A"));
-            assert!(script.contains("133;B"));
-            assert!(script.contains("133;D"));
+            let script = generate_shell_integration_script(kind.clone());
+            assert!(script.contains("133;A"), "{kind:?}");
+            assert!(script.contains("133;B"), "{kind:?}");
+            assert!(script.contains("133;D"), "{kind:?}");
+            assert!(script.contains("7;file://"), "{kind:?}");
         }
+        assert!(generate_shell_integration_script(ShellKind::Nushell).contains("not supported"));
+    }
+
+    #[test]
+    fn osc7_paths_decode_for_unix_and_windows() {
+        use std::path::PathBuf;
+        assert_eq!(
+            parse_osc7_path("file://host/home/me/my%20dir"),
+            Some(PathBuf::from("/home/me/my dir"))
+        );
+        assert_eq!(
+            parse_osc7_path("file://localhost/C:/Users/me"),
+            Some(PathBuf::from(r"C:\Users\me"))
+        );
+        assert_eq!(
+            parse_osc7_path(r"file://localhost/C:\Users\me"),
+            Some(PathBuf::from(r"C:\Users\me"))
+        );
+        assert_eq!(parse_osc7_path("file://localhost/100%"), Some(PathBuf::from("/100%")));
+        assert_eq!(parse_osc7_path("https://example.com/"), None);
     }
 }

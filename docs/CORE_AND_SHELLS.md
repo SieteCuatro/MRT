@@ -13,7 +13,8 @@
 | **`term`** | [`src/term.rs`](../crates/mrt-core/src/term.rs) | Terminal grid emulator (`TerminalEmulator`) wrapping `alacritty_terminal`: turns PTY bytes into a screen of cells with cursor, scrollback, alternate screen, title, input modes, and replies for the PTY. Library only; not wired into the GUI yet. |
 | **`block`** | [`src/block.rs`](../crates/mrt-core/src/block.rs) | `CommandBlock` data model and automatic `StructuredOutput` detector (JSON, CSV/TSV Tables, Markdown, HTTP results). |
 | **`safety`** | [`src/safety.rs`](../crates/mrt-core/src/safety.rs) | Cross-shell destructive command classifier (`RiskLevel::Safe`, `Moderate`, `Critical`) powering the MRT Safety Approval Gate. |
-| **`shell_integration`** | [`src/shell_integration.rs`](../crates/mrt-core/src/shell_integration.rs) | OSC 133 semantic prompt marker parser and shell integration generator for Bash, Zsh, Fish, PowerShell, and CMD. |
+| **`shell_integration`** | [`src/shell_integration.rs`](../crates/mrt-core/src/shell_integration.rs) | OSC 133 / OSC 7 parsers and shell integration scripts for Bash, Git Bash, sh, Zsh, Fish, PowerShell, and CMD. |
+| **`shell_session`** | [`src/shell_session.rs`](../crates/mrt-core/src/shell_session.rs) | Persistent shell per tab (`ShellSession`): one long-lived PTY shell with the integration script injected, `run(command)` handles that stream output and resolve with exit code, duration and cwd, and a fallback signal when markers never arrive. |
 | **`platform`** | [`src/platform.rs`](../crates/mrt-core/src/platform.rs) | OS-specific environment hydration (macOS/Linux login `$PATH` loader and Windows `AttachConsole` CLI helper). |
 
 ---
@@ -85,30 +86,60 @@ Rules are case-insensitive substring matches checked in order: Critical patterns
 
 ---
 
-## 6. Shell Integration & Semantic Prompt Markers (`shell_integration.rs`)
+## 6. Shell Integration & Semantic Prompt Markers (`shell_integration.rs`, `shell_session.rs`)
 
-MRT integrates native support for the **OSC 133 semantic prompt specification**, allowing the terminal to unambiguously separate user prompts, command input, command execution, and exit codes:
+MRT supports the **OSC 133 semantic prompt specification**, which lets the terminal tell prompts, command input, command output, and exit codes apart, plus **OSC 7** for the working directory:
 
 ### Supported Markers
 - **`OSC 133 ; A ST`**: Prompt started.
 - **`OSC 133 ; B ST`**: Prompt ended / command input started.
 - **`OSC 133 ; C ST`**: Command execution initiated (output begins).
 - **`OSC 133 ; D [; <code>] ST`**: Command finished with optional numeric exit code.
+- **`OSC 7 ; file://<host>/<path> ST`**: Current working directory.
 
-### Parser
-`parse_osc133_markers(input: &str) -> Vec<Osc133Event>` finds every marker in a stream (terminated by `BEL` or `ESC \`) and returns its `Osc133Kind` (`PromptStart`, `CommandStart`, `CommandExecuted`, `CommandFinished(Option<i32>)`) with its `byte_offset`.
+`ST` is `ESC \` or `BEL`; both are accepted.
 
-### Shell Integration Generator
-`generate_shell_integration_script(kind: ShellKind) -> &'static str` returns an initialization snippet that configures hooks in:
-- **Bash**: `PROMPT_COMMAND` wrapper.
-- **Zsh**: `precmd` and `preexec` hook functions.
-- **Fish**: `fish_prompt` and `fish_postexec` event handlers.
-- **PowerShell** (Core and Windows): Custom `prompt` function with `$LASTEXITCODE` forwarding.
-- **Windows CMD**: A `PROMPT` string with `$E]133;…$E\` escapes (no Clink required).
-- Other shells (`sh`, Nushell, WSL, Git Bash kinds) get a comment saying OSC 133 is not supported.
+### Parsers
+- `parse_osc133_markers(input: &str) -> Vec<Osc133Event>` finds every marker in a string and returns its `Osc133Kind` (`PromptStart`, `CommandStart`, `CommandExecuted`, `CommandFinished(Option<i32>)`) with its `byte_offset`.
+- `parse_osc7_path(payload) -> Option<PathBuf>` turns an OSC 7 payload into a path (percent escapes decoded, `/C:/x` becomes `C:\x`).
+
+### Shell Integration Scripts
+`generate_shell_integration_script(kind: ShellKind) -> &'static str` returns an idempotent init snippet. Each one reports `A`, `B`, `D;<exit code>` and OSC 7. Most shells have no reliable pre-execution hook, so `C` comes from a helper that MRT puts in front of each command it types (`__mrt_c`, or `__mrt_sb` in PowerShell):
+
+| Shell | Hooks | Exit code |
+| :--- | :--- | :--- |
+| **Bash / Git Bash** | `PROMPT_COMMAND` (chains the user's own) and `PS1` markers | `$?` in the prompt hook |
+| **Zsh** | `precmd_functions` and `PS1` markers | `$?` in `precmd` |
+| **Fish** | `fish_postexec` event and a wrapped `fish_prompt` | `$status` |
+| **POSIX `sh`** | `PS1` markers only; the command wrapper prints `D` (`__mrt_c; . <file>; __mrt_d $?`) | `$?` |
+| **PowerShell** (5.1 and 7+) | Custom `prompt` (keeps the user's prompt text) | `$?`, then `$LASTEXITCODE` for native commands |
+| **CMD** | `PROMPT $E]133;A$E\…` for `A`/`B`/OSC 7; helper batch files print `C` and `D;%ERRORLEVEL%` | `%ERRORLEVEL%` |
+
+WSL and Nushell get a comment saying OSC 133 is not supported.
+
+### Persistent Shell Sessions (`shell_session.rs`)
+`ShellSession` keeps **one long-lived shell in a PTY** (`portable-pty`, ConPTY on Windows), so `cd`, exported/`set` variables, aliases, functions, and venv/conda activation persist between commands. It is a library API; the GUI still runs one process per command.
+
+```rust
+use mrt_core::{ShellSession, ShellSessionOptions};
+
+let session = ShellSession::spawn(&shell, &cwd, ShellSessionOptions::default())?;
+let mut handle = session.run("cd src")?;
+let outcome = handle.wait()?;          // exit_code, duration, output, cwd
+let mut handle = session.run("cargo build")?;
+while let Some(event) = handle.try_next() { /* CommandEvent::Output(chunk) / Finished(outcome) */ }
+```
+
+- **Startup.** The integration script is injected per shell: `bash --rcfile <init> -i` (sources `~/.bashrc` first), `ENV=<init> sh -i`, a temporary `ZDOTDIR` whose `.zshenv`/`.zshrc` load the user's own files first, `fish -C 'source <init>'`, `powershell -NoExit -Command ". ([scriptblock]::Create(...))"` (a script block, so the execution policy does not block it; PSReadLine is unloaded because MRT edits the command line itself), and `cmd /K <init>.cmd`. `ShellSessionOptions::load_user_config = false` skips user config (`-NoProfile`, `/D`, `--no-config`). The files live in a per-session temp directory that is removed when the session is dropped.
+- **Running a command.** `run(command)` returns a `CommandHandle` at once. Commands queue and are typed one at a time, each after the previous prompt's `B` marker. For POSIX shells, fish and PowerShell the command is written to a file in the session directory and sourced in the current scope (`__mrt_c; . <file>` or `. (__mrt_sb <file>)`), so quotes, tabs and multi-line scripts reach the shell unchanged. CMD cannot source a file without batch-file semantics, so its command is typed on one line (multiple lines are joined with ` & `) between `call begin.cmd` and `call end.cmd`.
+- **Output.** Only text between `C` and `D` belongs to the command. The PTY stream goes through a `vte` normalizer that keeps SGR colors, turns ConPTY's cursor positioning back into newlines and spaces, answers cursor-position queries (`CSI 6 n`), and drops the echoed input and prompt. On Windows the session keeps collecting output until the next prompt, because ConPTY passes OSC markers through ahead of text it has not rendered yet. `CommandOutcome::plain_output()` strips the remaining escapes.
+- **Result.** `CommandOutcome` has `exit_code` (`None` if the shell printed a new prompt without `D`, e.g. `sh` abandoning a line), `duration` (from `C` to `D`), `output`, `cwd` (from OSC 7; Git Bash `/c/x` paths become `C:\x`), and `shell_exited`. `ShellSession::cwd()` always has the last reported directory.
+- **Other controls.** `send_input` (stdin for the running program), `interrupt` (Ctrl+C), `resize`, `kill`, `is_idle`, `process_id`.
+- **Fallback.** If no prompt marker arrives within `ready_timeout` (default 20 s), or the shell exits while starting, `spawn` returns `ShellSessionError::IntegrationTimeout` / `StartupExited` (with the startup transcript), and WSL/Nushell return `Unsupported`. For all three `should_fall_back()` is `true`: keep using one process per command (`execute_command_streaming_with_pid`).
+- **Limits.** A user config that replaces `PROMPT_COMMAND`, `precmd_functions` or `prompt` after the script runs hides the markers (the session then times out and falls back). In CMD, `ERRORLEVEL` is reset to 0 before each command so commands that never set it (`echo`, `cd`) report 0, as `cmd /C` would. Typing `exit` ends the session; its command finishes with `shell_exited`.
 
 ### Status
-The parser and scripts are a library API with unit tests. The GUI does not inject the scripts or read markers yet: each command block runs in its own shell process (`-Command` / `/C` / `-c`), so the exit code comes from the process itself. Wiring OSC 133 into persistent PTY tabs is tracked in the [Roadmap](../ROADMAP.md#milestone-2--everyday-terminal-use).
+The parser, scripts, and `ShellSession` are a library API with tests that start real shells (PowerShell, CMD and Git Bash on Windows; bash, sh, zsh, fish and pwsh on Unix when installed). The GUI does not use them yet: each command block still runs in its own shell process (`-Command` / `/C` / `-c`). Wiring sessions into tabs is tracked in the [Roadmap](../ROADMAP.md#milestone-2--everyday-terminal-use).
 
 ---
 

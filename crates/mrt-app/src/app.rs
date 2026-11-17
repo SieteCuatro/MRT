@@ -267,6 +267,8 @@ pub struct ActiveTuiSession {
     pub selection: Option<crate::widgets::term_view::Selection>,
     /// Keyboard copy mode over the grid (`copy_mode` while the program has the keyboard).
     pub grid_copy: Option<crate::copy_mode::GridCopy>,
+    /// The search in grid copy mode (`/`, `n`, `N`).
+    pub grid_search: crate::copy_mode::GridSearch,
     /// Textures of the inline images in the grid, by image id.
     pub image_textures: HashMap<u64, egui::TextureHandle>,
     pub selecting: bool,
@@ -302,6 +304,7 @@ impl ActiveTuiSession {
             wheel_accum: 0.0,
             selection: None,
             grid_copy: None,
+            grid_search: crate::copy_mode::GridSearch::default(),
             image_textures: HashMap::new(),
             selecting: false,
             pane,
@@ -327,6 +330,12 @@ impl ActiveTuiSession {
         fresh
     }
 
+    /// Back to the live screen, without a search.
+    fn leave_grid_copy(&mut self) {
+        self.term.set_view_offset(0);
+        self.grid_search = crate::copy_mode::GridSearch::default();
+    }
+
     /// Starts copy mode at the program's cursor.
     fn start_grid_copy(&mut self) {
         let cursor = self.term.snapshot().cursor;
@@ -337,20 +346,47 @@ impl ActiveTuiSession {
 
     /// Copy-mode keys: they move the selection instead of reaching the program.
     fn grid_copy_keys(&mut self, ctx: &egui::Context) {
+        use crate::copy_mode::GridOutcome;
         let Some(mut grid) = self.grid_copy.take() else { return };
-        let keys: Vec<(egui::Key, egui::Modifiers)> = ctx.input(|i| {
-            i.events
-                .iter()
-                .filter_map(|e| match e {
-                    egui::Event::Key { key, pressed: true, modifiers, .. } => Some((*key, *modifiers)),
-                    _ => None,
-                })
-                .collect()
-        });
+        let events: Vec<egui::Event> = ctx.input(|i| i.events.clone());
         let (cols, rows) = (self.term.cols(), self.term.rows());
-        for (key, modifiers) in keys {
+        for event in events {
+            // Typing a search query: text goes into the query, Enter searches.
+            if let Some(typing) = self.grid_search.typing.as_mut() {
+                match event {
+                    egui::Event::Text(text) => typing.push_str(&text),
+                    egui::Event::Key { key: egui::Key::Backspace, pressed: true, .. } => {
+                        typing.pop();
+                    }
+                    egui::Event::Key { key: egui::Key::Escape, pressed: true, .. } => self.grid_search.typing = None,
+                    egui::Event::Key { key: egui::Key::Enter, pressed: true, .. } => {
+                        let query = self.grid_search.typing.take().unwrap_or_default();
+                        self.grid_search.matches = self.term.search(&query);
+                        self.grid_search.query = query;
+                        self.grid_search.current = None;
+                        if let Some(found) = self.grid_search.step(true) {
+                            grid.cursor = (found.1.min(cols.saturating_sub(1)), self.term.reveal_line(found.0));
+                            grid.anchor = None;
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            let egui::Event::Key { key, pressed: true, modifiers, .. } = event else { continue };
             match grid.apply(key, modifiers, cols, rows) {
-                crate::copy_mode::GridOutcome::Stay => {}
+                GridOutcome::Stay => {}
+                GridOutcome::Scroll(lines) => {
+                    let offset = self.term.view_offset() as i64 + i64::from(lines);
+                    self.term.set_view_offset(offset.max(0) as usize);
+                }
+                GridOutcome::StartSearch => self.grid_search.typing = Some(String::new()),
+                outcome @ (GridOutcome::NextMatch | GridOutcome::PreviousMatch) => {
+                    if let Some(found) = self.grid_search.step(outcome == GridOutcome::NextMatch) {
+                        grid.cursor = (found.1.min(cols.saturating_sub(1)), self.term.reveal_line(found.0));
+                        grid.anchor = None;
+                    }
+                }
                 crate::copy_mode::GridOutcome::Copy { whole_line } => {
                     let selection = if whole_line {
                         let row = grid.cursor.1;
@@ -360,10 +396,12 @@ impl ActiveTuiSession {
                     };
                     ctx.copy_text(crate::widgets::term_view::selection_text(&self.term.snapshot(), &selection));
                     self.selection = None;
+                    self.leave_grid_copy();
                     return;
                 }
-                crate::copy_mode::GridOutcome::Exit => {
+                GridOutcome::Exit => {
                     self.selection = None;
+                    self.leave_grid_copy();
                     return;
                 }
             }
@@ -449,6 +487,16 @@ impl ActiveTuiSession {
                 cell,
                 focused && window_focused,
             );
+        // Copy mode status: the search being typed or its position, else the keys.
+        if self.grid_copy.is_some() {
+            let status = self.grid_search.status();
+            let text = if status.is_empty() { "COPY  / search · n N · v select · y copy · Esc".to_string() } else { status };
+            let font = egui::FontId::monospace(12.0);
+            let galley = ui.painter().layout_no_wrap(text, font, Palette::ON_ACCENT());
+            let pos = egui::pos2(response.rect.right() - galley.size().x - 10.0, response.rect.top() + 4.0);
+            ui.painter().rect_filled(egui::Rect::from_min_size(pos, galley.size()).expand(4.0), 4.0, Palette::ACCENT_AMBER());
+            ui.painter().galley(pos, galley, Palette::ON_ACCENT());
+        }
         // Inline images (iTerm2, kitty, Sixel) over the cells they cover.
         let placements = self.term.images_on_screen();
         if !placements.is_empty() || !self.image_textures.is_empty() {
@@ -599,6 +647,10 @@ pub struct MrtGuiApp {
     pub(crate) pending_service_command: Option<String>,
     /// `mrt quit` / `:quit`: close even with work running.
     pub(crate) quit_requested: bool,
+    /// `:agents`: the window showing agents' PTYs (`mrt_pty_*`) live.
+    pub(crate) show_agent_ptys: bool,
+    /// One screen emulator per agent PTY and the transcript bytes it has read.
+    pub(crate) agent_screens: HashMap<Uuid, (TerminalEmulator, usize)>,
     /// The session host that runs tab commands (`None` until connected, in tests, or
     /// with `terminal.session_server = false`).
     pub(crate) session_host: Arc<std::sync::Mutex<Option<crate::session_host::HostClient>>>,
@@ -894,6 +946,8 @@ impl MrtGuiApp {
             pending_window: None,
             pending_service_command: None,
             quit_requested: false,
+            show_agent_ptys: false,
+            agent_screens: HashMap::new(),
             session_host: Arc::new(std::sync::Mutex::new(None)),
             host_blocks: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             mirror_synced_at: std::cell::Cell::new(None),
@@ -2792,6 +2846,11 @@ impl MrtGuiApp {
             }
         }
 
+        if raw_input == ":agents" {
+            self.show_agent_ptys = !self.show_agent_ptys;
+            return;
+        }
+
         if raw_input == ":quit" {
             self.pending_window = Some("quit".into());
             return;
@@ -4188,6 +4247,69 @@ impl MrtGuiApp {
         let _ = note.show();
     }
 
+    /// Brings each agent PTY's screen emulator up to date with its transcript and
+    /// drops the emulators of PTYs that are gone. Returns the PTYs, sorted by id.
+    pub(crate) fn update_agent_screens(&mut self) -> Vec<std::sync::Arc<InteractivePty>> {
+        let mut ptys: Vec<std::sync::Arc<InteractivePty>> =
+            self.mcp_host.local_server_state.ptys.lock().map(|p| p.values().cloned().collect()).unwrap_or_default();
+        ptys.sort_by_key(|p| p.id);
+        self.agent_screens.retain(|id, _| ptys.iter().any(|p| p.id == *id));
+        for pty in &ptys {
+            let (cols, rows) = pty.size();
+            let (term, fed) = self.agent_screens.entry(pty.id).or_insert_with(|| (TerminalEmulator::new(cols, rows, 1000), 0));
+            if (term.cols(), term.rows()) != (cols, rows) {
+                term.resize(cols, rows);
+            }
+            let (text, end) = pty.transcript_since(*fed);
+            if !text.is_empty() {
+                term.feed(text.as_bytes());
+            }
+            *fed = end;
+        }
+        ptys
+    }
+
+    /// `:agents`: agents' PTYs drawn with the terminal grid renderer, read-only, so
+    /// you can watch what an agent's programs show.
+    fn render_agent_ptys(&mut self, ctx: &egui::Context) {
+        if !self.show_agent_ptys {
+            return;
+        }
+        let ptys = self.update_agent_screens();
+        let mut open = true;
+        egui::Window::new("Agent terminals")
+            .id(egui::Id::new("mrt_agent_ptys"))
+            .open(&mut open)
+            .default_size([720.0, 480.0])
+            .vscroll(true)
+            .show(ctx, |ui| {
+                if ptys.is_empty() {
+                    ui.label(RichText::new("No agent PTYs. Agents start them with mrt_pty_spawn.").color(Palette::TEXT_MUTED()));
+                }
+                let font = egui::FontId::monospace(11.0);
+                let cell = crate::widgets::term_view::cell_size(ui, &font);
+                for pty in &ptys {
+                    let exit = pty.try_wait_exit().ok().flatten();
+                    let state = match exit {
+                        Some(code) => format!("exited {code}"),
+                        None => "running".to_string(),
+                    };
+                    let (cols, rows) = pty.size();
+                    let title = format!("{} · {} · {cols}×{rows} · {state}", &pty.id.to_string()[..8], pty.shell_name);
+                    egui::CollapsingHeader::new(title).id_salt(pty.id).default_open(true).show(ui, |ui| {
+                        if let Some((term, _)) = self.agent_screens.get(&pty.id) {
+                            let snapshot = term.snapshot();
+                            egui::ScrollArea::horizontal().id_salt(("agent_pty_scroll", pty.id)).show(ui, |ui| {
+                                crate::widgets::term_view::paint_terminal(ui, egui::Id::new(("agent_pty", pty.id)), &snapshot, &font, cell, false);
+                            });
+                        }
+                    });
+                }
+            });
+        self.show_agent_ptys = open;
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+    }
+
     /// Quick terminal: shows the window in front (as a drop-down across the top of the
     /// screen when `terminal.quick_dropdown` is on) or minimizes it. The window is
     /// minimized rather than hidden, so it can always be brought back from the taskbar.
@@ -5005,6 +5127,7 @@ impl eframe::App for MrtGuiApp {
         self.render_sidebar(ctx);
         self.render_header(ctx);
         self.render_config_notice(ctx);
+        self.render_agent_ptys(ctx);
 
         if self.show_explorer {
             self.render_explorer(ctx);
@@ -6752,6 +6875,86 @@ error: test failed
         send(&mut app, false);
         assert!(app.pending_safety.is_none(), "denied from the phone");
         assert!(app.tabs[0].blocks.last().unwrap().plain_output.contains("denied from web: phone"));
+    }
+
+    /// Grid copy mode searches a running program's scrollback: `/needle` + Enter
+    /// scrolls the view to the match and puts the cursor on it; `n` goes to the next
+    /// (older) match; Esc returns to the live screen.
+    #[test]
+    fn grid_copy_mode_searches_the_scrollback() {
+        let shell = mrt_core::discover_shells().into_iter().next().unwrap();
+        let pty = InteractivePty::spawn_local(&shell, &std::env::temp_dir(), 40, 8, None).unwrap();
+        let mut session = ActiveTuiSession::new(pty, Uuid::new_v4(), "test".into(), None, 40, 8);
+        session.term.resize(40, 8);
+        for i in 0..60 {
+            let mark = if i == 5 || i == 20 { " needle" } else { "" };
+            session.term.feed(format!("line {i:02}{mark}\r\n").as_bytes());
+        }
+        session.start_grid_copy();
+        let ctx = egui::Context::default();
+        let key = |key: egui::Key, modifiers: egui::Modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        let frame = |events: Vec<egui::Event>, session: &mut ActiveTuiSession| {
+            let input = egui::RawInput { events, ..Default::default() };
+            let _ = ctx.run(input, |ctx| {
+                session.forward_keys(ctx);
+            });
+        };
+        frame(vec![key(egui::Key::Slash, egui::Modifiers::NONE)], &mut session);
+        frame(vec![egui::Event::Text("needle".into()), key(egui::Key::Enter, egui::Modifiers::NONE)], &mut session);
+        assert_eq!(session.grid_search.matches.len(), 2);
+        assert_eq!(session.grid_search.status(), "/needle (2 of 2)");
+        let row_text = |session: &ActiveTuiSession| -> String {
+            let row = session.grid_copy.unwrap().cursor.1 as usize;
+            session.term.snapshot().cells[row].iter().map(|c| c.ch).collect()
+        };
+        assert!(row_text(&session).contains("line 20 needle"), "{}", row_text(&session));
+        assert!(session.term.view_offset() > 0, "the view scrolled into the history");
+        frame(vec![key(egui::Key::N, egui::Modifiers::NONE)], &mut session);
+        assert!(row_text(&session).contains("line 05 needle"), "{}", row_text(&session));
+        frame(vec![key(egui::Key::Escape, egui::Modifiers::NONE)], &mut session);
+        assert!(session.grid_copy.is_none());
+        assert_eq!(session.term.view_offset(), 0, "back to the live screen");
+        let _ = session.pty.kill();
+    }
+
+    #[test]
+    fn agent_ptys_are_shown_with_the_grid_renderer() {
+        let mut app = MrtGuiApp::new();
+        let state = app.mcp_host.local_server_state.clone();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let call = |name: &str, arguments: serde_json::Value| {
+            let request = mrt_mcp::JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: Some(serde_json::json!(1)),
+                method: "tools/call".into(),
+                params: Some(serde_json::json!({ "name": name, "arguments": arguments })),
+            };
+            let response = runtime.block_on(mrt_mcp::handle_mcp_jsonrpc(&state, request)).unwrap();
+            let text = response.result.unwrap()["content"][0]["text"].as_str().unwrap().to_string();
+            serde_json::from_str::<serde_json::Value>(&text).unwrap_or(serde_json::Value::String(text))
+        };
+        let spawned = call("mrt_pty_spawn", serde_json::json!({ "cols": 60, "rows": 10, "wait_ms": 300 }));
+        let pty_id = spawned["pty_id"].as_str().or_else(|| spawned["id"].as_str()).expect("pty id").to_string();
+        call("mrt_pty_write", serde_json::json!({ "pty_id": pty_id, "input": "echo agent-screen-ok", "wait_ms": 500 }));
+
+        app.submit_input(Some(":agents".into()), false);
+        assert!(app.show_agent_ptys);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut screen = String::new();
+        while Instant::now() < deadline {
+            let ptys = app.update_agent_screens();
+            assert_eq!(ptys.len(), 1);
+            screen = app.agent_screens.values().next().unwrap().0.screen_text();
+            if screen.contains("agent-screen-ok") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(screen.contains("agent-screen-ok"), "{screen}");
+        assert_eq!(app.agent_screens.values().next().unwrap().0.cols(), 60);
+        call("mrt_pty_kill", serde_json::json!({ "pty_id": pty_id, "remove": true }));
+        assert!(app.update_agent_screens().is_empty());
+        assert!(app.agent_screens.is_empty(), "screens of removed PTYs are dropped");
     }
 
     #[test]

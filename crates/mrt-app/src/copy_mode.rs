@@ -213,6 +213,52 @@ pub enum GridOutcome {
     /// Copy the selection (or the cursor line when nothing is selected) and leave.
     Copy { whole_line: bool },
     Exit,
+    /// Scroll the view this many lines into the history (negative: towards the screen).
+    Scroll(i32),
+    /// `/`: start typing a search.
+    StartSearch,
+    /// `n` / `N`: the next older / newer match.
+    NextMatch,
+    PreviousMatch,
+}
+
+/// A search in the grid's history and screen (`/` in grid copy mode).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GridSearch {
+    /// `Some` while the query is being typed.
+    pub typing: Option<String>,
+    pub query: String,
+    /// Matches as (history line, column), oldest first.
+    pub matches: Vec<(usize, u16)>,
+    /// Index of the current match.
+    pub current: Option<usize>,
+}
+
+impl GridSearch {
+    /// The match to go to after `n` (older) or `N` (newer), wrapping around.
+    pub fn step(&mut self, older: bool) -> Option<(usize, u16)> {
+        let n = self.matches.len();
+        if n == 0 {
+            return None;
+        }
+        let next = match self.current {
+            None => n - 1,
+            Some(i) if older => (i + n - 1) % n,
+            Some(i) => (i + 1) % n,
+        };
+        self.current = Some(next);
+        Some(self.matches[next])
+    }
+
+    /// "/query (3 of 10)" for the status line.
+    pub fn status(&self) -> String {
+        match (&self.typing, self.current) {
+            (Some(typing), _) => format!("/{typing}"),
+            (None, Some(i)) => format!("/{} ({} of {})", self.query, i + 1, self.matches.len()),
+            (None, None) if !self.query.is_empty() => format!("/{} (no matches)", self.query),
+            _ => String::new(),
+        }
+    }
 }
 
 impl GridCopy {
@@ -232,15 +278,21 @@ impl GridCopy {
         match key {
             K::ArrowLeft | K::H => *c = c.saturating_sub(1),
             K::ArrowRight | K::L => *c = (*c + 1).min(max_c),
+            // Moving past the top or bottom row scrolls through the history.
+            K::ArrowUp | K::K if *r == 0 => return GridOutcome::Scroll(1),
+            K::ArrowDown | K::J if *r == max_r => return GridOutcome::Scroll(-1),
             K::ArrowUp | K::K => *r = r.saturating_sub(1),
             K::ArrowDown | K::J => *r = (*r + 1).min(max_r),
+            K::Slash => return GridOutcome::StartSearch,
+            K::N if modifiers.shift => return GridOutcome::PreviousMatch,
+            K::N => return GridOutcome::NextMatch,
             K::Num0 | K::Home => *c = 0,
             K::Num4 if modifiers.shift => *c = max_c,
             K::End => *c = max_c,
             K::G if modifiers.shift => *r = max_r,
             K::G => *r = 0,
-            K::PageUp => *r = r.saturating_sub(rows / 2),
-            K::PageDown => *r = (*r + rows / 2).min(max_r),
+            K::PageUp => return GridOutcome::Scroll(i32::from(rows / 2).max(1)),
+            K::PageDown => return GridOutcome::Scroll(-i32::from(rows / 2).max(1)),
             K::V | K::Space => {
                 self.anchor = match self.anchor {
                     Some(_) => None,
@@ -258,6 +310,23 @@ impl GridCopy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grid_search_steps_through_matches_and_edges_scroll() {
+        let mut search = GridSearch { query: "x".into(), matches: vec![(1, 0), (5, 2), (9, 4)], ..Default::default() };
+        assert_eq!(search.step(true), Some((9, 4)), "the first n goes to the newest match");
+        assert_eq!(search.step(true), Some((5, 2)));
+        assert_eq!(search.status(), "/x (2 of 3)");
+        assert_eq!(search.step(false), Some((9, 4)));
+        assert_eq!(search.step(false), Some((1, 0)), "wraps around");
+        assert_eq!(GridSearch::default().step(true), None);
+        let none = egui::Modifiers::NONE;
+        let mut grid = GridCopy::new(0, 0);
+        assert_eq!(grid.apply(egui::Key::K, none, 80, 24), GridOutcome::Scroll(1));
+        assert_eq!(grid.apply(egui::Key::PageDown, none, 80, 24), GridOutcome::Scroll(-12));
+        assert_eq!(grid.apply(egui::Key::Slash, none, 80, 24), GridOutcome::StartSearch);
+        assert_eq!(grid.apply(egui::Key::N, egui::Modifiers::SHIFT, 80, 24), GridOutcome::PreviousMatch);
+    }
 
     #[test]
     fn grid_copy_moves_selects_and_copies() {

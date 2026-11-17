@@ -130,6 +130,9 @@ Available from the **Toolbox** panel (**Task Manager** tab), the prompt commands
 :kill                        # with no arguments, opens the Task Manager
 :watch-proc <pid|name> [--mem 2GB] [--cpu 90]
 :watch-proc list | clear | stop <id>      (also :unwatch-proc <id|all>)
+:suspend <pid|name>...       # pause (Windows NtSuspendProcess, Unix SIGSTOP)
+:resume <pid|name>...        # continue (NtResumeProcess / SIGCONT)
+:priority <idle|low|normal|above|high> <pid|name>...   # SetPriorityClass / setpriority (nice 19, 10, 0, -5, -10)
 ```
 - `filter` matches the PID exactly, or the name / command line case-insensitively.
 - `--mrt` keeps only processes MRT started (see below) and their children; combine with `--tree` to see what each tab launched.
@@ -144,6 +147,9 @@ Every `:kill`, Task Manager **Stop** button, and MCP `mrt_kill_process` request 
 - **Critical**: OS-critical processes (`PROTECTED_PROCESS_NAMES`: `System`, `csrss`, `lsass`, `svchost`, `launchd`, `kernel_task`, `WindowServer`, `init`, `systemd`, …, and PIDs ≤ 4), MRT itself or one of its parent processes, processes owned by another user (elevated / root), and names that match several PIDs.
 - MRT never stops its own process, even if approved.
 - The same rules cover shell commands: `kill`, `pkill`, `killall`, `taskkill`, `tskill`, `Stop-Process` / `spps`, and `xkill` in command position of any pipeline segment now always open the Safety Gate. Targeting a protected name, `kill 1`, or `kill -1` is Critical; by-name kills (`pkill`, `killall`, `taskkill /IM`, `Stop-Process -Name`) are flagged as possibly stopping several processes.
+
+### Suspend, resume and priority (`process_control.rs`)
+`:suspend`, `:resume` and `:priority` (and the **Suspend**, **Resume** and **Priority** buttons in the Task Manager's details) resolve their targets with the same snapshot and classification as `:kill`. Targets the gate rates **Critical** (OS processes, MRT and its parents, other users' processes, names matching several PIDs) are refused; the rest are changed at once without a prompt, because each change can be undone (`:resume`, `:priority normal`). The result is a block listing each process. Raising priority above normal usually needs administrator (root) rights on macOS and Linux. Service management is not implemented.
 
 ### Watches
 `:watch-proc` checks the selected processes every 2 seconds and posts a notice block in the tab when a process crosses `--mem` or `--cpu` (once per crossing; it re-arms after dropping below), when a new matching process starts (name watches), and when one exits. PID watches end when the process exits. Exit codes are only known for processes MRT started (their command block shows it).

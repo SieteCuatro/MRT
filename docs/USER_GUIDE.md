@@ -58,6 +58,7 @@ These subcommands talk to the open MRT window through the same token-authenticat
 | `mrt send [-t TAB] [--shell S] [--cwd DIR] [--] COMMAND...` | Runs `COMMAND` in the tab under the agent safety rule (Critical commands are refused), records a block there, prints its output and exits with the command's exit code. Everything after the first word of the command belongs to the command; use `--` when the command starts with `-`. |
 | `mrt capture [-t TAB] [-n LINES] [-b BLOCKS]` | Prints the tab's last block (or the last `BLOCKS` blocks, each after a `$ command` line); `-n` keeps only the last lines of each. |
 | `mrt split [-t TAB] h\|v\|off` | Splits the tab side by side (`h`), stacked (`v`), or removes the split. |
+| `mrt quick [show\|hide\|toggle]` | Brings the window to the front or minimizes it (see [Quick terminal](#quick-terminal)). |
 
 Exit codes: `0` success, the command's own code for `send`, `2` wrong arguments, `69` no MRT window is running, `70` MRT reported an error (for example an unknown tab).
 
@@ -416,7 +417,8 @@ MRT reads two optional [TOML](https://toml.io) files. Every setting is optional:
 | `terminal.font_fallback` | `[]` | Fonts tried, in order, for characters the main font lacks (Nerd Font icons, symbols, CJK), same syntax as `font_family`. Platform symbol fonts (Segoe UI Symbol, Apple Symbols, Noto Sans Symbols 2 / DejaVu Sans) are tried after them. Ligatures are not drawn. Applied live. |
 | `terminal.restore_layout` | `true` | Reopen the last session's tabs, splits, shells and folders at startup (fresh shells; nothing is run). Remote tabs reconnect on their first command. A shell that is no longer installed becomes the default shell, and a folder that no longer exists becomes the start folder. |
 | `terminal.max_block_output_mb` | `32` | Output kept per command block, in MiB. Older output is dropped from the front and the block says how much; `0` keeps everything (up to 4096). Applies to commands started after the change. |
-| `terminal.theme` | built-in | `graphite-calm` (aliases `dark`, `default`) is the only theme today. |
+| `terminal.theme` | `graphite-calm` | `graphite-calm` (aliases `dark`, `default`), `high-contrast`, or a theme file: a path, or a name looked up next to the config file and in its `themes/` folder (`.toml` optional). See [Themes](#themes). Applied live. |
+| `terminal.quick_dropdown`, `terminal.quick_height_percent` | `false`, `45` | With `true`, `mrt quick` shows the window as a drop-down across the top of the screen at this height. |
 | `terminal.persistent_shell` | `true` | Run each tab's commands in one long-lived shell so state carries over (see [§2](#2-the-prompt)). `false` runs every command in a new shell process. Applied on reload; turning it off ends the running shells. |
 | `terminal.scrollback_blocks`, `terminal.auto_detect_structured_output` | `500`, `true` | Reserved; parsed but not applied yet. |
 | `safety.enabled` | `true` | `false` turns off approval prompts for commands you type and runbook steps. Blocked patterns still apply, and `:kill` still confirms. |
@@ -435,6 +437,37 @@ MRT reads two optional [TOML](https://toml.io) files. Every setting is optional:
 Safety settings apply to the GUI. Commands sent by MCP agents (`mrt_run_command`, `mrt_pty_*`) keep their fixed rule: Critical commands are always refused.
 
 ---
+
+### Themes
+
+`terminal.theme` restyles the whole window. Built in: `graphite-calm` (default) and `high-contrast` (black surfaces, white text, strong borders; for low vision). A theme file can be MRT's own TOML or an existing terminal theme:
+
+| Format | Example file | What MRT reads |
+| :--- | :--- | :--- |
+| MRT TOML | `night.toml` | `[ui]` palette colors by name (`bg_base`, `bg_surface`, `text_primary`, `accent`, `accent_red`, …) and `[terminal]` `background`, `foreground`, `ansi = [16 colors]` |
+| Windows Terminal | a scheme from `settings.json` (`{"name": .., "background": .., "black": .., "brightWhite": ..}`) | background, foreground, 16 colors |
+| Alacritty | `[colors.primary]`, `[colors.normal]`, `[colors.bright]` | background, foreground, 16 colors |
+| Ghostty | `palette = 0=#1d1f21` … `background = …` | background, foreground, 16 colors |
+| iTerm2 | `.itermcolors` | background, foreground, `Ansi 0–15` |
+
+```toml
+# ~/.config/mrt/themes/night.toml   →   terminal.theme = "night"
+[ui]
+accent = "#7AA2F7"
+[terminal]
+background = "#1A1B26"
+foreground = "#C0CAF5"
+```
+
+A theme that only sets terminal colors gets matching UI colors derived from them (surfaces step from the background towards the foreground; accents come from the ANSI blue, green, red and yellow); `[ui]` entries override any of them. The 16 ANSI colors apply to output printed after the change and to full-screen programs. Unknown color names and files that cannot be read are reported in the config banner.
+
+### Accessibility
+
+MRT's window is exposed to screen readers through AccessKit (Windows UI Automation, macOS Accessibility, Linux AT-SPI): buttons, inputs and command block output are labeled, and a full-screen program's grid reports its visible screen as text. `terminal.theme = "high-contrast"` and `terminal.font_size` help with low vision, and copy mode (`Ctrl+Shift+Space`) works without a mouse.
+
+### Quick terminal
+
+`mrt quick` brings the MRT window to the front, or minimizes it if it already is; it starts MRT when none is running. Bind it to a global hotkey in your OS: on Windows, a shortcut to `mrt.exe quick` with a **Shortcut key** (Properties → Shortcut); on macOS, a Shortcuts app action or `skhd`; on GNOME or KDE, a custom keyboard shortcut running `mrt quick`. With `terminal.quick_dropdown = true` the window opens across the top of the screen.
 
 ## 7. Environment Variables
 

@@ -80,11 +80,11 @@ MRT already has a 31-tool MCP server. These items make that easy to use and visi
 
 ## Ideas not yet scheduled
 
-- Quick terminal: a drop-down window on a global hotkey.
-- Themes from a file, including importing common theme formats.
-- Accessibility: screen-reader output for blocks and the grid, and high-contrast themes.
-- A mobile companion app that attaches to a session server (after Milestone 4).
-- Suspend/resume, priority changes, and service management in the Task Manager (needs `NtSuspendProcess` on Windows).
+- Quick terminal: a drop-down window on a global hotkey. *(implemented as `mrt quick`, bound to an OS-level hotkey, with an optional drop-down placement; MRT does not register global hotkeys itself)*
+- Themes from a file, including importing common theme formats. *(implemented: MRT TOML, Windows Terminal, Alacritty, Ghostty and iTerm2 themes)*
+- Accessibility: screen-reader output for blocks and the grid, and high-contrast themes. *(implemented: AccessKit labels for blocks, screen text for the TUI grid, `high-contrast` theme)*
+- A mobile companion app that attaches to a session server (after Milestone 4). *(waits for the session server)*
+- Suspend/resume, priority changes, and service management in the Task Manager (needs `NtSuspendProcess` on Windows). *(suspend/resume and priority implemented: `:suspend`, `:resume`, `:priority` and Task Manager buttons; service management not yet)*
 
 ## Shipped
 

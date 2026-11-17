@@ -177,6 +177,8 @@ See the [Toolbox guide](TOOLBOX.md#6-task-manager--process-tools-process_inspect
 
 `mrt_control_gui` also takes `"window": "show" | "hide" | "toggle"` to bring the window to the front or minimize it (`mrt quick` uses it).
 
+`mrt server` serves the same tools headless and keeps PTY sessions running between client connections; `mrt_pty_read` with `drain: true` returns only what a client has not read yet. See [SESSION_SERVER.md](SESSION_SERVER.md).
+
 ### 3.6 Agent sandbox tabs
 
 A tab opened with `:sandbox [folder]` is marked with `"sandbox": "<folder>"` in `mrt_list_tabs`. `mrt_run_command` aimed at it runs only commands the Safety Gate rates **Safe**, always from the sandbox folder (a `cwd` argument is ignored, and `cd` does not move the tab); anything else is refused with a message telling the agent to send it with `mrt_control_gui` (`input_text` + `submit_input`), so the user approves it in the window. This lets an agent work unattended without being able to change things outside the folder silently.

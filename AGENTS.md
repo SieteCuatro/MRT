@@ -42,6 +42,7 @@ The Cargo workspace contains 5 modular crates:
   - `lib.rs`: Multi-provider AI client supporting **Google Gemini**, **Anthropic Claude**, **OpenAI**, **xAI Grok**, **DeepSeek**, **OpenRouter**, **Local Ollama**, and a deterministic **Offline Polyglot Heuristic Engine**, with streaming token delivery (`diagnose_command_error_streaming`).
 - **`crates/mrt-app`**:
   - `main.rs`: Entrypoint (`#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]`), CLI flag handler (`--mcp-server`, `--version`, `--help`, and the `mrt agent setup|show|remove` subcommand in `agent_setup.rs`), and `eframe` native GPU launcher.
+  - `cli.rs` & `layout.rs`: `mrt list|send|capture|split` over the MCP bridge (thin wrappers around MCP tools, documented exit codes), and saving / restoring the window layout (`layout.json`, `terminal.restore_layout`).
   - `config_runtime.rs`: Loads the config file at startup, polls it for changes, and applies it to the GUI (font size, default shell, AI preferences, startup MCP servers, keymap, notification settings) with an in-window notice for errors.
   - `fonts.rs`: Font loading from `terminal.font_family` / `terminal.font_fallback` (family names resolved in the system font folders, or font file paths) plus platform symbol fallbacks.
   - `notifications.rs`: `CommandNotifier`: desktop notifications (`notify-rust`) for long commands that finish in the background, and unseen-results badges on tabs.

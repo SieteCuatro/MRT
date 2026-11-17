@@ -46,6 +46,24 @@ The binary is `target/release/mrt` (`mrt.exe` on Windows).
 | `agent setup [--agent claude\|codex\|gemini\|all] [--user\|--project] [--dry-run]` | Registers MRT's MCP server and an `mrt` skill with Claude Code, Codex CLI and Gemini CLI. See [Connect coding agents](MCP_GUIDE.md#21-one-command-setup-for-coding-agents-mrt-agent-setup). |
 | `agent show` | Prints the MCP command line and the agent instructions, for agents `setup` does not know. |
 | `agent remove [same flags]` | Removes exactly what `agent setup` added. |
+| `list`, `send`, `capture`, `split` | Control a running MRT window from another terminal or a script (see [Controlling MRT from the command line](#controlling-mrt-from-the-command-line)). |
+
+### Controlling MRT from the command line
+
+These subcommands talk to the open MRT window through the same token-authenticated local bridge that MCP agents use. `TAB` is a tab index, UUID or title substring; without `-t` the active tab is used. Every subcommand accepts `--json` to print the raw JSON result.
+
+| Command | What it does |
+| :--- | :--- |
+| `mrt list` | Lists the tabs: index (`*` marks the active one), title, shell, activity and folder. |
+| `mrt send [-t TAB] [--shell S] [--cwd DIR] [--] COMMAND...` | Runs `COMMAND` in the tab under the agent safety rule (Critical commands are refused), records a block there, prints its output and exits with the command's exit code. Everything after the first word of the command belongs to the command; use `--` when the command starts with `-`. |
+| `mrt capture [-t TAB] [-n LINES] [-b BLOCKS]` | Prints the tab's last block (or the last `BLOCKS` blocks, each after a `$ command` line); `-n` keeps only the last lines of each. |
+| `mrt split [-t TAB] h\|v\|off` | Splits the tab side by side (`h`), stacked (`v`), or removes the split. |
+
+Exit codes: `0` success, the command's own code for `send`, `2` wrong arguments, `69` no MRT window is running, `70` MRT reported an error (for example an unknown tab).
+
+```bash
+mrt send -t build cargo test && mrt capture -t build -n 20
+```
 
 On macOS and Linux, MRT loads your login shell's `PATH` at startup, so tools installed through Homebrew, `nvm`, `cargo`, etc. are found even when MRT is launched from the Dock or a desktop launcher.
 
@@ -304,6 +322,7 @@ MRT stores its files in the per-user local data directory:
 | File | Contents |
 | :--- | :--- |
 | `history.sqlite` | Every completed command block (command, output, shell, folder, exit code) and your saved runbooks. **Search history** searches it; queries of 3+ characters use the FTS5 trigram index, shorter ones a plain substring match. Output can contain secrets that commands printed; delete the file to wipe history. |
+| `layout.json` | The window's tabs, splits, shells, folders and remote (SSH) tabs, saved while MRT runs and when it closes, and reopened at the next start with fresh shells (`terminal.restore_layout`). Command blocks are not restored; they are in `history.sqlite`. Delete the file to start with one tab. |
 | `mcp-bridge.json` | Port and per-session token of the running GUI's MCP bridge. Written at startup (`0600` on macOS/Linux) and removed on exit. A stale file left after a crash is ignored when no GUI answers. |
 
 `mrt agent setup` writes to the coding agents' own files (`~/.claude.json`, `~/.codex/config.toml`, `~/.gemini/settings.json` and `skills/mrt/SKILL.md` folders; see the [MCP Guide](MCP_GUIDE.md#21-one-command-setup-for-coding-agents-mrt-agent-setup)). Before changing an existing file it saves a copy next to it as `<file>.mrt-backup-<date>-<time>`.
@@ -331,6 +350,7 @@ MRT reads two optional [TOML](https://toml.io) files. Every setting is optional:
 | `terminal.font_size` | `13.0` | Terminal (monospace) font size, clamped to 8–40. Applied live. |
 | `terminal.font_family` | platform default | Monospace font: a family name installed on this computer (`"JetBrains Mono"`, `"CaskaydiaCove Nerd Font"`) or a path to a `.ttf` / `.otf` / `.ttc` file. Family names are matched against the font file names in the system and user font folders, preferring the regular face. A font that is not found is reported in the config banner and the default is used. Applied live. |
 | `terminal.font_fallback` | `[]` | Fonts tried, in order, for characters the main font lacks (Nerd Font icons, symbols, CJK), same syntax as `font_family`. Platform symbol fonts (Segoe UI Symbol, Apple Symbols, Noto Sans Symbols 2 / DejaVu Sans) are tried after them. Ligatures are not drawn. Applied live. |
+| `terminal.restore_layout` | `true` | Reopen the last session's tabs, splits, shells and folders at startup (fresh shells; nothing is run). Remote tabs reconnect on their first command. A shell that is no longer installed becomes the default shell, and a folder that no longer exists becomes the start folder. |
 | `terminal.max_block_output_mb` | `32` | Output kept per command block, in MiB. Older output is dropped from the front and the block says how much; `0` keeps everything (up to 4096). Applies to commands started after the change. |
 | `terminal.theme` | built-in | `graphite-calm` (aliases `dark`, `default`) is the only theme today. |
 | `terminal.persistent_shell` | `true` | Run each tab's commands in one long-lived shell so state carries over (see [§2](#2-the-prompt)). `false` runs every command in a new shell process. Applied on reload; turning it off ends the running shells. |

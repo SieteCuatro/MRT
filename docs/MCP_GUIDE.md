@@ -37,6 +37,8 @@ sequenceDiagram
 
 ---
 
+
+> **Command line.** `mrt list`, `mrt send`, `mrt capture` and `mrt split` are thin wrappers around `mrt_list_tabs`, `mrt_run_command`, `mrt_list_blocks` and `mrt_control_gui` over the same bridge, for scripts and people (see the [User Guide](USER_GUIDE.md#controlling-mrt-from-the-command-line)).
 ## 2. Connecting External AI Clients (`mrt --mcp-server`)
 
 Open the **MCP Hub** side panel inside MRT and click **Copy MCP Config**, or add the following to your AI client's `mcpServers` configuration file (e.g., `claude_desktop_config.json`, `.cursor/mcp.json`, or Antigravity MCP settings):

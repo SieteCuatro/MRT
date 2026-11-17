@@ -171,7 +171,7 @@ pub fn render(ctx: &egui::Context, mode: &CopyMode, blocks: &[CommandBlock]) {
                     lines.len(),
                     if mode.anchor.is_some() { format!(" · {} lines selected", b - a + 1) } else { String::new() }
                 ))
-                .color(Palette::TEXT_SECONDARY),
+                .color(Palette::TEXT_SECONDARY()),
             );
             ui.separator();
             for (n, line) in lines.iter().enumerate().take(end).skip(first) {
@@ -179,9 +179,9 @@ pub fn render(ctx: &egui::Context, mode: &CopyMode, blocks: &[CommandBlock]) {
                 let marker = if n == mode.line { "▶" } else { " " };
                 let mut text = egui::RichText::new(format!("{marker}{:>5} {line}", n + 1)).monospace();
                 if selected {
-                    text = text.background_color(Palette::ACCENT.gamma_multiply(0.35)).color(Palette::TEXT_PRIMARY);
+                    text = text.background_color(Palette::ACCENT().gamma_multiply(0.35)).color(Palette::TEXT_PRIMARY());
                 } else {
-                    text = text.color(Palette::TEXT_MUTED);
+                    text = text.color(Palette::TEXT_MUTED());
                 }
                 ui.add(egui::Label::new(text).truncate());
             }
@@ -191,7 +191,7 @@ pub fn render(ctx: &egui::Context, mode: &CopyMode, blocks: &[CommandBlock]) {
                     "↑↓ j k line · PgUp PgDn · g G · [ ] or Shift+↑↓ block · v select · y/Enter copy · Y block · c command · Esc",
                 )
                 .size(11.0)
-                .color(Palette::TEXT_MUTED),
+                .color(Palette::TEXT_MUTED()),
             );
         });
 }

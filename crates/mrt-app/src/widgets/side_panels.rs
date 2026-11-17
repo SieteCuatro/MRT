@@ -108,18 +108,18 @@ pub fn render_mcp_side_panel(
         RichText::new("MCP Hub")
             .size(15.0)
             .strong()
-            .color(Palette::TEXT_PRIMARY),
+            .color(Palette::TEXT_PRIMARY()),
     );
     ui.label(
         RichText::new("Dual-mode MCP Host & Server (mrt --mcp-server)")
             .size(11.5)
-            .color(Palette::TEXT_SECONDARY),
+            .color(Palette::TEXT_SECONDARY()),
     );
     if let Some(port) = bridge_port {
         ui.add_space(4.0);
         egui::Frame::none()
-            .fill(Palette::BG_ELEVATED)
-            .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_SUBTLE))
+            .fill(Palette::BG_ELEVATED())
+            .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_SUBTLE()))
             .rounding(egui::Rounding::same(6.0))
             .inner_margin(egui::Margin::symmetric(10.0, 6.0))
             .show(ui, |ui| {
@@ -127,13 +127,13 @@ pub fn render_mcp_side_panel(
                     ui.label(
                         RichText::new("●")
                             .size(11.0)
-                            .color(Palette::ACCENT_GREEN),
+                            .color(Palette::ACCENT_GREEN()),
                     );
                     ui.label(
                         RichText::new(format!("GUI Bridge 127.0.0.1:{port}"))
                             .size(11.5)
                             .monospace()
-                            .color(Palette::TEXT_PRIMARY),
+                            .color(Palette::TEXT_PRIMARY()),
                     );
                     if ui.small_button("Copy Config").clicked() {
                         let exe = std::env::current_exe()
@@ -162,46 +162,46 @@ pub fn render_mcp_side_panel(
             RichText::new("Connected Servers")
                 .size(12.0)
                 .strong()
-                .color(Palette::TEXT_SECONDARY),
+                .color(Palette::TEXT_SECONDARY()),
         );
         ui.add_space(4.0);
         for srv in &mcp_host.servers {
             egui::Frame::none()
-                .fill(Palette::BG_SURFACE)
-                .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_SUBTLE))
+                .fill(Palette::BG_SURFACE())
+                .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_SUBTLE()))
                 .rounding(egui::Rounding::same(6.0))
                 .inner_margin(egui::Margin::same(10.0))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         let dot_color = if srv.connected {
-                            Palette::ACCENT_GREEN
+                            Palette::ACCENT_GREEN()
                         } else {
-                            Palette::ACCENT_RED
+                            Palette::ACCENT_RED()
                         };
                         ui.label(RichText::new("●").size(11.0).color(dot_color));
                         ui.label(
                             RichText::new(&srv.config.name)
                                 .strong()
-                                .color(Palette::TEXT_PRIMARY),
+                                .color(Palette::TEXT_PRIMARY()),
                         );
                         ui.label(
                             RichText::new(format!("v{}", srv.server_version))
                                 .size(11.0)
                                 .monospace()
-                                .color(Palette::TEXT_MUTED),
+                                .color(Palette::TEXT_MUTED()),
                         );
                     });
                     ui.label(
                         RichText::new(srv.config.target_display())
                             .size(11.0)
                             .monospace()
-                            .color(Palette::TEXT_SECONDARY),
+                            .color(Palette::TEXT_SECONDARY()),
                     );
                     if let Some(ref err) = srv.last_error {
                         ui.label(
                             RichText::new(format!("Error: {err}"))
                                 .size(11.0)
-                                .color(Palette::ACCENT_RED),
+                                .color(Palette::ACCENT_RED()),
                         );
                     }
 
@@ -210,7 +210,7 @@ pub fn render_mcp_side_panel(
                         RichText::new(format!("Tools ({})", srv.tools.len()))
                             .size(11.5)
                             .strong()
-                            .color(Palette::ACCENT_BLUE),
+                            .color(Palette::ACCENT_BLUE()),
                     );
 
                     for tool in &srv.tools {
@@ -218,14 +218,14 @@ pub fn render_mcp_side_panel(
                             RichText::new(&tool.name)
                                 .size(12.0)
                                 .monospace()
-                                .color(Palette::TEXT_PRIMARY),
+                                .color(Palette::TEXT_PRIMARY()),
                         )
                         .default_open(false)
                         .show(ui, |ui| {
                             ui.label(
                                 RichText::new(&tool.description)
                                     .size(11.5)
-                                    .color(Palette::TEXT_SECONDARY),
+                                    .color(Palette::TEXT_SECONDARY()),
                             );
                             ui.add_space(4.0);
                             if ui.small_button("Invoke").clicked() {
@@ -247,7 +247,7 @@ pub fn render_mcp_side_panel(
             RichText::new("Tool Arguments (JSON)")
                 .size(12.0)
                 .strong()
-                .color(Palette::TEXT_SECONDARY),
+                .color(Palette::TEXT_SECONDARY()),
         );
         ui.add(
             egui::TextEdit::multiline(&mut state.mcp_tool_args_input)
@@ -262,7 +262,7 @@ pub fn render_mcp_side_panel(
             RichText::new("Server Presets")
                 .size(12.0)
                 .strong()
-                .color(Palette::TEXT_SECONDARY),
+                .color(Palette::TEXT_SECONDARY()),
         );
         ui.horizontal_wrapped(|ui| {
             let presets = [
@@ -288,39 +288,39 @@ pub fn render_mcp_side_panel(
             RichText::new("Connect External Server")
                 .size(12.0)
                 .strong()
-                .color(Palette::TEXT_SECONDARY),
+                .color(Palette::TEXT_SECONDARY()),
         );
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Transport").size(11.5).color(Palette::TEXT_MUTED));
+            ui.label(RichText::new("Transport").size(11.5).color(Palette::TEXT_MUTED()));
             for kind in [McpTransportKind::Stdio, McpTransportKind::Http] {
                 ui.selectable_value(&mut state.new_mcp_transport, kind, kind.label());
             }
         });
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Name").size(11.5).color(Palette::TEXT_MUTED));
+            ui.label(RichText::new("Name").size(11.5).color(Palette::TEXT_MUTED()));
             ui.text_edit_singleline(&mut state.new_mcp_name);
         });
         match state.new_mcp_transport {
             McpTransportKind::Stdio => {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Cmd").size(11.5).color(Palette::TEXT_MUTED));
+                    ui.label(RichText::new("Cmd").size(11.5).color(Palette::TEXT_MUTED()));
                     ui.text_edit_singleline(&mut state.new_mcp_cmd);
                 });
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Args").size(11.5).color(Palette::TEXT_MUTED));
+                    ui.label(RichText::new("Args").size(11.5).color(Palette::TEXT_MUTED()));
                     ui.text_edit_singleline(&mut state.new_mcp_args);
                 });
             }
             McpTransportKind::Http => {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("URL").size(11.5).color(Palette::TEXT_MUTED));
+                    ui.label(RichText::new("URL").size(11.5).color(Palette::TEXT_MUTED()));
                     ui.text_edit_singleline(&mut state.new_mcp_url);
                 });
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new("Headers (one `Name: value` per line)")
                             .size(11.5)
-                            .color(Palette::TEXT_MUTED),
+                            .color(Palette::TEXT_MUTED()),
                     );
                     ui.checkbox(&mut state.show_mcp_headers, "Show");
                 });
@@ -362,7 +362,7 @@ pub fn render_network_tab(
     ui.label(
         RichText::new("HTTP client, web reader, ports, DNS and WebSocket tools")
             .size(11.5)
-            .color(Palette::TEXT_SECONDARY),
+            .color(Palette::TEXT_SECONDARY()),
     );
     ui.separator();
 
@@ -370,7 +370,7 @@ pub fn render_network_tab(
         RichText::new("HTTP Inspector (:http)")
             .size(12.0)
             .strong()
-            .color(Palette::ACCENT_BLUE),
+            .color(Palette::ACCENT_BLUE()),
     );
     ui.horizontal(|ui| {
         egui::ComboBox::from_id_salt("http_method_combo")
@@ -391,7 +391,7 @@ pub fn render_network_tab(
         ui.label(
             RichText::new("Request Body (JSON)")
                 .size(11.5)
-                .color(Palette::TEXT_SECONDARY),
+                .color(Palette::TEXT_SECONDARY()),
         );
         ui.add(
             egui::TextEdit::multiline(&mut state.http_body)
@@ -414,7 +414,7 @@ pub fn render_network_tab(
         RichText::new("Web Reader (:web)")
             .size(12.0)
             .strong()
-            .color(Palette::ACCENT_BLUE),
+            .color(Palette::ACCENT_BLUE()),
     );
     ui.add(
         egui::TextEdit::singleline(&mut state.web_url)
@@ -433,12 +433,12 @@ pub fn render_network_tab(
         RichText::new("Listening Ports (:ports)")
             .size(12.0)
             .strong()
-            .color(Palette::ACCENT_BLUE),
+            .color(Palette::ACCENT_BLUE()),
     );
     ui.label(
         RichText::new("Scans active local TCP/UDP listening sockets and PIDs.")
             .size(11.5)
-            .color(Palette::TEXT_SECONDARY),
+            .color(Palette::TEXT_SECONDARY()),
     );
     if ui.button("Scan Ports").clicked() {
         event = Some(SidePanelEvent::RunPortScanner);
@@ -447,7 +447,7 @@ pub fn render_network_tab(
         ui.label(
             RichText::new(format!("Last scan · {} listeners · click a PID to open it in the Task Manager", state.last_ports.len()))
                 .size(11.0)
-                .color(Palette::TEXT_MUTED),
+                .color(Palette::TEXT_MUTED()),
         );
         egui::ScrollArea::vertical()
             .id_salt("network_last_ports")
@@ -462,7 +462,7 @@ pub fn render_network_tab(
                                 RichText::new(format!("{} {}:{}", p.protocol, p.local_address, p.port))
                                     .monospace()
                                     .size(11.5)
-                                    .color(Palette::TEXT_BODY),
+                                    .color(Palette::TEXT_BODY()),
                             );
                             match p.pid.trim().parse::<u32>().ok().filter(|pid| *pid > 0) {
                                 Some(pid) => {
@@ -479,7 +479,7 @@ pub fn render_network_tab(
                                     }
                                 }
                                 None => {
-                                    ui.label(RichText::new(&p.pid).size(11.5).color(Palette::TEXT_MUTED));
+                                    ui.label(RichText::new(&p.pid).size(11.5).color(Palette::TEXT_MUTED()));
                                 }
                             }
                             ui.end_row();
@@ -494,12 +494,12 @@ pub fn render_network_tab(
         RichText::new("DNS & Latency Trace (:dns)")
             .size(12.0)
             .strong()
-            .color(Palette::ACCENT_BLUE),
+            .color(Palette::ACCENT_BLUE()),
     );
     ui.label(
         RichText::new("Resolves IPv4/IPv6 addresses and measures TCP handshake latency.")
             .size(11.5)
-            .color(Palette::TEXT_SECONDARY),
+            .color(Palette::TEXT_SECONDARY()),
     );
     ui.add(
         egui::TextEdit::singleline(&mut state.dns_host)
@@ -518,12 +518,12 @@ pub fn render_network_tab(
         RichText::new("WebSocket Inspector (:ws)")
             .size(12.0)
             .strong()
-            .color(Palette::ACCENT_BLUE),
+            .color(Palette::ACCENT_BLUE()),
     );
     ui.label(
         RichText::new("Inspects live WebSocket streams and sends probe frames.")
             .size(11.5)
-            .color(Palette::TEXT_SECONDARY),
+            .color(Palette::TEXT_SECONDARY()),
     );
     ui.add(
         egui::TextEdit::singleline(&mut state.ws_url)

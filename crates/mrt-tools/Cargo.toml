@@ -17,3 +17,6 @@ similar.workspace = true
 futures-util = "0.3"
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots", "connect"] }
 sysinfo = { version = "0.40", default-features = false, features = ["system", "user"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

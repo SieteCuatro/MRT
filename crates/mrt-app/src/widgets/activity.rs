@@ -11,16 +11,16 @@ const IDLE: Color32 = Color32::from_rgb(63, 63, 70);
 /// Main colour of the indicator.
 pub fn activity_color(snapshot: &ActivitySnapshot) -> Color32 {
     match snapshot.tone {
-        ProgressTone::Error if snapshot.state.is_running() => return Palette::ACCENT_RED,
-        ProgressTone::Warning if snapshot.state.is_running() => return Palette::ACCENT_AMBER,
+        ProgressTone::Error if snapshot.state.is_running() => return Palette::ACCENT_RED(),
+        ProgressTone::Warning if snapshot.state.is_running() => return Palette::ACCENT_AMBER(),
         _ => {}
     }
     match snapshot.state {
         ActivityState::Idle => IDLE,
-        ActivityState::Running | ActivityState::Progress(_) => Palette::ACCENT,
-        ActivityState::WaitingForInput => Palette::ACCENT_AMBER,
-        ActivityState::Succeeded => Palette::ACCENT_GREEN,
-        ActivityState::Failed => Palette::ACCENT_RED,
+        ActivityState::Running | ActivityState::Progress(_) => Palette::ACCENT(),
+        ActivityState::WaitingForInput => Palette::ACCENT_AMBER(),
+        ActivityState::Succeeded => Palette::ACCENT_GREEN(),
+        ActivityState::Failed => Palette::ACCENT_RED(),
     }
 }
 

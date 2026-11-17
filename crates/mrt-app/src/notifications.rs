@@ -276,7 +276,7 @@ impl CommandNotifier {
                 ui.label(
                     RichText::new("Tabs with unseen finished commands show a badge in the sidebar.")
                         .size(12.0)
-                        .color(Palette::TEXT_MUTED),
+                        .color(Palette::TEXT_MUTED()),
                 );
                 if ui.button("Send test notification").clicked() {
                     test = true;
@@ -316,7 +316,7 @@ impl CommandNotifier {
         let width = (text.chars().count() as f32 * if compact { 5.0 } else { 6.5 }).max(radius * 2.0);
         let rect = egui::Rect::from_center_size(center, egui::vec2(width + 4.0, radius * 2.0));
         let painter = ui.painter();
-        painter.rect_filled(rect, egui::Rounding::same(radius), Palette::ACCENT);
+        painter.rect_filled(rect, egui::Rounding::same(radius), Palette::ACCENT());
         painter.text(
             center,
             Align2::CENTER_CENTER,

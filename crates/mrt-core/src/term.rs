@@ -150,6 +150,9 @@ pub fn xterm_palette(index: u8) -> AnsiColor {
     ];
     match index {
         0..=15 => {
+            if let Some(color) = crate::theme_file::themed_ansi(index as usize) {
+                return color;
+            }
             let (r, g, b) = ANSI16[index as usize];
             AnsiColor::new(r, g, b)
         }

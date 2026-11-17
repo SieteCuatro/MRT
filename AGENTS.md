@@ -14,6 +14,7 @@ The Cargo workspace contains 5 modular crates:
   - `pty.rs`: Discovers installed host shells (`pwsh`, `powershell`, `cmd`/Batch, `git-bash`, `wsl`, `bash`, `zsh`, `fish`, `nu`, `sh`) and executes commands or spawns `portable-pty` sessions. Uses `CREATE_NO_WINDOW` (`0x08000000`) on Windows so child processes never flash external console windows.
   - `vt.rs`: Parses ANSI/VT100 escape sequences via `vte` into colored `AnsiSpan` segments and stripped plain text; `parse_ansi_rich` also returns OSC 7 (working directory), OSC 8 (hyperlinks on spans), and OSC 52 (clipboard requests, never applied automatically) as `VtEvent`s. `VtStream` parses streamed output chunk by chunk (used by `CommandBlock::append_output`, which also enforces the per-block output limit).
   - `images.rs`: Inline images for blocks: iTerm2 `OSC 1337 File=`, kitty graphics (APC, direct transmission only) and Sixel, decoded to RGBA with size limits (`InlineImage` in `ParsedAnsi::images` / `CommandBlock::images`).
+  - `theme_file.rs`: Theme files (MRT TOML, Windows Terminal, Alacritty, Ghostty, iTerm2) and the process-wide 16-color ANSI palette.
   - `links.rs`: Detects plain-text URLs and `path:line[:col]` locations in output and classifies OSC 8 targets (which URL schemes MRT will open).
   - `term.rs`: Terminal grid emulator (`TerminalEmulator`) wrapping `alacritty_terminal` behind an MRT-owned API: `feed` PTY bytes, `resize`, `snapshot` of cells (colors, attributes, wide chars), cursor, scrollback, title, alternate screen, input modes (app cursor, bracketed paste, mouse), and `take_replies` for DA/CPR answers to the PTY. Used by the GUI's TUI overlay.
   - `block.rs`: Defines `CommandBlock` and `classify_output` (auto-detecting JSON trees, CSV/TSV tables, Markdown, and HTTP responses).
@@ -30,6 +31,7 @@ The Cargo workspace contains 5 modular crates:
   - `dns_inspector.rs`: Built-in `:dns` DNS resolution and TCP handshake latency tracer.
   - `ws_inspector.rs`: Built-in `:ws` WebSocket inspector with live frame logging and test probe sender.
   - `bug_reporter.rs`: Built-in `:report` / `:bug` Markdown bug report generator with automatic secret token redaction.
+  - `process_control.rs`: `:suspend`, `:resume`, `:priority` (NtSuspendProcess / SetPriorityClass on Windows, SIGSTOP / setpriority on Unix), with Critical targets refused.
   - `process_inspector.rs`: Built-in Task Manager backend (`sysinfo`): `:ps` / `:top` process tables, `:proc` details, `:kill` planning with Safety Gate classification and tree termination, `:watch-proc` watches, MRT-owned process labels, and process snapshot diffs.
   - `structured_diff.rs`: Canonical JSON diffs (key order invariant), listening port snapshot delta detection, and process snapshot deltas.
 - **`crates/mrt-mcp`**:

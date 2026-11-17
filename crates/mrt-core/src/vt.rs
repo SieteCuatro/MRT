@@ -127,6 +127,9 @@ impl VtParserState {
     }
 
     fn standard_color(idx: u16, bright: bool) -> AnsiColor {
+        if let Some(color) = crate::theme_file::themed_ansi(idx as usize + if bright { 8 } else { 0 }) {
+            return color;
+        }
         match (idx, bright) {
             (0, false) => AnsiColor::new(40, 44, 52),
             (1, false) => AnsiColor::new(224, 108, 117),

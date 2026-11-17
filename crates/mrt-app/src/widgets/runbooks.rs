@@ -45,7 +45,7 @@ pub fn render_runbooks_panel(
     ui.label(
         RichText::new("Save command sequences and replay them step-by-step through the Safety Gate.")
             .size(11.5)
-            .color(Palette::TEXT_MUTED),
+            .color(Palette::TEXT_MUTED()),
     );
     ui.add_space(6.0);
 
@@ -59,7 +59,7 @@ pub fn render_runbooks_panel(
                         status.runbook_name, status.current_step, status.total_steps
                     ))
                     .strong()
-                    .color(Palette::ACCENT_BLUE),
+                    .color(Palette::ACCENT_BLUE()),
                 );
                 if ui.button("Stop").clicked() {
                     action = Some(RunbookAction::StopReplay);
@@ -94,7 +94,7 @@ pub fn render_runbooks_panel(
         ui.add_space(6.0);
 
         if let Some(err) = &state.validation_error {
-            ui.colored_label(Palette::ACCENT_RED, err);
+            ui.colored_label(Palette::ACCENT_RED(), err);
             ui.add_space(4.0);
         }
 
@@ -112,7 +112,7 @@ pub fn render_runbooks_panel(
                     ui.label(
                         RichText::new("No steps yet. Add a step below or pick from history.")
                             .size(11.5)
-                            .color(Palette::TEXT_MUTED),
+                            .color(Palette::TEXT_MUTED()),
                     );
                 }
                 for (idx, step) in draft.steps.iter_mut().enumerate() {
@@ -226,7 +226,7 @@ pub fn render_runbooks_panel(
                         ui.label(
                             RichText::new("No matching history commands.")
                                 .size(11.5)
-                                .color(Palette::TEXT_MUTED),
+                                .color(Palette::TEXT_MUTED()),
                         );
                     }
                     for block in history_results {
@@ -316,7 +316,7 @@ pub fn render_runbooks_panel(
         ui.label(
             RichText::new("No saved runbooks yet. Create one or click '+ Runbook' on any item in History.")
                 .size(12.0)
-                .color(Palette::TEXT_MUTED),
+                .color(Palette::TEXT_MUTED()),
         );
     } else {
         egui::ScrollArea::vertical()

@@ -45,13 +45,13 @@ pub fn render_toolbox_side_panel(ui: &mut Ui, state: &mut SidePanelState) -> Opt
         RichText::new("Toolbox")
             .size(15.0)
             .strong()
-            .color(Palette::TEXT_PRIMARY),
+            .color(Palette::TEXT_PRIMARY()),
     );
     ui.add_space(4.0);
 
     // Tab strip
     egui::Frame::none()
-        .fill(Palette::BG_INSET)
+        .fill(Palette::BG_INSET())
         .rounding(egui::Rounding::same(10.0))
         .inner_margin(egui::Margin::same(3.0))
         .show(ui, |ui| {
@@ -62,9 +62,9 @@ pub fn render_toolbox_side_panel(ui: &mut Ui, state: &mut SidePanelState) -> Opt
                     let button = egui::Button::new(
                         RichText::new(format!("{}  {}", tab.icon(), tab.label()))
                             .size(12.5)
-                            .color(if selected { Palette::TEXT_PRIMARY } else { Palette::TEXT_SECONDARY }),
+                            .color(if selected { Palette::TEXT_PRIMARY() } else { Palette::TEXT_SECONDARY() }),
                     )
-                    .fill(if selected { Palette::BORDER_SUBTLE } else { Color32::TRANSPARENT })
+                    .fill(if selected { Palette::BORDER_SUBTLE() } else { Color32::TRANSPARENT })
                     .stroke(egui::Stroke::NONE)
                     .rounding(egui::Rounding::same(8.0))
                     .min_size(egui::vec2(0.0, 26.0));

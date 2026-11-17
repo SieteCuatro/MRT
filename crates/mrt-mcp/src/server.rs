@@ -1571,7 +1571,8 @@ pub async fn execute_mrt_mcp_tool(
                 .unwrap_or(150)
                 .min(5000);
 
-            match InteractivePty::spawn_with_command(&shell, &cwd, cols, rows, initial_cmd) {
+            // With a session host, the PTY runs there and outlives this window.
+            match InteractivePty::spawn_with_owner(&shell, &cwd, cols, rows, initial_cmd, Some(r#"{"kind":"mcp"}"#)) {
                 Ok(pty) => {
                     let pty_id = pty.id;
                     if let Some(pid) = pty.process_id() {

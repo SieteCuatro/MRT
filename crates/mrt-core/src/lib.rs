@@ -6,6 +6,7 @@ pub mod images;
 pub mod links;
 pub mod platform;
 pub mod pty;
+pub mod pty_host;
 pub mod safety;
 pub mod shell_integration;
 pub mod term;

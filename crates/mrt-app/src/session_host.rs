@@ -44,6 +44,11 @@ pub enum HostRequest {
     Forget { block_id: Uuid },
     CloseTab { tab_id: Uuid },
     Shutdown,
+    /// Starts a PTY owned by the host (full-screen programs, agents' PTYs).
+    PtySpawn { shell: ShellProfile, cwd: PathBuf, cols: u16, rows: u16, command: Option<String>, owner: Option<String> },
+    PtyList,
+    /// Drops an exited PTY.
+    PtyForget { pty_id: Uuid },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -85,6 +90,7 @@ pub struct HostState {
     sampler: mrt_tools::SharedProcessSampler,
     last_request: Mutex<Instant>,
     shutdown: tokio::sync::Notify,
+    ptys: Mutex<HashMap<Uuid, (Arc<mrt_core::InteractivePty>, mrt_core::pty_host::HostedPtyInfo)>>,
 }
 
 impl HostState {
@@ -96,11 +102,22 @@ impl HostState {
             sampler: mrt_tools::SharedProcessSampler::new(),
             last_request: Mutex::new(Instant::now()),
             shutdown: tokio::sync::Notify::new(),
+            ptys: Mutex::new(HashMap::new()),
         })
     }
 
     fn running(&self) -> usize {
-        self.jobs.lock().map(|j| j.values().filter(|j| j.done.is_none()).count()).unwrap_or(0)
+        let jobs = self.jobs.lock().map(|j| j.values().filter(|j| j.done.is_none()).count()).unwrap_or(0);
+        let ptys = self
+            .ptys
+            .lock()
+            .map(|p| p.values().filter(|(pty, _)| !matches!(pty.try_wait_exit(), Ok(Some(_)))).count())
+            .unwrap_or(0);
+        jobs + ptys
+    }
+
+    fn pty(&self, id: Uuid) -> Option<Arc<mrt_core::InteractivePty>> {
+        self.ptys.lock().ok()?.get(&id).map(|(pty, _)| pty.clone())
     }
 
     async fn handle(self: &Arc<Self>, request: HostRequest) -> Result<Value> {
@@ -153,7 +170,49 @@ impl HostState {
                 Ok(json!({ "ok": true }))
             }
             HostRequest::Shutdown => {
+                if let Ok(ptys) = self.ptys.lock() {
+                    for (pty, _) in ptys.values() {
+                        let _ = pty.kill();
+                    }
+                }
                 self.shutdown.notify_waiters();
+                Ok(json!({ "ok": true }))
+            }
+            HostRequest::PtySpawn { shell, cwd, cols, rows, command, owner } => {
+                let pty = mrt_core::InteractivePty::spawn_local(&shell, &cwd, cols, rows, command.as_deref())?;
+                let info = mrt_core::pty_host::HostedPtyInfo {
+                    pty_id: pty.id,
+                    shell_id: shell.id.clone(),
+                    shell_name: shell.name.clone(),
+                    cwd,
+                    cols,
+                    rows,
+                    command,
+                    owner,
+                    exited: false,
+                };
+                self.ptys.lock().map_err(|_| anyhow!("lock"))?.insert(pty.id, (Arc::new(pty), info.clone()));
+                Ok(serde_json::to_value(info)?)
+            }
+            HostRequest::PtyList => {
+                let ptys = self.ptys.lock().map_err(|_| anyhow!("lock"))?;
+                let list: Vec<mrt_core::pty_host::HostedPtyInfo> = ptys
+                    .values()
+                    .map(|(pty, info)| mrt_core::pty_host::HostedPtyInfo {
+                        exited: matches!(pty.try_wait_exit(), Ok(Some(_))),
+                        cols: pty.size().0,
+                        rows: pty.size().1,
+                        ..info.clone()
+                    })
+                    .collect();
+                Ok(serde_json::to_value(list)?)
+            }
+            HostRequest::PtyForget { pty_id } => {
+                if let Ok(mut ptys) = self.ptys.lock() {
+                    if ptys.get(&pty_id).is_some_and(|(pty, _)| matches!(pty.try_wait_exit(), Ok(Some(_)))) {
+                        ptys.remove(&pty_id);
+                    }
+                }
                 Ok(json!({ "ok": true }))
             }
         }
@@ -246,21 +305,72 @@ fn tokens_match(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-async fn serve_connection(stream: TcpStream, token: &str, state: &Arc<HostState>) -> Result<()> {
-    let (read, mut write) = stream.into_split();
-    let mut lines = BufReader::new(read).lines();
-    let auth: Value = serde_json::from_str(&lines.next_line().await?.unwrap_or_default())?;
+/// One connection, on a blocking thread: a request and its reply, or a PTY event
+/// stream that lasts until the program exits or the client leaves.
+fn serve_connection(stream: std::net::TcpStream, token: &str, state: &Arc<HostState>, runtime: tokio::runtime::Handle) -> Result<()> {
+    use std::io::{BufRead, Write};
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    let mut writer = stream.try_clone()?;
+    let mut reader = std::io::BufReader::new(stream.try_clone()?);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    let auth: Value = serde_json::from_str(&line)?;
     if !auth[AUTH_KEY].as_str().is_some_and(|t| tokens_match(t, token)) {
         bail!("bad token");
     }
-    let request: HostRequest = serde_json::from_str(&lines.next_line().await?.unwrap_or_default())?;
-    let reply = match state.handle(request).await {
+    line.clear();
+    reader.read_line(&mut line)?;
+    let request: Value = serde_json::from_str(&line)?;
+    if request["op"] == "job_stream" {
+        // Event stream for a command: {"out"} lines as output appears, then {"done"}.
+        let id: Uuid = serde_json::from_value(request["block_id"].clone())?;
+        let mut sent = request["from"].as_u64().unwrap_or(0) as usize;
+        stream.set_read_timeout(None)?;
+        loop {
+            let (chunk, done) = {
+                let jobs = state.jobs.lock().map_err(|_| anyhow!("lock"))?;
+                let Some(job) = jobs.get(&id) else {
+                    writeln!(writer, "{}", json!({ "error": "unknown job" }))?;
+                    return Ok(());
+                };
+                let mut start = sent.min(job.output.len());
+                while !job.output.is_char_boundary(start) {
+                    start -= 1;
+                }
+                let chunk = job.output[start..].to_string();
+                sent = job.output.len();
+                (chunk, job.done.clone().map(|d| (d, job.output.clone())))
+            };
+            if let Some((done, full)) = done {
+                writeln!(writer, "{}", json!({ "done": done, "output": full }))?;
+                return Ok(());
+            }
+            if !chunk.is_empty() {
+                writeln!(writer, "{}", json!({ "out": chunk }))?;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    if request["op"] == "pty_stream" {
+        if let Ok(mut last) = state.last_request.lock() {
+            *last = Instant::now();
+        }
+        let id: Uuid = serde_json::from_value(request["pty_id"].clone())?;
+        let from = request["from"].as_u64().unwrap_or(0) as usize;
+        let Some(pty) = state.pty(id) else {
+            writeln!(writer, "{}", json!({ "error": "unknown PTY" }))?;
+            return Ok(());
+        };
+        stream.set_read_timeout(None)?;
+        return mrt_core::pty_host::serve_stream(writer, reader, pty, from);
+    }
+    let request: HostRequest = serde_json::from_value(request)?;
+    let reply = match runtime.block_on(state.handle(request)) {
         Ok(value) => json!({ "ok": value }),
         Err(e) => json!({ "error": e.to_string() }),
     };
-    let mut line = reply.to_string();
-    line.push('\n');
-    write.write_all(line.as_bytes()).await?;
+    writeln!(writer, "{reply}")?;
     Ok(())
 }
 
@@ -272,8 +382,10 @@ pub async fn serve(listener: TcpListener, token: String, state: Arc<HostState>, 
             accepted = listener.accept() => {
                 let Ok((stream, _)) = accepted else { continue };
                 let (token, state) = (token.clone(), state.clone());
-                tokio::spawn(async move {
-                    let _ = tokio::time::timeout(Duration::from_secs(10), serve_connection(stream, &token, &state)).await;
+                let Ok(stream) = stream.into_std() else { continue };
+                let runtime = tokio::runtime::Handle::current();
+                tokio::task::spawn_blocking(move || {
+                    let _ = serve_connection(stream, &token, &state, runtime);
                 });
             }
             _ = state.shutdown.notified() => return,
@@ -356,46 +468,71 @@ impl HostClient {
         Ok(reply["ok"].clone())
     }
 
+    /// The endpoint for [`mrt_core::pty_host`].
+    pub fn endpoint(&self) -> mrt_core::pty_host::HostEndpoint {
+        mrt_core::pty_host::HostEndpoint { port: self.port, token: self.token.clone() }
+    }
+
     pub async fn jobs(&self) -> Result<Vec<JobInfo>> {
         Ok(serde_json::from_value(self.request(&HostRequest::Jobs).await?)?)
     }
 
-    /// Follows a job: copies new output into `output` until it is done, then returns
-    /// the result and the full output.
+    /// Follows a job over an event stream (the host pushes output as it appears),
+    /// copying new output into `output` until it is done; returns the full output and
+    /// the result. A dropped stream is resumed from the last byte received.
     pub async fn follow(&self, block_id: Uuid, output: &Arc<Mutex<String>>) -> Result<(String, JobDone)> {
-        let mut next = 0usize;
-        let mut full = String::new();
+        let mut received = 0usize;
         let mut failures = 0;
         loop {
-            match self.request(&HostRequest::Poll { block_id, from: next }).await {
-                Ok(value) => {
-                    failures = 0;
-                    let reply: PollReply = serde_json::from_value(value)?;
-                    if let Some(done) = reply.done {
-                        // The final text replaces what was streamed.
-                        let all = self.request(&HostRequest::Poll { block_id, from: 0 }).await?;
-                        let all: PollReply = serde_json::from_value(all)?;
-                        let _ = self.request(&HostRequest::Forget { block_id }).await;
-                        return Ok((all.output, done));
-                    }
-                    if !reply.output.is_empty() {
-                        full.push_str(&reply.output);
-                        if let Ok(mut pending) = output.lock() {
-                            pending.push_str(&reply.output);
-                        }
-                    }
-                    next = reply.next;
+            match self.stream_job(block_id, received, output).await {
+                Ok(StreamEnd::Done(full, done)) => {
+                    let _ = self.request(&HostRequest::Forget { block_id }).await;
+                    return Ok((full, done));
                 }
+                Ok(StreamEnd::Dropped(at)) => received = at,
                 Err(e) => {
                     failures += 1;
-                    if failures > 50 {
+                    if failures > 20 {
                         return Err(e.context("the session host stopped answering"));
                     }
+                    tokio::time::sleep(Duration::from_millis(250)).await;
                 }
             }
-            tokio::time::sleep(Duration::from_millis(120)).await;
         }
     }
+
+    async fn stream_job(&self, block_id: Uuid, from: usize, output: &Arc<Mutex<String>>) -> Result<StreamEnd> {
+        let stream = tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(("127.0.0.1", self.port))).await??;
+        let (read, mut write) = stream.into_split();
+        let mut payload = json!({ AUTH_KEY: self.token }).to_string();
+        payload.push('\n');
+        payload.push_str(&json!({ "op": "job_stream", "block_id": block_id, "from": from }).to_string());
+        payload.push('\n');
+        write.write_all(payload.as_bytes()).await?;
+        let mut lines = BufReader::new(read).lines();
+        let mut at = from;
+        while let Some(line) = lines.next_line().await? {
+            let event: Value = serde_json::from_str(&line)?;
+            if let Some(error) = event["error"].as_str() {
+                bail!("{error}");
+            }
+            if let Some(text) = event["out"].as_str() {
+                at += text.len();
+                if let Ok(mut pending) = output.lock() {
+                    pending.push_str(text);
+                }
+            } else if event.get("done").is_some() {
+                let done: JobDone = serde_json::from_value(event["done"].clone())?;
+                return Ok(StreamEnd::Done(event["output"].as_str().unwrap_or_default().to_string(), done));
+            }
+        }
+        Ok(StreamEnd::Dropped(at))
+    }
+}
+
+enum StreamEnd {
+    Done(String, JobDone),
+    Dropped(usize),
 }
 
 /// Reads the host file and checks the host answers.
@@ -481,6 +618,51 @@ mod tests {
             assert!(reattached.jobs().await.unwrap().is_empty(), "collected jobs are forgotten");
             assert!(HostClient { port: host.port, token: "wrong".into() }.jobs().await.is_err());
         });
+    }
+
+    fn wait_for(pty: &mrt_core::InteractivePty, needle: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if pty.read_transcript().contains(needle) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    #[test]
+    fn hosted_ptys_outlive_their_window_and_replay_on_reattach() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let host = rt.block_on(start_in_process());
+        let endpoint = host.endpoint();
+        let shell = test_shell();
+        let owner = r#"{"kind":"tui","command":"shell"}"#;
+        let pty = mrt_core::pty_host::spawn_in_host(&endpoint, &shell, &std::env::temp_dir(), 80, 24, None, Some(owner)).unwrap();
+        assert!(pty.is_hosted());
+        pty.send_line("echo hosted-one").unwrap();
+        assert!(wait_for(&pty, "hosted-one"), "{}", pty.read_transcript());
+        let id = pty.id;
+        drop(pty); // the window goes away; the program keeps running in the host
+
+        let list = mrt_core::pty_host::list(&endpoint).unwrap();
+        let info = list.iter().find(|i| i.pty_id == id).expect("still in the host").clone();
+        assert!(!info.exited);
+        assert_eq!(info.owner.as_deref(), Some(owner));
+
+        let again = mrt_core::pty_host::attach(&endpoint, &info).unwrap();
+        assert!(wait_for(&again, "hosted-one"), "the whole session is replayed: {}", again.read_transcript());
+        again.resize(100, 30).unwrap();
+        again.send_line("echo hosted-two").unwrap();
+        assert!(wait_for(&again, "hosted-two"));
+        again.kill().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while again.try_wait_exit().unwrap().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(again.try_wait_exit().unwrap().is_some(), "the exit reaches the window");
+        mrt_core::pty_host::request(&endpoint, &serde_json::json!({ "op": "pty_forget", "pty_id": id })).unwrap();
+        assert!(mrt_core::pty_host::list(&endpoint).unwrap().iter().all(|i| i.pty_id != id));
     }
 
     #[test]

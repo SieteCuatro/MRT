@@ -197,6 +197,72 @@ impl ShellPool {
         self.lock().running.contains_key(&block_id)
     }
 
+    /// Finds or starts the SSH session of a remote tab (`ssh -tt <args>` with the
+    /// integration typed in). Unlike local shells there is no fallback: a remote tab's
+    /// commands must never run on this machine. A busy session is returned anyway and
+    /// the command waits for the next prompt. Blocks while connecting; call it from a
+    /// blocking thread.
+    pub fn acquire_remote(&self, tab_id: Uuid, args: &[String]) -> Result<Arc<ShellSession>, String> {
+        let key = (tab_id, REMOTE_SHELL_ID.to_string());
+        let deadline = Instant::now() + REMOTE_CONNECT_TIMEOUT + Duration::from_secs(5);
+        loop {
+            let mut inner = self.lock();
+            match inner.entries.get_mut(&key) {
+                Some(Entry::Ready { session, busy }) if !session.has_exited() => {
+                    *busy = true;
+                    return Ok(session.clone());
+                }
+                Some(Entry::Starting) => {
+                    // Another command is connecting this tab; wait for it.
+                    if Instant::now() >= deadline {
+                        return Err("the SSH session is still connecting".into());
+                    }
+                }
+                Some(Entry::Unavailable(reason)) => {
+                    // Forget the failure so the next command tries again (the user may
+                    // have fixed their keys or the host may be back).
+                    let reason = reason.clone();
+                    inner.entries.remove(&key);
+                    return Err(reason);
+                }
+                _ => {
+                    inner.entries.insert(key.clone(), Entry::Starting);
+                    break;
+                }
+            }
+            drop(inner);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        let mut ssh_args = vec![
+            "-tt".to_string(),
+            // Never prompt for a password inside MRT's hidden session; key or agent
+            // authentication is required. `:tui ssh ...` covers password logins.
+            "-o".to_string(),
+            "BatchMode=yes".to_string(),
+            "-o".to_string(),
+            format!("ConnectTimeout={}", REMOTE_CONNECT_TIMEOUT.as_secs()),
+        ];
+        ssh_args.extend(args.iter().cloned());
+        let options = ShellSessionOptions {
+            ready_timeout: REMOTE_CONNECT_TIMEOUT,
+            ..ShellSessionOptions::default()
+        };
+        let result = ShellSession::spawn_remote("ssh", &ssh_args, &std::env::temp_dir(), options);
+        let mut inner = self.lock();
+        match result {
+            Ok(session) => {
+                let session = Arc::new(session);
+                inner.entries.insert(key, Entry::Ready { session: session.clone(), busy: true });
+                Ok(session)
+            }
+            Err(error) => {
+                inner.entries.remove(&key);
+                Err(remote_failure_message(&error))
+            }
+        }
+    }
+
     /// Ends the sessions of a closed tab.
     pub fn close_tab(&self, tab_id: Uuid) {
         self.lock().entries.retain(|(tab, _), _| *tab != tab_id);
@@ -209,6 +275,66 @@ impl ShellPool {
             Some(Entry::Unavailable(reason)) => Some(reason.clone()),
             _ => None,
         }
+    }
+}
+
+/// Pool key of a remote tab's SSH session.
+pub const REMOTE_SHELL_ID: &str = "ssh";
+
+/// How long an SSH session may take to connect and show its first prompt.
+const REMOTE_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// A user-facing explanation of why a remote session did not start.
+fn remote_failure_message(error: &mrt_core::ShellSessionError) -> String {
+    use mrt_core::ShellSessionError as E;
+    let detail = match error {
+        E::IntegrationTimeout { transcript, .. } | E::StartupExited { transcript, .. } => {
+            let plain = mrt_core::parse_ansi_text(transcript).1;
+            let tail: Vec<&str> = plain.lines().rev().filter(|l| !l.trim().is_empty()).take(3).collect();
+            tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+        }
+        other => other.to_string(),
+    };
+    format!(
+        "MRT could not start shell integration over SSH.\n{detail}\n\n\
+Remote tabs need key or agent authentication (MRT never types passwords) and a remote Bash or Zsh. \
+For a password login or another shell, run `:tui ssh <host>` for an interactive session."
+    )
+}
+
+/// Runs `command` in a remote tab's SSH session (see [`ShellPool::acquire_remote`]),
+/// streaming output into `output`.
+pub async fn run_remote(
+    pool: &ShellPool,
+    tab_id: Uuid,
+    block_id: Uuid,
+    args: &[String],
+    command: &str,
+    output: &Arc<Mutex<String>>,
+) -> Result<SessionRun, String> {
+    let session = {
+        let (pool, args) = (pool.clone(), args.to_vec());
+        tokio::task::spawn_blocking(move || pool.acquire_remote(tab_id, &args))
+            .await
+            .map_err(|e| e.to_string())??
+    };
+    pool.track(block_id, session.clone());
+    let result = {
+        let (command, output) = (command.to_string(), output.clone());
+        tokio::task::spawn_blocking(move || {
+            run_in_session(&session, &command, None, |chunk| {
+                if let Ok(mut pending) = output.lock() {
+                    pending.push_str(chunk);
+                }
+            })
+        })
+        .await
+    };
+    pool.release(tab_id, REMOTE_SHELL_ID, block_id);
+    match result {
+        Ok(Ok(run)) => Ok(run),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -244,7 +370,7 @@ pub async fn run_with_pool(
     let result = {
         let (command, cwd, output) = (command.to_string(), cwd.to_path_buf(), output.clone());
         tokio::task::spawn_blocking(move || {
-            run_in_session(&session, &command, &cwd, |chunk| {
+            run_in_session(&session, &command, Some(&cwd), |chunk| {
                 if let Ok(mut pending) = output.lock() {
                     pending.push_str(chunk);
                 }
@@ -266,10 +392,11 @@ pub async fn run_with_pool(
 pub fn run_in_session(
     session: &ShellSession,
     command: &str,
-    cwd: &Path,
+    cwd: Option<&Path>,
     mut on_output: impl FnMut(&str),
 ) -> Result<SessionRun, mrt_core::ShellSessionError> {
-    if !session.cwd().is_some_and(|current| same_dir(&current, cwd)) {
+    // Remote sessions pass no folder: the tab's folder is on the other machine.
+    if let Some(cwd) = cwd.filter(|cwd| !session.cwd().is_some_and(|current| same_dir(&current, cwd))) {
         if let Some(cd) = cd_command(session.kind(), cwd) {
             let mut handle = session.run(&cd)?;
             while handle.wait_timeout(Duration::from_millis(200)).is_none() {
@@ -321,6 +448,34 @@ fn same_dir(a: &Path, b: &Path) -> bool {
     norm(a) == norm(b)
 }
 
+/// `text` quoted as one argument for a command line run by `kind`.
+pub fn quote_arg(kind: &ShellKind, text: &str) -> String {
+    match kind {
+        ShellKind::PowerShellCore | ShellKind::WindowsPowerShell => format!("'{}'", text.replace('\'', "''")),
+        ShellKind::CmdBatch => format!("\"{}\"", text.replace('"', "\"\"")),
+        ShellKind::Fish => format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'")),
+        _ => format!("'{}'", text.replace('\'', "'\\''")),
+    }
+}
+
+/// The local command line that runs `command` on a remote tab's host in a terminal
+/// (`ssh -tt <args> 'cd <dir> && <command>'`), for full-screen programs in remote tabs.
+pub fn remote_tui_command(local: &ShellKind, ssh_args: &[String], remote_dir: Option<&str>, command: &str) -> String {
+    let posix = ShellKind::Bash;
+    let remote = match remote_dir {
+        Some(dir) => format!("cd {} && {command}", quote_arg(&posix, dir)),
+        None => command.to_string(),
+    };
+    let mut line = String::from("ssh -tt");
+    for arg in ssh_args {
+        line.push(' ');
+        line.push_str(&quote_arg(local, arg));
+    }
+    line.push(' ');
+    line.push_str(&quote_arg(local, &remote));
+    line
+}
+
 /// A `cd` to `dir` in the syntax of `kind`, with the path quoted for that shell.
 pub fn cd_command(kind: &ShellKind, dir: &Path) -> Option<String> {
     let path = dir.to_string_lossy();
@@ -352,6 +507,19 @@ mod tests {
         );
         assert_eq!(cd_command(&ShellKind::CmdBatch, Path::new("C:\\a b")).unwrap(), "cd /d \"C:\\a b\"");
         assert!(cd_command(&ShellKind::Wsl, dir).is_none());
+    }
+
+    #[test]
+    fn remote_tui_commands_quote_for_the_local_shell() {
+        let args = vec!["user@host".to_string(), "-p".to_string(), "2222".to_string()];
+        assert_eq!(
+            remote_tui_command(&ShellKind::Bash, &args, Some("/srv/it's"), "vim a.txt"),
+            "ssh -tt 'user@host' '-p' '2222' 'cd '\\''/srv/it'\\''\\'\\'''\\''s'\\'' && vim a.txt'"
+        );
+        assert_eq!(
+            remote_tui_command(&ShellKind::WindowsPowerShell, &args, None, "htop"),
+            "ssh -tt 'user@host' '-p' '2222' 'htop'"
+        );
     }
 
     #[test]

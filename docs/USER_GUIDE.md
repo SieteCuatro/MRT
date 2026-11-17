@@ -81,6 +81,7 @@ Commands that may be destructive open the **Safety Approval Gate** first (see [C
 | `:unsplit` | Closes the split. |
 | `:clear` (or `cls`) | Removes all blocks from the tab (history in SQLite is kept). |
 | `:toolbox [network\|task-manager\|close]` | Shows the Toolbox panel, opens it on a tab, or hides it. With no argument it toggles. |
+| `:ssh <host> [ssh options]` | Opens a **remote tab**: its commands run on the host with blocks, exit codes and the remote folder (see [Remote tabs](#remote-tabs-ssh)). |
 
 **Network and diagnostics** — details in the [Toolbox guide](TOOLBOX.md)
 
@@ -104,6 +105,15 @@ Commands that may be destructive open the **Safety Approval Gate** first (see [C
 | `:kill <pid\|name>... [--force] [--tree]` | Stops processes after Safety Gate approval. With no arguments, opens the Task Manager. |
 | `:watch-proc <pid\|name> [--mem 2GB] [--cpu 90]` | Posts a notice when a process crosses a threshold, starts, or exits. |
 | `:watch-proc list \| clear \| stop <id>`, `:unwatch-proc <id\|all>` | Manages watches. |
+
+### Remote tabs (SSH)
+
+`:ssh user@host` (any `ssh` options may follow, e.g. `-p 2222` or `-i ~/.ssh/key`) opens a tab whose commands run **on that host**, with the same command blocks, exit codes, Stop button and folder tracking as a local tab. MRT starts `ssh -tt -o BatchMode=yes` and types the shell integration into the remote Bash or Zsh as base64 `eval` lines; **nothing is written on the remote machine**. The tab runs `hostname` first, so its first block shows which machine it is on.
+
+- Authentication must work without a password prompt (an SSH key or agent): MRT never types passwords into hidden sessions. For password logins, or a remote shell other than Bash or Zsh, run `:tui ssh user@host` for a plain interactive session.
+- Full-screen programs typed in a remote tab (`vim`, `htop`, `less`…) open in the TUI overlay through `ssh -tt host 'cd <folder> && vim …'`.
+- Commands in a remote tab never run on this computer. If the connection fails, the block explains why; the next command tries to connect again.
+- The Explorer shows local folders only.
 
 ### Notifications for long commands
 

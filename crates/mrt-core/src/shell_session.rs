@@ -210,14 +210,7 @@ impl ShellSession {
         for (key, value) in &options.env {
             cmd.env(key, value);
         }
-        Self::start(
-            shell.kind.clone(),
-            shell.program.clone(),
-            cmd,
-            scratch,
-            options,
-            None,
-        )
+        Self::start(shell.kind.clone(), shell.program.clone(), cmd, scratch, options, None)
     }
 
     /// Starts a remote shell over SSH (or any program that ends in an interactive Bash
@@ -243,14 +236,7 @@ impl ShellSession {
             cmd.env(key, value);
         }
         let bootstrap = crate::shell_integration::remote_bootstrap_lines();
-        Self::start(
-            ShellKind::Bash,
-            program.to_string(),
-            cmd,
-            scratch,
-            options,
-            Some(bootstrap),
-        )
+        Self::start(ShellKind::Bash, program.to_string(), cmd, scratch, options, Some(bootstrap))
     }
 
     fn start(
@@ -696,9 +682,7 @@ const STALE_SCRATCH_AGE: Duration = Duration::from_secs(12 * 60 * 60);
 /// Removes `mrt-session-*` folders under `temp` last modified more than `age` ago.
 /// Returns how many were removed.
 fn prune_stale_scratch_dirs(temp: &Path, age: Duration) -> usize {
-    let Ok(entries) = std::fs::read_dir(temp) else {
-        return 0;
-    };
+    let Ok(entries) = std::fs::read_dir(temp) else { return 0 };
     let now = std::time::SystemTime::now();
     let mut removed = 0;
     for entry in entries.flatten() {
@@ -1161,8 +1145,7 @@ impl Perform for Normalizer {
             // parser (`vt.rs`): pass them on as they came.
             Some(b"8" | b"52" | b"1337") => {
                 self.text.push_str("\x1b]");
-                self.text
-                    .push_str(&String::from_utf8_lossy(&params.join(&b';')));
+                self.text.push_str(&String::from_utf8_lossy(&params.join(&b';')));
                 self.text.push_str("\x1b\\");
             }
             _ => {}
@@ -1172,10 +1155,7 @@ impl Perform for Normalizer {
     fn hook(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
         if action == 'q' && intermediates.is_empty() {
             let mut head = String::from("\x1bP");
-            let values: Vec<String> = params
-                .iter()
-                .map(|p| p.first().copied().unwrap_or(0).to_string())
-                .collect();
+            let values: Vec<String> = params.iter().map(|p| p.first().copied().unwrap_or(0).to_string()).collect();
             head.push_str(&values.join(";"));
             head.push('q');
             self.sixel = Some(head.into_bytes());
@@ -1205,16 +1185,12 @@ mod tests {
 
     #[test]
     fn stale_scratch_folders_are_pruned() {
-        let temp =
-            std::env::temp_dir().join(format!("mrt-prune-test-{}", uuid::Uuid::new_v4().simple()));
+        let temp = std::env::temp_dir().join(format!("mrt-prune-test-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(temp.join("mrt-session-old")).unwrap();
         std::fs::create_dir_all(temp.join("other-folder")).unwrap();
         std::fs::write(temp.join("mrt-session-old").join("init.sh"), b"x").unwrap();
         // Nothing is old enough yet.
-        assert_eq!(
-            prune_stale_scratch_dirs(&temp, Duration::from_secs(3600)),
-            0
-        );
+        assert_eq!(prune_stale_scratch_dirs(&temp, Duration::from_secs(3600)), 0);
         // With a zero age everything counts as stale, but only mrt-session-* folders go.
         assert_eq!(prune_stale_scratch_dirs(&temp, Duration::ZERO), 1);
         assert!(!temp.join("mrt-session-old").exists());
@@ -1249,27 +1225,11 @@ mod tests {
             )
         );
         let parsed = crate::vt::parse_ansi_rich(&text);
-        assert!(
-            parsed.plain_text.starts_with("L "),
-            "{:?}",
-            parsed.plain_text
-        );
-        assert_eq!(
-            parsed.plain_text.matches("[image not shown").count(),
-            2,
-            "{:?}",
-            parsed.plain_text
-        );
-        assert!(parsed
-            .spans
-            .iter()
-            .any(|s| s.link.as_deref() == Some("https://a.io")));
+        assert!(parsed.plain_text.starts_with("L "), "{:?}", parsed.plain_text);
+        assert_eq!(parsed.plain_text.matches("[image not shown").count(), 2, "{:?}", parsed.plain_text);
+        assert!(parsed.spans.iter().any(|s| s.link.as_deref() == Some("https://a.io")));
         assert_eq!(parsed.events.len(), 1, "clipboard request survives");
-        assert_eq!(
-            parsed.images.len(),
-            1,
-            "the sixel decodes; the fake PNG and RGB payloads are reported"
-        );
+        assert_eq!(parsed.images.len(), 1, "the sixel decodes; the fake PNG and RGB payloads are reported");
     }
 
     #[test]
@@ -1516,50 +1476,28 @@ mod tests {
             ..Default::default()
         };
         let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-        let session =
-            match ShellSession::spawn_remote(program, &args, &std::env::temp_dir(), options) {
-                Ok(session) => session,
-                Err(ShellSessionError::IntegrationTimeout { transcript, .. })
-                | Err(ShellSessionError::StartupExited { transcript, .. }) => {
-                    panic!(
-                        "{label}: remote integration did not start. Output:\n{}",
-                        transcript.escape_debug()
-                    )
-                }
-                Err(error) => panic!("{label}: {error}"),
-            };
-        let out = run(
-            &session,
-            "export MRT_REMOTE=kept; echo \"it's \\\"quoted\\\" $((40+2))\"",
-        );
+        let session = match ShellSession::spawn_remote(program, &args, &std::env::temp_dir(), options) {
+            Ok(session) => session,
+            Err(ShellSessionError::IntegrationTimeout { transcript, .. })
+            | Err(ShellSessionError::StartupExited { transcript, .. }) => {
+                panic!("{label}: remote integration did not start. Output:\n{}", transcript.escape_debug())
+            }
+            Err(error) => panic!("{label}: {error}"),
+        };
+        let out = run(&session, "export MRT_REMOTE=kept; echo \"it's \\\"quoted\\\" $((40+2))\"");
         assert_eq!(out.exit_code, Some(0), "{label}: {:?}", out.plain_output());
         assert_eq!(out.plain_output().trim(), "it's \"quoted\" 42", "{label}");
-        assert_eq!(
-            run(&session, "echo $MRT_REMOTE").plain_output().trim(),
-            "kept",
-            "{label}"
-        );
+        assert_eq!(run(&session, "echo $MRT_REMOTE").plain_output().trim(), "kept", "{label}");
         assert_eq!(run(&session, "false").exit_code, Some(1), "{label}");
-        assert_eq!(
-            run(&session, "printf a\nprintf b").plain_output().trim(),
-            "ab",
-            "{label}"
-        );
+        assert_eq!(run(&session, "printf a\nprintf b").plain_output().trim(), "ab", "{label}");
         let out = run(&session, "cd / && pwd");
         assert_eq!(out.exit_code, Some(0), "{label}");
-        assert!(
-            out.cwd.is_some(),
-            "{label}: the remote shell should report its directory"
-        );
+        assert!(out.cwd.is_some(), "{label}: the remote shell should report its directory");
     }
 
     #[test]
     fn remote_session_bootstraps_bash_without_files() {
-        let shell = if cfg!(windows) {
-            find_shell(ShellKind::GitBash)
-        } else {
-            find_shell(ShellKind::Bash)
-        };
+        let shell = if cfg!(windows) { find_shell(ShellKind::GitBash) } else { find_shell(ShellKind::Bash) };
         if let Some(shell) = shell {
             check_remote(&shell.program, &["--norc", "--noprofile", "-i"], "bash");
         }
@@ -1569,33 +1507,18 @@ mod tests {
     /// passes OSC 1337 through too).
     #[test]
     fn inline_images_pass_through_a_session() {
-        let shell = if cfg!(windows) {
-            find_shell(ShellKind::GitBash)
-        } else {
-            find_shell(ShellKind::Bash)
-        };
+        let shell = if cfg!(windows) { find_shell(ShellKind::GitBash) } else { find_shell(ShellKind::Bash) };
         let Some(shell) = shell else { return };
-        let options = ShellSessionOptions {
-            ready_timeout: TEST_TIMEOUT,
-            ..Default::default()
-        };
-        let args: Vec<String> = ["--norc", "--noprofile", "-i"]
-            .iter()
-            .map(|a| a.to_string())
-            .collect();
-        let session =
-            ShellSession::spawn_remote(&shell.program, &args, &std::env::temp_dir(), options)
-                .expect("session");
+        let options = ShellSessionOptions { ready_timeout: TEST_TIMEOUT, ..Default::default() };
+        let args: Vec<String> = ["--norc", "--noprofile", "-i"].iter().map(|a| a.to_string()).collect();
+        let session = ShellSession::spawn_remote(&shell.program, &args, &std::env::temp_dir(), options).expect("session");
         let mut png = Vec::new();
         image::RgbaImage::from_raw(1, 1, vec![1, 2, 3, 255])
             .unwrap()
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .unwrap();
         let b64 = crate::shell_integration::base64_encode(&png);
-        let out = run(
-            &session,
-            &format!(r"printf 'before\n\033]1337;File=inline=1:{b64}\a\nafter\n'"),
-        );
+        let out = run(&session, &format!(r"printf 'before\n\033]1337;File=inline=1:{b64}\a\nafter\n'"));
         let parsed = crate::vt::parse_ansi_rich(&out.output);
         assert_eq!(parsed.images.len(), 1, "{:?}", out.output);
         assert_eq!(&parsed.images[0].rgba[..], &[1, 2, 3, 255]);
@@ -1616,15 +1539,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn posix_sessions_start_with_user_config() {
-        for kind in [
-            ShellKind::Bash,
-            ShellKind::Zsh,
-            ShellKind::Fish,
-            ShellKind::Sh,
-        ] {
-            let Some(shell) = find_shell(kind.clone()) else {
-                continue;
-            };
+        for kind in [ShellKind::Bash, ShellKind::Zsh, ShellKind::Fish, ShellKind::Sh] {
+            let Some(shell) = find_shell(kind.clone()) else { continue };
             let options = ShellSessionOptions {
                 load_user_config: true,
                 ready_timeout: Duration::from_secs(15),
@@ -1637,10 +1553,7 @@ mod tests {
                 }
                 Err(ShellSessionError::IntegrationTimeout { transcript, .. })
                 | Err(ShellSessionError::StartupExited { transcript, .. }) => {
-                    panic!(
-                        "{kind:?} with user config never became ready. Output:\n{}",
-                        transcript.escape_debug()
-                    )
+                    panic!("{kind:?} with user config never became ready. Output:\n{}", transcript.escape_debug())
                 }
                 Err(error) => panic!("{kind:?}: {error}"),
             }
@@ -1786,21 +1699,9 @@ mod tests {
         session.interrupt().unwrap();
         let started = Instant::now();
         let outcome = handle.wait_timeout(TEST_TIMEOUT);
-        assert!(
-            started.elapsed() < Duration::from_secs(10),
-            "{:?}: `{long}` ran to the end",
-            shell.kind
-        );
-        assert!(
-            outcome.is_some(),
-            "{:?}: `{long}` did not stop after Ctrl+C",
-            shell.kind
-        );
-        assert!(
-            !session.has_exited(),
-            "{:?}: Ctrl+C ended the shell",
-            shell.kind
-        );
+        assert!(started.elapsed() < Duration::from_secs(10), "{:?}: `{long}` ran to the end", shell.kind);
+        assert!(outcome.is_some(), "{:?}: `{long}` did not stop after Ctrl+C", shell.kind);
+        assert!(!session.has_exited(), "{:?}: Ctrl+C ended the shell", shell.kind);
         assert_eq!(run(&session, after).plain_output().trim(), expect);
     }
 

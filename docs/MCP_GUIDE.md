@@ -53,6 +53,42 @@ Open the **MCP Hub** side panel inside MRT and click **Copy MCP Config**, or add
 ```
 *(On Linux/macOS, point `"command"` to `/path/to/MRT/target/release/mrt`. The **Copy MCP Config** button fills in the path of the running executable for you.)*
 
+### 2.1 One-command setup for coding agents (`mrt agent setup`)
+
+```bash
+mrt agent setup                    # Claude Code, Codex CLI and Gemini CLI, user-level files
+mrt agent setup --agent codex      # one agent (comma-separated list or "all")
+mrt agent setup --project          # files in the current directory instead
+mrt agent setup --dry-run          # print what would change, write nothing
+mrt agent show                     # MCP command line + instructions, for any other agent
+mrt agent remove                   # undo setup (takes the same flags)
+```
+
+For each agent, `setup` does two things:
+
+1. Adds an MCP server named `mrt` that starts `<path of this mrt binary> --mcp-server`.
+2. Writes an `mrt` skill (`skills/mrt/SKILL.md`) that tells the agent what MRT's tools are for and that commands go through the Safety Approval Gate: when a command is blocked it must not retry it in another form, but ask the user, who can approve it in the MRT window.
+
+| Agent | Scope | MCP server entry | Skill |
+| :--- | :--- | :--- | :--- |
+| Claude Code | `--user` (default) | `~/.claude.json` → `mcpServers.mrt` (`type: "stdio"`) | `~/.claude/skills/mrt/SKILL.md` |
+| Claude Code | `--project` | `.mcp.json` → `mcpServers.mrt` | `.claude/skills/mrt/SKILL.md` |
+| Codex CLI | `--user` | `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`) → `[mcp_servers.mrt]` | `~/.agents/skills/mrt/SKILL.md` |
+| Codex CLI | `--project` | `.codex/config.toml` → `[mcp_servers.mrt]` (Codex reads it in trusted projects only) | `.agents/skills/mrt/SKILL.md` |
+| Gemini CLI | `--user` | `~/.gemini/settings.json` → `mcpServers.mrt` | `~/.gemini/skills/mrt/SKILL.md` |
+| Gemini CLI | `--project` | `.gemini/settings.json` → `mcpServers.mrt` | `.gemini/skills/mrt/SKILL.md` |
+
+Sources: Claude Code [MCP scopes](https://code.claude.com/docs/en/mcp) and [skills](https://code.claude.com/docs/en/skills); Codex [MCP](https://developers.openai.com/codex/mcp) and [skills](https://developers.openai.com/codex/skills); Gemini CLI [MCP servers](https://geminicli.com/docs/tools/mcp-server/) and [skills](https://geminicli.com/docs/cli/skills/).
+
+How it treats your files:
+
+- **Merges, never replaces.** Only the `mrt` entry is added or updated; other servers and settings stay. TOML comments and layout are kept. JSON files are rewritten with two-space indentation and keys in alphabetical order (the content is otherwise the same).
+- **Backs up first.** Before changing an existing config file it copies it to `<file>.mrt-backup-<date>-<time>` in the same folder.
+- **Idempotent.** Running `setup` again changes nothing. If the `mrt` binary moved, it updates the path and keeps any keys you added to the entry (such as `env`).
+- **Leaves other tools' entries alone.** If an `mrt` server that does not start an `mrt` binary with `--mcp-server`, or an `mrt` skill MRT did not write, already exists, it is reported as *skipped* and not touched.
+- **`remove` undoes exactly what `setup` added**: it deletes the `mrt` server entry (and the `mcpServers` / `mcp_servers` table if that leaves it empty, and the file if that leaves it empty), the skill file MRT wrote, and any folders that are left empty.
+- Close the agent before running setup on `~/.claude.json`, which Claude Code also rewrites, then start it again to load the server and skill.
+
 ---
 
 ## 3. Complete MCP Server Tool Reference (31 Tools)
@@ -63,13 +99,29 @@ All built-in tools are defined in [`MrtMcpServerState::built_in_tools()`](../cra
 
 | Tool | Description | Key Parameters |
 | :--- | :--- | :--- |
-| **`mrt_get_session_state`** | Returns OS, arch, active CWD, active tab ID, all open tabs, active PTY count, GUI attachment flag, and available shells. | *(none)* |
-| **`mrt_list_tabs`** | Lists all terminal tabs with index, UUID, title, active status, shell ID/name, CWD, and block count. | *(none)* |
+| **`mrt_get_session_state`** | Returns OS, arch, active CWD, active tab ID, all open tabs (each with its `activity`), active PTY count, GUI attachment flag, and available shells. | *(none)* |
+| **`mrt_list_tabs`** | Lists all terminal tabs with index, UUID, title, active status, shell ID/name, CWD, block count, and `activity`. | *(none)* |
 | **`mrt_create_tab`** | Opens a new terminal tab with optional title, shell profile, working directory, and focus activation. | `title?`, `shell?`, `cwd?`, `activate?` (default `true`) |
 | **`mrt_switch_tab`** | Switches the active terminal tab by UUID, 0-based index, or title substring. | `tab_id` *(required)* |
 | **`mrt_close_tab`** | Closes a tab by UUID, index, or title substring (always keeps at least 1 tab open). | `tab_id` *(required)* |
 | **`mrt_configure_tab`** | Updates a tab's shell profile, working directory (`cwd`), or title. | `tab_id?`, `shell?`, `cwd?`, `title?` |
 | **`mrt_control_gui`** | Controls the live MRT GUI: sets/submits the prompt bar (honoring the GUI Safety Gate modal), toggles Mosaic mode with its arrangement (`grid`, `columns`, `rows`, `focus`) and grid columns, toggles the Folder Explorer, or opens the Toolbox panel on a tab (`"network"`, `"task_manager"`, `true`/`false`, `"hidden"`). | `tab_id?`, `input_text?`, `submit_input?`, `mosaic?`, `mosaic_columns?`, `mosaic_layout?`, `explorer?`, `toolbox?` |
+
+Each tab entry in `mrt_list_tabs`, `mrt_get_session_state` and the `mrt://session/tabs` resource carries an `activity` object, so an orchestrating agent can see which tabs are busy, blocked or done:
+
+```json
+"activity": {
+  "state": "waiting_for_input",
+  "label": "Waiting for input",
+  "progress": null,
+  "tone": "normal",
+  "agent": "claude",
+  "detail": "Last line: Do you want to proceed?",
+  "command": "claude"
+}
+```
+
+`state` is one of `idle`, `running`, `progress` (then `progress` holds 0–100), `waiting_for_input`, `succeeded`, `failed`. `tone` is `normal`, `error` or `warning` (from `OSC 9;4` states 2 and 4). `agent` names a recognised agent CLI (`claude`, `codex`, `gemini`, `aider`) or is `null`. With a live GUI the values come from the GUI's per-tab tracker; a headless `mrt --mcp-server` derives them from the tab's blocks (running, or the last exit code). The states, heuristics and the `OSC 678` status sequence are described in the [User Guide](USER_GUIDE.md#tab-activity-status).
 
 ### 3.2 Command Execution & Block Inspection
 
@@ -151,6 +203,33 @@ Inside the MRT GUI, open the **MCP Hub** side panel on the right:
    - Enter a **Name** (e.g., `filesystem`), **Command** (e.g., `npx`), and **Args** (e.g., `-y @modelcontextprotocol/server-filesystem .`), then click **Connect MCP Server**.
    - `McpHostManager::connect_external_stdio_server` spawns the server (with `CREATE_NO_WINDOW` on Windows so no console window flashes), performs the `initialize` and `tools/list` handshake, and renders every discovered tool in the side panel.
    - Clicking **Invoke Tool** executes `tools/call` and renders the returned MCP content directly as a `CommandBlock` in your active terminal tab.
+
+### 5.1 Remote (HTTP) servers
+
+Besides `stdio`, the MCP Hub connects to remote MCP servers over **Streamable HTTP**. In the connect form, set **Transport** to `HTTP` and fill in a **Name**, the server's MCP endpoint **URL** (e.g., `https://example.com/mcp`) and optional **Headers**, one `Name: value` per line (e.g., `Authorization: Bearer <token>`). The headers box is masked unless **Show** is ticked. Errors such as a bad URL, an HTTP 401 or an invalid header line show as a red server row.
+
+External servers keep one **live session**: a stdio server keeps running between tool calls, and an HTTP server keeps its `Mcp-Session-Id`.
+
+#### Transports (`crates/mrt-mcp/src/transport.rs`)
+
+Both transports sit behind one `Transport` type; the session logic in `client.rs` (`McpClientSession`: request ids, `initialize`, paginated `*/list`, `tools/call`, 300 s request timeout) is shared.
+
+| | stdio | Streamable HTTP |
+| :--- | :--- | :--- |
+| Framing | One JSON-RPC message per line on the child's stdin/stdout. Non-JSON lines are skipped. | Every message is a `POST` to the single MCP endpoint with `Accept: application/json, text/event-stream`. |
+| Responses | The line whose `id` matches. | Either one `application/json` body or a `text/event-stream` (SSE) stream; MRT reads the stream until the matching response arrives. Notifications MRT sends get `202 Accepted`. |
+| Session | The child process. | `Mcp-Session-Id` from the `initialize` response, sent on every later request. `MCP-Protocol-Version: <negotiated version>` is sent on every request after `initialize`. |
+| Server-initiated messages | Read between responses. | Read from SSE responses and from the optional `GET` listen stream MRT opens after initialization (a `405` answer means the server has none). |
+| Session lost | Child exited → MRT respawns it and retries the call once. | `404` while a session id is set → MRT sends `DELETE`, re-initializes and retries the call once. |
+| Broken stream | — | An SSE response that closes before its result is resumed with `GET` + `Last-Event-ID`, honouring the server's `retry:` delay (up to 5 times). |
+
+MRT implements the Streamable HTTP transport of MCP revision [2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#streamable-http) and offers protocol version `2025-11-25` in `initialize` (the server may negotiate an older one). The newer stateless revision 2026-07-28 (no `initialize`, no `Mcp-Session-Id`) is not supported yet.
+
+Server requests: MRT answers `ping` with an empty result and declines everything else (sampling, roots, elicitation) with `-32601`. Notifications and requests are kept (newest 200 per server) and can be read with `McpHostManager::drain_server_events(server_name)`.
+
+**Header secrecy**: header values are never logged, never put into error messages, and `McpHttpHeader`'s `Debug` output prints `<redacted>`. The server row shows only the URL and header *names*. MRT refuses headers it manages itself (`Accept`, `Content-Type`, `Mcp-Session-Id`, `MCP-Protocol-Version`, `Last-Event-ID`, …).
+
+The HTTP transport is tested in [`crates/mrt-mcp/tests/http_transport.rs`](../crates/mrt-mcp/tests/http_transport.rs) against a small in-test HTTP MCP server. The tests cover JSON and SSE responses, session reuse and expiry, stream resumption and header redaction.
 
 ---
 

@@ -5,7 +5,7 @@ use crate::protocol::{
 use anyhow::Result;
 use mrt_ai::{diagnose_command_error, translate_nl_to_command};
 use mrt_core::{
-    assess_command, discover_shells, execute_command_in_shell, parse_ansi_text, CommandBlock,
+    assess_command, ActivitySnapshot, discover_shells, execute_command_in_shell, parse_ansi_text, CommandBlock,
     InteractivePty, RiskLevel, ShellProfile,
 };
 use mrt_tools::{
@@ -33,6 +33,18 @@ pub struct McpTabSession {
     pub shell_name: String,
     pub cwd: PathBuf,
     pub blocks: Vec<CommandBlock>,
+    /// Live activity from the GUI's tracker. `None` for tabs owned by a headless server,
+    /// whose state is derived from their blocks instead.
+    #[serde(skip)]
+    pub activity: Option<ActivitySnapshot>,
+}
+
+/// JSON for a tab's activity (`state`, `progress`, `tone`, `agent`, `detail`, `command`).
+pub fn tab_activity_json(tab: &McpTabSession) -> Value {
+    match &tab.activity {
+        Some(snapshot) => snapshot.to_json(),
+        None => ActivitySnapshot::from_blocks(&tab.blocks).to_json(),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +119,7 @@ impl Default for MrtMcpServerState {
             shell_name,
             cwd: cwd.clone(),
             blocks: Vec::new(),
+            activity: None,
         };
         Self {
             cwd: Arc::new(Mutex::new(cwd)),
@@ -183,7 +196,7 @@ impl MrtMcpServerState {
         vec![
             McpTool {
                 name: "mrt_get_session_state".into(),
-                description: "Get the current Modern Rust Terminal session state (OS, CWD, active tab, all open tabs, active PTY sessions, available shells, and block count).".into(),
+                description: "Get the current Modern Rust Terminal session state (OS, CWD, active tab, all open tabs with their activity state, active PTY sessions, available shells, and block count).".into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {},
@@ -191,7 +204,7 @@ impl MrtMcpServerState {
             },
             McpTool {
                 name: "mrt_list_tabs".into(),
-                description: "List all terminal tabs with their IDs, titles, active shells, CWDs, block counts, and active status.".into(),
+                description: "List all terminal tabs with their IDs, titles, active shells, CWDs, block counts, active status, and activity (idle, running, progress with percent, waiting_for_input, succeeded, failed; plus any detected agent CLI).".into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {},
@@ -676,6 +689,7 @@ pub async fn handle_mcp_jsonrpc(
                                 "shell_name": t.shell_name,
                                 "cwd": t.cwd.display().to_string(),
                                 "block_count": t.blocks.len(),
+                                "activity": tab_activity_json(t),
                             })
                         })
                         .collect();
@@ -787,6 +801,7 @@ pub async fn execute_mrt_mcp_tool(
                         "shell_name": t.shell_name,
                         "cwd": t.cwd.display().to_string(),
                         "block_count": t.blocks.len(),
+                        "activity": tab_activity_json(t),
                     })
                 })
                 .collect();
@@ -831,6 +846,7 @@ pub async fn execute_mrt_mcp_tool(
                         "shell_name": t.shell_name,
                         "cwd": t.cwd.display().to_string(),
                         "block_count": t.blocks.len(),
+                        "activity": tab_activity_json(t),
                     })
                 })
                 .collect();
@@ -870,6 +886,7 @@ pub async fn execute_mrt_mcp_tool(
                 shell_name: shell.kind.short_label().to_string(),
                 cwd: cwd.clone(),
                 blocks: Vec::new(),
+                activity: None,
             };
             tabs.push(session);
             drop(tabs);

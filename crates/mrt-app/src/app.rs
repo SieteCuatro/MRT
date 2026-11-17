@@ -1,11 +1,13 @@
+use crate::keymap::{Action, KeyChord, KeyContext, KeyResolver, Keymap, Platform, Resolution, PALETTE_ACTIONS};
 use crate::theme::{
     apply_mrt_theme, chip, ghost_button, icon_button, panel_frame, primary_button, secondary_button, section_label,
     Palette, Radius,
 };
+use crate::widgets::activity::{activity_indicator, is_animated};
 use crate::widgets::block_view::{render_command_block, render_compact_block, BlockAction};
 use crate::widgets::mosaic::{mosaic_rects, MosaicLayout};
 use crate::widgets::chrome::{
-    brand_mark, centered_column, nav_row, palette_row, search_pill, tab_row, TabStatus,
+    brand_mark, centered_column, nav_row, palette_row, search_pill, tab_row,
 };
 use crate::widgets::runbooks::{
     render_runbooks_panel, ReplayStatusView, RunbookAction, RunbooksUiState,
@@ -13,17 +15,18 @@ use crate::widgets::runbooks::{
 use crate::widgets::side_panels::{render_mcp_side_panel, SidePanelEvent, SidePanelState};
 use crate::widgets::task_manager::TaskManagerEvent;
 use crate::widgets::toolbox::{render_toolbox_side_panel, ToolboxTab};
-use egui::{Color32, Key, Modifiers, RichText};
+use egui::{Color32, Key, RichText};
 use mrt_ai::{
     diagnose_command_error_streaming, translate_nl_to_command,
     AiCommandProposal,
 };
 use mrt_core::{
-    assess_command, discover_shells, execute_command_streaming_with_pid, CommandBlock,
+    ActivitySnapshot, ActivityTracker, assess_command, discover_shells, execute_command_streaming_with_pid, CommandBlock,
     InteractivePty, RiskLevel, SafetyAssessment, ShellProfile, StructuredOutput,
 };
 use mrt_mcp::{
-    start_gui_bridge_listener, GuiUiCommand, McpHostManager, McpTabSession, MrtMcpServerState,
+    start_gui_bridge_listener, parse_http_headers, GuiUiCommand, McpHostManager, McpServerConfig,
+    McpServerStatus, McpTabSession, McpTransportKind, MrtMcpServerState,
 };
 use mrt_tools::{
     execute_http_request, fetch_url_as_markdown, generate_markdown_bug_report, inspect_dns,
@@ -79,6 +82,8 @@ pub struct TerminalTab {
     pub split_direction: SplitDirection,
     pub secondary_pane: Option<SplitPane>,
     pub active_pane_idx: usize,
+    /// Running / progress / waiting-for-input / finished state shown on the tab.
+    pub activity: ActivityTracker,
 }
 
 impl TerminalTab {
@@ -98,6 +103,7 @@ impl TerminalTab {
             split_direction: SplitDirection::None,
             secondary_pane: None,
             active_pane_idx: 0,
+            activity: ActivityTracker::new(),
         }
     }
 
@@ -249,6 +255,12 @@ pub struct MrtGuiApp {
     pub busy_count: usize,
     pub focused_on_start: bool,
     pub active_tui: Option<ActiveTuiSession>,
+    /// Resolves key presses into actions (configurable keybindings).
+    pub(crate) key_resolver: KeyResolver,
+    /// Problems found while loading keybinding overrides, shown in the palette.
+    pub(crate) keymap_issues: Vec<String>,
+    /// Set by the `exit_tui` action; handled by `process_tui_session`.
+    tui_exit_requested: bool,
     history: Option<crate::history::HistoryWorker>,
     history_error: Option<String>,
     history_pending: usize,
@@ -278,6 +290,10 @@ pub struct MrtGuiApp {
     force_process_tick: bool,
     /// Tab whose next `:ps` block should be diffed against its previous `:ps` block.
     pending_ps_compare: Option<Uuid>,
+    /// The loaded configuration file and its watcher (see `config_runtime.rs`).
+    pub config_state: crate::config_runtime::ConfigState,
+    /// Desktop notifications and sidebar badges for commands that finish in the background.
+    pub(crate) notifier: crate::notifications::CommandNotifier,
 }
 
 impl MrtGuiApp {
@@ -290,10 +306,17 @@ impl MrtGuiApp {
         let mut mcp_state = MrtMcpServerState::default();
         mcp_state.gui_tx = Some(gui_cmd_tx);
 
-        let first_shell = &shells[0];
+        // Unit tests never read the user's or the repository's config files.
+        let config_state = if cfg!(test) {
+            crate::config_runtime::ConfigState::load(mrt_core::ConfigSources::default(), false)
+        } else {
+            crate::config_runtime::ConfigState::load(mrt_core::ConfigSources::discover(&initial_cwd), true)
+        };
+        let first_shell_idx = crate::config_runtime::default_shell_index(&shells, &config_state.config);
+        let first_shell = &shells[first_shell_idx];
         let first_tab = TerminalTab::new(
             format!("Tab 1 ({})", first_shell.kind.short_label()),
-            0,
+            first_shell_idx,
             initial_cwd,
         );
         if let Ok(mut tabs_guard) = mcp_state.tabs.lock() {
@@ -304,6 +327,7 @@ impl MrtGuiApp {
                 shell_name: first_shell.kind.short_label().to_string(),
                 cwd: first_tab.cwd.clone(),
                 blocks: Vec::new(),
+                activity: None,
             }];
         }
         if let Ok(mut active_guard) = mcp_state.active_tab_id.lock() {
@@ -334,7 +358,9 @@ impl MrtGuiApp {
             Err(error) => (None, Some(error.to_string())),
         };
 
-        Self {
+        let (key_resolver, keymap_issues) = load_key_resolver(config_state.config.keybindings());
+
+        let mut app = Self {
             runtime,
             shells,
             tabs: vec![first_tab],
@@ -351,6 +377,9 @@ impl MrtGuiApp {
             busy_count: 0,
             focused_on_start: false,
             active_tui: None,
+            key_resolver,
+            keymap_issues,
+            tui_exit_requested: false,
             history,
             history_error,
             history_pending: 0,
@@ -376,7 +405,11 @@ impl MrtGuiApp {
             process_tick_in_flight: false,
             force_process_tick: false,
             pending_ps_compare: None,
-        }
+            notifier: crate::notifications::CommandNotifier::new(),
+            config_state,
+        };
+        app.apply_config_side_effects();
+        app
     }
 
     fn handle_block_action(&mut self, action: BlockAction) {
@@ -606,6 +639,7 @@ impl MrtGuiApp {
         self.side_state
             .task_manager
             .apply_snapshot(snapshot.clone(), owned.clone());
+        self.observe_activity_processes(&snapshot);
 
         // Live `:top` block
         if let Some(live) = &self.live_top {
@@ -1265,7 +1299,7 @@ impl MrtGuiApp {
                                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                                         ui.dnd_drag_source(egui::Id::new(("terminal_drag", id)), id, |ui| {
                                             ui.horizontal(|ui| {
-                                                ui.label(RichText::new("●").size(9.0).color(status.color()));
+                                                activity_indicator(ui, &status);
                                                 let title = ui.add(
                                                     egui::Label::new(
                                                         RichText::new(format!("{}  {folder}", index + 1))
@@ -1569,6 +1603,7 @@ impl MrtGuiApp {
                         shell_name: shell.kind.short_label().to_string(),
                         cwd: t.cwd.clone(),
                         blocks: t.blocks.clone(),
+                        activity: Some(t.activity.snapshot(Instant::now())),
                     }
                 })
                 .collect();
@@ -1694,15 +1729,18 @@ impl MrtGuiApp {
         for (block_id, (tab_id, output)) in &self.running_output {
             let chunk = output.lock().map(|mut pending| std::mem::take(&mut *pending)).unwrap_or_default();
             if chunk.is_empty() { continue; }
+            if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == *tab_id) {
+                tab.activity.feed_output(&chunk, Instant::now());
+            }
             let found_in_primary = self.tabs.iter_mut().find(|tab| tab.id == *tab_id)
                 .and_then(|tab| tab.blocks.iter_mut().find(|block| block.id == *block_id));
             if let Some(block) = found_in_primary {
                 block.raw_output.push_str(&chunk);
-                (block.ansi_spans, block.plain_output) = mrt_core::parse_ansi_text(&block.raw_output);
+                block.refresh_output();
             } else if let Some(sec) = self.tabs.iter_mut().find(|tab| tab.id == *tab_id).and_then(|tab| tab.secondary_pane.as_mut()) {
                 if let Some(block) = sec.blocks.iter_mut().find(|block| block.id == *block_id) {
                     block.raw_output.push_str(&chunk);
-                    (block.ansi_spans, block.plain_output) = mrt_core::parse_ansi_text(&block.raw_output);
+                    block.refresh_output();
                 }
             }
         }
@@ -1724,7 +1762,7 @@ impl MrtGuiApp {
                     block,
                     updated_cwd,
                 } => {
-                    self.running_output.remove(&block.id);
+                    let was_streaming = self.running_output.remove(&block.id).is_some();
                     if let Ok(mut pids) = self.running_pids.lock() {
                         pids.remove(&block.id);
                     }
@@ -1753,6 +1791,9 @@ impl MrtGuiApp {
                         guard.push(block.clone());
                     }
                     if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+                        if was_streaming {
+                            tab.activity.command_finished(block.exit_code.unwrap_or(1), Instant::now());
+                        }
                         if let Some(new_cwd) = updated_cwd {
                             tab.cwd = new_cwd.clone();
                             if let Ok(mut guard) = self.mcp_host.local_server_state.cwd.lock() {
@@ -2008,9 +2049,20 @@ impl MrtGuiApp {
         }
 
         // 3. Check Safety Gate before running shell commands
+        if let Some(pattern) = self.config_state.config.safety.blocked_pattern(&raw_input) {
+            tab.blocks.push(CommandBlock::new_completed(
+                raw_input.clone(),
+                shell.name,
+                cwd.display().to_string(),
+                format!("Blocked by the Safety Gate: the command matches blocked pattern \"{pattern}\" from your MRT config."),
+                1,
+                0,
+            ));
+            return;
+        }
         if !bypass_safety {
             let assessment = assess_command(&raw_input);
-            if assessment.requires_approval || assessment.risk == RiskLevel::Critical {
+            if self.config_state.config.safety.requires_approval(&assessment) {
                 self.pending_safety = Some(PendingSafetyApproval {
                     tab_id,
                     assessment,
@@ -2047,6 +2099,9 @@ impl MrtGuiApp {
         if let Some(tui_cmd) = is_tui_command {
             match InteractivePty::spawn_with_command(&shell, &cwd, 120, 35, Some(&tui_cmd)) {
                 Ok(pty) => {
+                    if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+                        tab.activity.command_started(&tui_cmd, Instant::now());
+                    }
                     self.active_tui = Some(ActiveTuiSession {
                         pty: std::sync::Arc::new(pty),
                         tab_id,
@@ -2192,8 +2247,16 @@ impl MrtGuiApp {
             PathBuf::from(&step.cwd)
         };
 
+        if let Some(pattern) = self.config_state.config.safety.blocked_pattern(&step.command) {
+            let message = format!(
+                "Runbook stopped: '{}' matches blocked pattern \"{pattern}\" from your MRT config.",
+                step.command
+            );
+            self.stop_runbook_replay(Some(message));
+            return;
+        }
         let assessment = assess_command(&step.command);
-        if assessment.requires_approval || assessment.risk == RiskLevel::Critical {
+        if self.config_state.config.safety.requires_approval(&assessment) {
             self.pending_safety = Some(PendingSafetyApproval {
                 tab_id,
                 assessment,
@@ -2217,6 +2280,7 @@ impl MrtGuiApp {
         let timestamp = running.timestamp;
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
             tab.blocks.push(running);
+            tab.activity.command_started(&raw_input, Instant::now());
         }
         let output = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         self.running_output.insert(block_id, (tab_id, output.clone()));
@@ -2516,22 +2580,42 @@ impl MrtGuiApp {
             }
             SidePanelEvent::ConnectExternalMcp {
                 name,
+                transport,
                 command,
                 args,
+                url,
+                headers,
             } => {
                 let tx = self.tx.clone();
                 let mut host = self.mcp_host.clone();
-                let arg_list: Vec<String> =
-                    args.split_whitespace().map(|s| s.to_string()).collect();
+                // Invalid header lines are reported as a failed server row (without the values).
+                let config = match transport {
+                    McpTransportKind::Stdio => Ok(McpServerConfig::stdio(
+                        name,
+                        command,
+                        args.split_whitespace().map(|s| s.to_string()).collect(),
+                    )),
+                    McpTransportKind::Http => match parse_http_headers(&headers) {
+                        Ok(headers) => Ok(McpServerConfig::http(name, url.trim(), headers)),
+                        Err(e) => Err(McpServerStatus::failed(
+                            McpServerConfig::http(name, url.trim(), Vec::new()),
+                            e.to_string(),
+                        )),
+                    },
+                };
                 self.busy_count += 1;
-                self.runtime.spawn(async move {
-                    if let Ok(status) = host
-                        .connect_external_stdio_server(name, command, arg_list)
-                        .await
-                    {
+                match config {
+                    Ok(config) => {
+                        self.runtime.spawn(async move {
+                            if let Ok(status) = host.connect_external_server(config).await {
+                                let _ = tx.send(AsyncWorkerEvent::ExternalMcpConnected(status));
+                            }
+                        });
+                    }
+                    Err(status) => {
                         let _ = tx.send(AsyncWorkerEvent::ExternalMcpConnected(status));
                     }
-                });
+                }
             }
             SidePanelEvent::RunHttpInspector { method, url, body } => {
                 let cmd = if body.trim().is_empty() || method == "GET" {
@@ -2576,20 +2660,28 @@ impl MrtGuiApp {
         let mut close_session = false;
         let mut exit_code = 0;
 
+        // Feed new PTY output to the tab's activity tracker (the overlay reads the transcript).
+        let fresh = session.pty.drain_output();
+        if !fresh.is_empty() {
+            let tab_id = session.tab_id;
+            if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+                tab.activity.feed_output(&fresh, Instant::now());
+            }
+        }
+        let Some(ref session) = self.active_tui else {
+            return;
+        };
+
         // Check if the process exited on its own
         if let Ok(Some(code)) = session.pty.try_wait_exit() {
             close_session = true;
             exit_code = code as i32;
         }
 
-        // Check for manual exit via Ctrl+Q or forward keys to PTY
-        let mut kill_requested = false;
+        // Keys bound to actions (e.g. `exit_tui`, Ctrl+Q by default) were already
+        // removed from the input by `handle_keybindings`; forward the rest to the PTY.
+        let kill_requested = std::mem::take(&mut self.tui_exit_requested);
         ctx.input(|i| {
-            if i.modifiers.ctrl && i.key_pressed(Key::Q) {
-                kill_requested = true;
-                return;
-            }
-
             for event in &i.events {
                 forward_egui_event_to_pty(event, &session.pty);
             }
@@ -2612,6 +2704,7 @@ impl MrtGuiApp {
                 let duration_ms = session.start_time.elapsed().as_millis() as u64;
 
                 if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == session.tab_id) {
+                    tab.activity.command_finished(exit_code, Instant::now());
                     let shell_name = self
                         .shells
                         .get(tab.active_shell_idx)
@@ -2727,6 +2820,13 @@ fn read_directory(path: &std::path::Path) -> std::io::Result<Vec<(PathBuf, bool)
     Ok(entries)
 }
 
+/// Builds the key resolver: the default keymap plus user overrides
+/// (`binding -> action`) from the config file's `[keybindings]` table.
+pub(crate) fn load_key_resolver(overrides: &HashMap<String, String>) -> (KeyResolver, Vec<String>) {
+    let (keymap, issues) = Keymap::with_overrides(overrides, Platform::current());
+    (KeyResolver::new(keymap), issues.iter().map(|i| i.to_string()).collect())
+}
+
 fn forward_egui_event_to_pty(event: &egui::Event, pty: &InteractivePty) {
     match event {
         egui::Event::Text(text) => {
@@ -2816,14 +2916,33 @@ fn forward_egui_event_to_pty(event: &egui::Event, pty: &InteractivePty) {
 }
 
 impl MrtGuiApp {
-    fn tab_status(tab: &TerminalTab) -> TabStatus {
-        if tab.blocks.iter().any(|b| b.exit_code.is_none()) {
-            TabStatus::Running
-        } else {
-            match tab.blocks.last().and_then(|b| b.exit_code) {
-                None => TabStatus::Idle,
-                Some(0) => TabStatus::Succeeded,
-                Some(_) => TabStatus::Failed,
+    fn tab_status(tab: &TerminalTab) -> ActivitySnapshot {
+        tab.activity.snapshot(Instant::now())
+    }
+
+    /// Lets each tab's activity tracker recognise agent CLIs (`claude`, `codex`, ...) started
+    /// through wrapper scripts, from the process tree of its running commands.
+    fn observe_activity_processes(&mut self, snapshot: &ProcessSnapshot) {
+        let mut roots: Vec<(Uuid, u32)> = Vec::new();
+        if let Ok(pids) = self.running_pids.lock() {
+            for (block_id, pid) in pids.iter() {
+                if let Some((tab_id, _)) = self.running_output.get(block_id) {
+                    roots.push((*tab_id, *pid));
+                }
+            }
+        }
+        if let Some(pid) = self.active_tui.as_ref().and_then(|s| s.pty.process_id().map(|p| (s.tab_id, p))) {
+            roots.push(pid);
+        }
+        for (tab_id, pid) in roots {
+            let names: Vec<&str> = snapshot
+                .get(pid)
+                .into_iter()
+                .chain(snapshot.descendants(pid).into_iter().map(|(_, e)| e))
+                .map(|e| e.name.as_str())
+                .collect();
+            if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+                tab.activity.observe_process_names(names);
             }
         }
     }
@@ -2842,6 +2961,138 @@ impl MrtGuiApp {
             cwd,
         ));
         self.active_tab = self.tabs.len() - 1;
+    }
+
+    /// Runs every key press through the keymap. Keys that complete a binding or
+    /// are mid-chain are removed from the input, so neither egui widgets nor the
+    /// TUI PTY see them; unbound keys pass through untouched.
+    fn handle_keybindings(&mut self, ctx: &egui::Context) {
+        let now = std::time::Instant::now();
+        let context = KeyContext { tui_active: self.active_tui.is_some() };
+        self.key_resolver.tick(now);
+        let mut actions = Vec::new();
+        let resolver = &mut self.key_resolver;
+        ctx.input_mut(|i| {
+            // egui-winit emits `Text` right after the `Key` that typed it; drop
+            // that text too when the key was consumed (e.g. the `c` of `ctrl+a > c`).
+            let mut drop_next_text = false;
+            i.events.retain(|event| match event {
+                egui::Event::Key { key, pressed: true, repeat, modifiers, .. } => {
+                    match resolver.feed(KeyChord::from_egui(*key, *modifiers), *repeat, now, context) {
+                        Resolution::Matched(action) => {
+                            actions.push(action);
+                            drop_next_text = true;
+                            false
+                        }
+                        Resolution::Pending => {
+                            drop_next_text = true;
+                            false
+                        }
+                        Resolution::NoMatch => {
+                            drop_next_text = false;
+                            true
+                        }
+                    }
+                }
+                egui::Event::Text(_) if drop_next_text => {
+                    drop_next_text = false;
+                    false
+                }
+                _ => true,
+            });
+        });
+        for action in actions {
+            self.dispatch_action(action);
+        }
+        if let Some(wait) = self.key_resolver.next_deadline(now) {
+            ctx.request_repaint_after(wait);
+        }
+    }
+
+    /// Performs a keymap action (from a key binding or the Command Palette).
+    fn dispatch_action(&mut self, action: Action) {
+        match action {
+            Action::ToggleCommandPalette => self.show_command_palette = !self.show_command_palette,
+            Action::ExitTui => self.tui_exit_requested = true,
+            Action::NewTab => {
+                let shell_idx = self.tabs.get(self.active_tab).map(|t| t.active_shell_idx).unwrap_or(0);
+                if shell_idx < self.shells.len() {
+                    self.open_new_tab(shell_idx);
+                }
+            }
+            Action::CloseTab => {
+                if let Some(id) = self.tabs.get(self.active_tab).map(|t| t.id) {
+                    self.close_terminal(id);
+                }
+            }
+            Action::NextTab => {
+                if !self.tabs.is_empty() {
+                    self.active_tab = (self.active_tab + 1) % self.tabs.len();
+                }
+            }
+            Action::PreviousTab => {
+                if !self.tabs.is_empty() {
+                    self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
+                }
+            }
+            Action::SplitHorizontal | Action::SplitVertical | Action::Unsplit | Action::ClearBlocks => {
+                let shells_count = self.shells.len();
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    match action {
+                        Action::SplitHorizontal => tab.split(SplitDirection::Horizontal, shells_count),
+                        Action::SplitVertical => tab.split(SplitDirection::Vertical, shells_count),
+                        Action::Unsplit => tab.close_split(),
+                        _ => {
+                            tab.blocks.clear();
+                            tab.comparison = None;
+                        }
+                    }
+                }
+            }
+            Action::ToggleExplorer => self.show_explorer = !self.show_explorer,
+            Action::ToggleHistory => {
+                self.show_history = !self.show_history;
+                if self.show_history {
+                    self.refresh_history();
+                }
+            }
+            Action::ToggleRunbooks => {
+                self.runbooks_state.show_panel = !self.runbooks_state.show_panel;
+                if self.runbooks_state.show_panel {
+                    self.refresh_runbooks();
+                    self.refresh_history();
+                }
+            }
+            Action::ToggleMcpHub => self.side_state.show_mcp_panel = !self.side_state.show_mcp_panel,
+            Action::ToggleToolbox => {
+                self.side_state.show_toolbox_panel = !self.side_state.show_toolbox_panel;
+            }
+            Action::ToggleMosaic => self.mosaic = !self.mosaic,
+            Action::OpenTaskManager => self.open_task_manager(None),
+            // The resolver itself tracks the active key table.
+            Action::EnterTable(_) | Action::ExitTable => {}
+        }
+    }
+
+    /// Small bottom-right badge while a chain is half-typed or a key table is active.
+    fn render_key_indicator(&self, ctx: &egui::Context) {
+        let Some(label) = self.key_resolver.indicator() else {
+            return;
+        };
+        egui::Area::new(egui::Id::new("keymap_pending_indicator"))
+            .anchor(egui::Align2::RIGHT_BOTTOM, [-16.0, -16.0])
+            .order(egui::Order::Foreground)
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::none()
+                    .fill(Palette::BG_ELEVATED)
+                    .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_FAINT))
+                    .rounding(egui::Rounding::same(8.0))
+                    .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new(format!("⌨ {label}")).monospace().size(12.0).color(Palette::TEXT_BODY));
+                    });
+            });
     }
 
     /// Left sidebar: brand, new tab, tabs list, workspace panels and status card.
@@ -2976,19 +3227,21 @@ impl MrtGuiApp {
                     };
                     let status = Self::tab_status(tab);
                     let subtitle = if generic {
-                        format!("{shell} · {}", status.label())
+                        format!("{shell} · {}", status.state.label())
                     } else {
                         format!("{shell} · {folder}")
                     };
+                    let badge_top = crate::notifications::row_top(ui);
                     let row = tab_row(
                         ui,
                         &title,
                         &subtitle,
-                        status,
+                        &status,
                         idx == self.active_tab,
                         closable,
                         compact,
                     );
+                    self.notifier.paint_badge(ui, badge_top, tab.id, compact);
                     if row.close {
                         tab_to_close = Some(tab.id);
                     } else if row.selected {
@@ -3020,6 +3273,9 @@ impl MrtGuiApp {
                 if nav_row(ui, "⊞", "Mosaic", None, self.mosaic, compact).clicked() {
                     self.mosaic = !self.mosaic;
                 }
+                if nav_row(ui, "🔔", "Notifications", None, self.notifier.show_settings, compact).clicked() {
+                    self.notifier.show_settings = !self.notifier.show_settings;
+                }
 
                 // Status card pinned to the bottom
                 if !compact {
@@ -3038,9 +3294,12 @@ impl MrtGuiApp {
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             ui.spacing_mut().item_spacing.y = 4.0;
+                            let gate_on = self.config_state.config.safety.enabled;
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("●").size(10.0).color(Palette::ACCENT_GREEN));
-                                ui.label(RichText::new("Safety Gate on").size(13.0).color(Palette::TEXT_PRIMARY));
+                                let dot = if gate_on { Palette::ACCENT_GREEN } else { Palette::ACCENT_AMBER };
+                                let label = if gate_on { "Safety Gate on" } else { "Safety Gate off (config)" };
+                                ui.label(RichText::new("●").size(10.0).color(dot));
+                                ui.label(RichText::new(label).size(13.0).color(Palette::TEXT_PRIMARY));
                             });
                             let bridge = match self.bridge_port {
                                 Some(port) => format!("MCP bridge · port {port}"),
@@ -3123,7 +3382,14 @@ impl MrtGuiApp {
                         }
                         ui.add_space(4.0);
                         let width = ui.available_width().clamp(160.0, 320.0);
-                        if search_pill(ui, width, "Commands, tabs, tools…", "Ctrl K").clicked() {
+                        let palette_keys = self
+                            .key_resolver
+                            .keymap()
+                            .bindings_for(&Action::ToggleCommandPalette)
+                            .into_iter()
+                            .next()
+                            .unwrap_or_default();
+                        if search_pill(ui, width, "Commands, tabs, tools…", &palette_keys).clicked() {
                             self.show_command_palette = !self.show_command_palette;
                         }
                     });
@@ -3148,11 +3414,16 @@ impl eframe::App for MrtGuiApp {
             ));
         }
 
+        self.update_config(ctx);
         self.process_async_events();
         self.process_history_events();
         self.process_mcp_ui_commands();
+        self.handle_keybindings(ctx);
         self.process_tui_session(ctx);
         self.maybe_spawn_process_tick();
+        if let Some(idx) = self.notifier.update(ctx, &self.tabs, self.active_tab, self.mosaic) {
+            self.active_tab = idx;
+        }
 
         ctx.request_repaint_after(std::time::Duration::from_millis(if self.busy_count > 0 || self.history_pending > 0 {
             50
@@ -3160,15 +3431,9 @@ impl eframe::App for MrtGuiApp {
             250
         }));
 
-        // Keyboard shortcut for Command Palette (Ctrl+K or Ctrl+P)
-        if ctx.input_mut(|i| {
-            i.consume_key(Modifiers::CTRL, Key::K) || i.consume_key(Modifiers::CTRL, Key::P)
-        }) {
-            self.show_command_palette = !self.show_command_palette;
-        }
-
         self.render_sidebar(ctx);
         self.render_header(ctx);
+        self.render_config_notice(ctx);
 
         if self.show_explorer {
             self.render_explorer(ctx);
@@ -3897,6 +4162,7 @@ impl eframe::App for MrtGuiApp {
         if self.show_command_palette {
             let mut close_palette = false;
             let mut cmd_to_run = None;
+            let mut action_to_run: Option<Action> = None;
             let mut switch_shell_idx = None;
 
             egui::Area::new(egui::Id::new("palette_backdrop"))
@@ -3957,6 +4223,7 @@ impl eframe::App for MrtGuiApp {
                         q.is_empty() || title.to_lowercase().contains(&q) || hint.to_lowercase().contains(&q)
                     };
                     let mut first_cmd: Option<String> = None;
+                    let mut first_action: Option<Action> = None;
                     let mut first_shell: Option<usize> = None;
                     let mut results = 0usize;
 
@@ -3965,17 +4232,42 @@ impl eframe::App for MrtGuiApp {
                         .show(ui, |ui| {
                             egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
                                 ui.set_width(ui.available_width());
-                                let sections: [(&str, &str, &[(&str, &str)]); 4] = [
-                                    (
-                                        "Layout",
-                                        "‖",
-                                        &[
-                                            ("Split pane horizontally", ":split-h"),
-                                            ("Split pane vertically", ":split-v"),
-                                            ("Unsplit", ":unsplit"),
-                                            ("Clear terminal blocks", ":clear"),
-                                        ],
-                                    ),
+                                if !self.keymap_issues.is_empty() {
+                                    section_label(ui, "   Keybinding problems");
+                                    for issue in &self.keymap_issues {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.add_space(12.0);
+                                            ui.label(RichText::new(format!("⚠ {issue}")).size(12.0).color(Palette::ACCENT_AMBER));
+                                        });
+                                    }
+                                    ui.add_space(6.0);
+                                }
+                                // Bindable actions, each showing its current key binding
+                                // (or its action name, ready to bind in `[keybindings]`).
+                                let keymap = self.key_resolver.keymap();
+                                let action_rows: Vec<(Action, String, String)> = PALETTE_ACTIONS
+                                    .iter()
+                                    .map(|action| {
+                                        let keys = keymap.bindings_for(action).join(" / ");
+                                        let hint = if keys.is_empty() { action.name() } else { keys };
+                                        (action.clone(), action.title(), hint)
+                                    })
+                                    .filter(|(action, title, hint)| matches(title, &format!("{hint} {}", action.name())))
+                                    .collect();
+                                if !action_rows.is_empty() {
+                                    section_label(ui, "   Actions");
+                                    for (action, title, hint) in action_rows {
+                                        results += 1;
+                                        if first_cmd.is_none() && first_action.is_none() && first_shell.is_none() {
+                                            first_action = Some(action.clone());
+                                        }
+                                        if palette_row(ui, "‖", &title, &hint).clicked() {
+                                            action_to_run = Some(action);
+                                            close_palette = true;
+                                        }
+                                    }
+                                }
+                                let sections: [(&str, &str, &[(&str, &str)]); 3] = [
                                     (
                                         "Tools",
                                         "🌐",
@@ -3992,7 +4284,6 @@ impl eframe::App for MrtGuiApp {
                                         "Processes",
                                         "📈",
                                         &[
-                                            ("Show processes (Task Manager)", ":toolbox task-manager"),
                                             ("List processes by CPU", ":ps"),
                                             ("List processes by memory", ":ps --sort mem"),
                                             ("Processes started by MRT", ":ps --mrt --tree"),
@@ -4019,7 +4310,7 @@ impl eframe::App for MrtGuiApp {
                                     section_label(ui, &format!("   {section}"));
                                     for (title, cmd) in visible {
                                         results += 1;
-                                        if first_cmd.is_none() && first_shell.is_none() {
+                                        if first_cmd.is_none() && first_action.is_none() && first_shell.is_none() {
                                             first_cmd = Some(cmd.to_string());
                                         }
                                         if palette_row(ui, icon, title, cmd).clicked() {
@@ -4039,7 +4330,7 @@ impl eframe::App for MrtGuiApp {
                                     section_label(ui, "   Shells");
                                     for (idx, title, program) in shell_rows {
                                         results += 1;
-                                        if first_cmd.is_none() && first_shell.is_none() {
+                                        if first_cmd.is_none() && first_action.is_none() && first_shell.is_none() {
                                             first_shell = Some(idx);
                                         }
                                         if palette_row(ui, "›_", &title, &program).clicked() {
@@ -4060,7 +4351,9 @@ impl eframe::App for MrtGuiApp {
                         });
 
                     if enter_pressed {
-                        if let Some(cmd) = first_cmd.take() {
+                        if let Some(action) = first_action.take() {
+                            action_to_run = Some(action);
+                        } else if let Some(cmd) = first_cmd.take() {
                             cmd_to_run = Some(cmd);
                         } else if let Some(idx) = first_shell {
                             switch_shell_idx = Some(idx);
@@ -4110,6 +4403,10 @@ impl eframe::App for MrtGuiApp {
                 self.palette_query.clear();
                 self.submit_input(Some(cmd), false);
             }
+            if let Some(action) = action_to_run {
+                self.palette_query.clear();
+                self.dispatch_action(action);
+            }
             if close_palette || ctx.input(|i| i.key_pressed(Key::Escape)) {
                 self.show_command_palette = false;
                 if self.pending_safety.is_none() {
@@ -4118,14 +4415,75 @@ impl eframe::App for MrtGuiApp {
             }
         }
 
+        self.notifier.render_settings(ctx);
         self.render_tui_overlay(ctx);
+        self.render_key_indicator(ctx);
         self.sync_mcp_from_gui();
+        // Keep spinners turning and let quiet-period heuristics flip to "waiting".
+        if self.tabs.iter().any(|t| t.activity.running_commands() > 0 || is_animated(&Self::tab_status(t))) {
+            ctx.request_repaint_after(Duration::from_millis(150));
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn key_event(key: Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }
+    }
+
+    #[test]
+    fn keybindings_consume_bound_keys_and_pass_the_rest_through() {
+        let mut app = MrtGuiApp::new();
+        let ctx = egui::Context::default();
+        let mut ctrl = egui::Modifiers::NONE;
+        ctrl.ctrl = true;
+        ctrl.command = !cfg!(target_os = "macos");
+        let raw = egui::RawInput {
+            events: vec![
+                key_event(Key::K, ctrl),
+                key_event(Key::A, egui::Modifiers::NONE),
+                egui::Event::Text("a".into()),
+                key_event(Key::Q, ctrl),
+            ],
+            ..Default::default()
+        };
+        let mut remaining = Vec::new();
+        let _ = ctx.run(raw, |ctx| {
+            app.handle_keybindings(ctx);
+            remaining = ctx.input(|i| i.events.clone());
+        });
+        assert!(app.show_command_palette, "Ctrl+K toggles the palette");
+        // `a` (and its text) plus Ctrl+Q outside TUI mode reach the widgets/shell.
+        assert_eq!(remaining.len(), 3, "{remaining:?}");
+        assert!(!app.tui_exit_requested);
+    }
+
+    #[test]
+    fn keymap_actions_drive_tabs_and_splits() {
+        let mut app = MrtGuiApp::new();
+        app.dispatch_action(Action::NewTab);
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active_tab, 1);
+        app.dispatch_action(Action::NextTab);
+        assert_eq!(app.active_tab, 0);
+        app.dispatch_action(Action::PreviousTab);
+        assert_eq!(app.active_tab, 1);
+        app.dispatch_action(Action::SplitVertical);
+        assert_eq!(app.tabs[1].split_direction, SplitDirection::Vertical);
+        app.dispatch_action(Action::Unsplit);
+        assert_eq!(app.tabs[1].split_direction, SplitDirection::None);
+        app.dispatch_action(Action::CloseTab);
+        assert_eq!(app.tabs.len(), 1);
+        app.dispatch_action(Action::ToggleMosaic);
+        assert!(app.mosaic);
+        app.dispatch_action(Action::ExitTui);
+        assert!(app.tui_exit_requested);
+        // Keyed actions do not pollute the per-tab command history.
+        assert!(app.tabs[0].command_history.is_empty());
+    }
 
     #[test]
     fn command_entry_creates_comparable_output_blocks() {
@@ -4360,6 +4718,39 @@ mod tests {
             remaining.ai_proposal.as_ref().unwrap().proposed_command,
             "echo second"
         );
+    }
+
+    #[test]
+    fn tab_activity_reaches_the_sidebar_status_and_mcp() {
+        let mut app = MrtGuiApp::new();
+        let now = Instant::now();
+        let tab = &mut app.tabs[0];
+        tab.activity.command_started("claude", now);
+        tab.activity.feed_output("\x1b]678;status=waiting;message=Approve edit\x07", now);
+        assert_eq!(
+            MrtGuiApp::tab_status(&app.tabs[0]).state,
+            mrt_core::ActivityState::WaitingForInput
+        );
+        app.sync_mcp_from_gui();
+        let host = app.mcp_host.clone();
+        let result = app
+            .runtime
+            .block_on(host.call_tool("mrt-native-mcp", "mrt_list_tabs", json!({})))
+            .unwrap();
+        let tabs: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let activity = &tabs[0]["activity"];
+        assert_eq!(activity["state"], "waiting_for_input");
+        assert_eq!(activity["agent"], "claude");
+        assert_eq!(activity["detail"], "Approve edit");
+
+        app.tabs[0].activity.command_finished(0, Instant::now());
+        app.sync_mcp_from_gui();
+        let result = app
+            .runtime
+            .block_on(host.call_tool("mrt-native-mcp", "mrt_get_session_state", json!({})))
+            .unwrap();
+        let state: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert_eq!(state["tabs"][0]["activity"]["state"], "succeeded");
     }
 
     #[test]

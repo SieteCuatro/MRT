@@ -1,4 +1,4 @@
-use crate::vt::{parse_ansi_text, AnsiSpan};
+use crate::vt::{parse_ansi_rich, AnsiSpan, ParsedAnsi, VtEvent};
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -67,9 +67,78 @@ pub struct CommandBlock {
     pub pinned: bool,
     pub ai_explanation: Option<String>,
     pub ai_suggested_fix: Option<String>,
+    /// Last working directory the command reported via OSC 7, if any.
+    #[serde(default)]
+    pub reported_cwd: Option<String>,
+    /// OSC 52 clipboard writes requested by the command, in output order.
+    /// Never applied without the user's approval.
+    #[serde(default)]
+    pub clipboard_requests: Vec<ClipboardRequest>,
+}
+
+/// The user's answer to an OSC 52 clipboard write request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClipboardDecision {
+    Pending,
+    Approved,
+    Denied,
+}
+
+/// An OSC 52 clipboard write found in a block's output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClipboardRequest {
+    /// Selection targets as sent by the program (`c`, `p`, ...).
+    pub selection: String,
+    pub text: String,
+    pub decision: ClipboardDecision,
+}
+
+/// Splits parsed OSC events into the last reported cwd and clipboard requests,
+/// keeping the decisions already made for requests in `previous` (matched by
+/// position, since output is only ever appended).
+fn split_events(
+    events: Vec<VtEvent>,
+    previous: &[ClipboardRequest],
+) -> (Option<String>, Vec<ClipboardRequest>) {
+    let mut cwd = None;
+    let mut requests = Vec::new();
+    for event in events {
+        match event {
+            VtEvent::WorkingDirectory { path, .. } => cwd = Some(path),
+            VtEvent::ClipboardWrite { selection, text } => {
+                let decision = previous
+                    .get(requests.len())
+                    .filter(|p| p.text == text)
+                    .map(|p| p.decision)
+                    .unwrap_or(ClipboardDecision::Pending);
+                requests.push(ClipboardRequest { selection, text, decision });
+            }
+        }
+    }
+    (cwd, requests)
 }
 
 impl CommandBlock {
+    /// Re-parses `raw_output` after new output was appended: refreshes the
+    /// spans, plain text, reported cwd and clipboard requests, keeping the
+    /// user's earlier clipboard decisions.
+    pub fn refresh_output(&mut self) {
+        let parsed = parse_ansi_rich(&self.raw_output);
+        self.ansi_spans = parsed.spans;
+        self.plain_output = parsed.plain_text;
+        let (cwd, requests) = split_events(parsed.events, &self.clipboard_requests);
+        self.reported_cwd = cwd;
+        self.clipboard_requests = requests;
+    }
+
+    /// Clipboard requests still waiting for the user's decision.
+    pub fn pending_clipboard_requests(&self) -> usize {
+        self.clipboard_requests
+            .iter()
+            .filter(|r| r.decision == ClipboardDecision::Pending)
+            .count()
+    }
+
     pub fn new_completed(
         command: impl Into<String>,
         shell_name: impl Into<String>,
@@ -79,7 +148,8 @@ impl CommandBlock {
         duration_ms: u64,
     ) -> Self {
         let raw_output = raw_output.into();
-        let (ansi_spans, plain_output) = parse_ansi_text(&raw_output);
+        let ParsedAnsi { spans: ansi_spans, plain_text: plain_output, events } = parse_ansi_rich(&raw_output);
+        let (reported_cwd, clipboard_requests) = split_events(events, &[]);
         let structured = classify_output(&plain_output);
         let view_mode = if structured.is_structured() {
             ViewMode::Structured
@@ -103,6 +173,8 @@ impl CommandBlock {
             pinned: false,
             ai_explanation: None,
             ai_suggested_fix: None,
+            reported_cwd,
+            clipboard_requests,
         }
     }
 
@@ -116,7 +188,8 @@ impl CommandBlock {
         duration_ms: u64,
     ) -> Self {
         let raw_output = raw_output.into();
-        let (ansi_spans, plain_output) = parse_ansi_text(&raw_output);
+        let ParsedAnsi { spans: ansi_spans, plain_text: plain_output, events } = parse_ansi_rich(&raw_output);
+        let (reported_cwd, clipboard_requests) = split_events(events, &[]);
         Self {
             id: Uuid::new_v4(),
             command: command.into(),
@@ -133,6 +206,8 @@ impl CommandBlock {
             pinned: false,
             ai_explanation: None,
             ai_suggested_fix: None,
+            reported_cwd,
+            clipboard_requests,
         }
     }
 }
@@ -218,4 +293,33 @@ fn looks_like_markdown(text: &str) -> bool {
         }
     }
     md_signals >= 3
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_collects_osc_events_and_keeps_decisions() {
+        let mut block = CommandBlock::new_completed(
+            "x",
+            "bash",
+            "/",
+            "\x1b]7;file://h/srv/app\x07\x1b]52;c;b25l\x07",
+            0,
+            1,
+        );
+        assert_eq!(block.reported_cwd.as_deref(), Some("/srv/app"));
+        assert_eq!(block.clipboard_requests.len(), 1);
+        assert_eq!(block.clipboard_requests[0].text, "one");
+        assert_eq!(block.pending_clipboard_requests(), 1);
+
+        block.clipboard_requests[0].decision = ClipboardDecision::Denied;
+        block.raw_output.push_str("\x1b]52;c;dHdv\x07\x1b]7;file:///tmp\x07");
+        block.refresh_output();
+        assert_eq!(block.reported_cwd.as_deref(), Some("/tmp"));
+        assert_eq!(block.clipboard_requests[0].decision, ClipboardDecision::Denied);
+        assert_eq!(block.clipboard_requests[1].text, "two");
+        assert_eq!(block.pending_clipboard_requests(), 1);
+    }
 }

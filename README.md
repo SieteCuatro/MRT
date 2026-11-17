@@ -29,6 +29,7 @@ Dual-licensed under the [MIT License or The Unlicense](LICENSE), at your option.
 - **Toolbox Panel**: One side panel with a **Network** tab (HTTP, web reader, ports, DNS, WebSocket) and a **Task Manager** tab, linked by PID.
 - **MCP Host & Server (31 Native Tools)**:
   - **MCP Server (`mrt --mcp-server`)**: Exposes 31 tools and 5 resources over JSON-RPC 2.0 (`stdio`), transparently proxying to a running GUI window via a local TCP bridge (`mcp-bridge.json`) or running standalone headless.
+  - **One-command agent setup (`mrt agent setup`)**: Registers the MCP server and an `mrt` skill (what the tools are for, how the Safety Approval Gate works) with Claude Code, Codex CLI, and Gemini CLI, merging into existing configs with backups; `mrt agent show` prints the same for any other agent and `mrt agent remove` undoes it.
   - **MCP Host**: Connects to external `stdio` MCP servers from the GUI's MCP Hub panel, with one-click presets for common servers (Filesystem, Git, Memory Graph, SQLite, Fetch).
 - **Safety Approval Gate**: Classifies commands (`Safe`, `Moderate`, `Critical`) across Bash, PowerShell, CMD/Batch, Git, SQL, Kubernetes, and process control (`kill`, `pkill`, `taskkill`, `Stop-Process`, …); prompts for confirmation in the GUI for `Critical` and process-control commands and blocks unapproved `Critical` commands over MCP.
 - **Provider-Agnostic AI with Streaming**: Translates natural-language prompts (`#` or `?`) into shell-specific commands and streams AI error diagnoses token-by-token directly into failed blocks, with an offline heuristic fallback when no API key is configured.
@@ -48,13 +49,16 @@ cargo run -p mrt-app
 # Run in headless MCP Server mode (JSON-RPC 2.0 over stdio)
 cargo run -p mrt-app -- --mcp-server
 
+# Connect Claude Code, Codex CLI and Gemini CLI to MRT (add --dry-run to preview)
+cargo run -p mrt-app -- agent setup
+
 # Run the workspace test suite
 cargo test --workspace
 ```
 
 ## AI Providers
 
-MRT checks configured environment variables in the following order and falls back to the built-in offline heuristic engine if none are set or reachable:
+MRT checks configured environment variables in the following order (set `ai.provider` in the [config file](docs/USER_GUIDE.md#6-configuration-file) to try one first) and falls back to the built-in offline heuristic engine if none are set or reachable:
 
 | Provider | Environment Variable | Default Model |
 | :--- | :--- | :--- |
@@ -76,7 +80,8 @@ MRT checks configured environment variables in the following order and falls bac
 - [Toolbox: Network Tools & Task Manager](docs/TOOLBOX.md) — `:http`, `:web`, `:ports`, `:dns`, `:ws`, `:ps`, `:top`, `:proc`, `:kill`, and `:watch-proc` internals.
 - [AI Providers & Error Triage](docs/AI_PROVIDERS_AND_AGENTS.md) — Provider resolution and command diagnosis.
 - [GUI & Widgets](docs/GUI_AND_WIDGETS.md) — Async architecture, block viewers, and side panels.
+- [Performance & Benchmarks](docs/PERFORMANCE.md) — Output throughput numbers, hot spots with large output, and how to run `cargo bench`.
 - [Roadmap](ROADMAP.md) — Planned milestones and project ideas.
 - [Contributing](CONTRIBUTING.md) — Development workflow and PR checklist.
 - [AI Agent Instructions](AGENTS.md) — Workspace context for coding agents.
-- [Configuration Example](mrt.example.toml) — Planned configuration schema (not loaded yet; MRT reads environment variables and GUI settings today).
+- [Configuration Example](mrt.example.toml) — Every setting MRT reads from `~/.config/mrt/config.toml` (`%APPDATA%\mrt\config.toml` on Windows) and a per-project `.mrt.toml`, reloaded live. See [User Guide §6](docs/USER_GUIDE.md#6-configuration-file).

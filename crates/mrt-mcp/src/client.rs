@@ -1,18 +1,88 @@
-use crate::protocol::{JsonRpcRequest, JsonRpcResponse, McpResource, McpTool, McpToolCallResult};
+use crate::protocol::{JsonRpcRequest, McpResource, McpTool, McpToolCallResult};
 use crate::server::{handle_mcp_jsonrpc, MrtMcpServerState};
-use anyhow::{Context, Result};
+use crate::transport::{
+    HttpTransport, McpHttpHeader, McpTransportKind, ServerEventLog, SessionExpired,
+    StdioTransport, Transport, LATEST_PROTOCOL_VERSION,
+};
+use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+/// Longest MRT waits for one JSON-RPC response from an external MCP server.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+/// Upper bound on `nextCursor` pages followed by `tools/list` / `resources/list`.
+const MAX_LIST_PAGES: usize = 50;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
     pub name: String,
+    /// stdio: the program to launch.
+    #[serde(default)]
     pub command: String,
+    /// stdio: its arguments.
+    #[serde(default)]
     pub args: Vec<String>,
     pub builtin_loopback: bool,
+    #[serde(default)]
+    pub transport: McpTransportKind,
+    /// HTTP: the server's single MCP endpoint (for example `https://example.com/mcp`).
+    #[serde(default)]
+    pub url: String,
+    /// HTTP: extra headers sent with every request (for example `Authorization`).
+    /// `Debug` output redacts their values.
+    #[serde(default)]
+    pub headers: Vec<McpHttpHeader>,
+}
+
+impl McpServerConfig {
+    pub fn stdio(name: impl Into<String>, command: impl Into<String>, args: Vec<String>) -> Self {
+        Self {
+            name: name.into(),
+            command: command.into(),
+            args,
+            builtin_loopback: false,
+            transport: McpTransportKind::Stdio,
+            url: String::new(),
+            headers: Vec::new(),
+        }
+    }
+
+    pub fn http(name: impl Into<String>, url: impl Into<String>, headers: Vec<McpHttpHeader>) -> Self {
+        Self {
+            name: name.into(),
+            command: String::new(),
+            args: Vec::new(),
+            builtin_loopback: false,
+            transport: McpTransportKind::Http,
+            url: url.into(),
+            headers,
+        }
+    }
+
+    /// One line describing where the server lives. Header names are listed, values never.
+    pub fn target_display(&self) -> String {
+        if self.builtin_loopback {
+            return self.command.clone();
+        }
+        match self.transport {
+            McpTransportKind::Stdio => {
+                let mut s = self.command.clone();
+                for a in &self.args {
+                    s.push(' ');
+                    s.push_str(a);
+                }
+                s
+            }
+            McpTransportKind::Http if self.headers.is_empty() => self.url.clone(),
+            McpTransportKind::Http => {
+                let names: Vec<&str> = self.headers.iter().map(|h| h.name.as_str()).collect();
+                format!("{} (headers: {})", self.url, names.join(", "))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,11 +95,137 @@ pub struct McpServerStatus {
     pub last_error: Option<String>,
 }
 
+impl McpServerStatus {
+    /// A status for a server MRT could not reach (or whose settings were invalid).
+    pub fn failed(config: McpServerConfig, error: impl Into<String>) -> Self {
+        Self {
+            config,
+            connected: false,
+            server_version: "unreachable".to_string(),
+            tools: Vec::new(),
+            resources: Vec::new(),
+            last_error: Some(error.into()),
+        }
+    }
+}
+
+/// An initialized MCP client session over any transport. Holds the request id counter and the
+/// negotiated protocol version; the transport does the I/O.
+pub(crate) struct McpClientSession {
+    transport: Transport,
+    next_id: u64,
+    server_version: String,
+}
+
+impl McpClientSession {
+    /// Opens the transport and runs the `initialize` / `notifications/initialized` handshake.
+    async fn open(config: &McpServerConfig) -> Result<Self> {
+        let transport = match config.transport {
+            McpTransportKind::Stdio => Transport::Stdio(StdioTransport::spawn(&config.command, &config.args)?),
+            McpTransportKind::Http => Transport::Http(HttpTransport::new(&config.url, config.headers.clone())?),
+        };
+        let mut session = Self {
+            transport,
+            next_id: 0,
+            server_version: String::new(),
+        };
+        session.initialize().await?;
+        Ok(session)
+    }
+
+    async fn initialize(&mut self) -> Result<()> {
+        let result = self
+            .request(
+                "initialize",
+                json!({
+                    "protocolVersion": LATEST_PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": { "name": "ModernRustTerminal", "version": env!("CARGO_PKG_VERSION") }
+                }),
+            )
+            .await?;
+        self.server_version = result
+            .pointer("/serverInfo/version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("1.0")
+            .to_string();
+        let protocol_version = result
+            .get("protocolVersion")
+            .and_then(|v| v.as_str())
+            .unwrap_or(LATEST_PROTOCOL_VERSION)
+            .to_string();
+        self.transport.set_protocol_version(&protocol_version);
+        self.transport
+            .notify(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
+            .await?;
+        self.transport.on_initialized();
+        Ok(())
+    }
+
+    /// Sends one request and returns its `result`, turning a JSON-RPC error into `Err`.
+    async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+        self.next_id += 1;
+        let msg = json!({ "jsonrpc": "2.0", "id": self.next_id, "method": method, "params": params });
+        let resp = tokio::time::timeout(REQUEST_TIMEOUT, self.transport.request(&msg))
+            .await
+            .map_err(|_| anyhow!("MCP request `{method}` timed out after {}s", REQUEST_TIMEOUT.as_secs()))??;
+        if let Some(err) = resp.error {
+            anyhow::bail!("MCP Error {}: {}", err.code, err.message);
+        }
+        Ok(resp.result.unwrap_or_else(|| json!({})))
+    }
+
+    /// Runs a paginated `*/list` request and collects `key` from every page.
+    async fn list_all<T: serde::de::DeserializeOwned>(&mut self, method: &str, key: &str) -> Result<Vec<T>> {
+        let mut items = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_LIST_PAGES {
+            let params = match &cursor {
+                Some(c) => json!({ "cursor": c }),
+                None => json!({}),
+            };
+            let page = self.request(method, params).await?;
+            if let Some(list) = page.get(key) {
+                items.extend(
+                    serde_json::from_value::<Vec<T>>(list.clone())
+                        .with_context(|| format!("Malformed `{key}` in {method} reply"))?,
+                );
+            }
+            cursor = page.get("nextCursor").and_then(|c| c.as_str()).map(str::to_string);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        Ok(items)
+    }
+
+    async fn call_tool(&mut self, tool_name: &str, arguments: Value) -> Result<McpToolCallResult> {
+        let result = self
+            .request("tools/call", json!({ "name": tool_name, "arguments": arguments }))
+            .await?;
+        Ok(serde_json::from_value(result)?)
+    }
+
+    fn events(&self) -> ServerEventLog {
+        self.transport.events()
+    }
+
+    async fn close(&mut self) {
+        self.transport.close().await;
+    }
+}
+
+type SharedSession = Arc<tokio::sync::Mutex<McpClientSession>>;
+
 /// Manages MCP servers connected to Modern Rust Terminal (MRT as MCP Host).
+///
+/// Cloning is cheap and clones share the live sessions with external servers, so a clone moved
+/// into a background task reuses the same `stdio` child process or HTTP `Mcp-Session-Id`.
 #[derive(Clone)]
 pub struct McpHostManager {
     pub local_server_state: MrtMcpServerState,
     pub servers: Vec<McpServerStatus>,
+    sessions: Arc<tokio::sync::Mutex<HashMap<String, SharedSession>>>,
 }
 
 impl McpHostManager {
@@ -39,10 +235,12 @@ impl McpHostManager {
 
         let builtin_status = McpServerStatus {
             config: McpServerConfig {
-                name: "mrt-native-mcp".to_string(),
-                command: "mrt --mcp-server (in-process)".to_string(),
-                args: vec!["--mcp-server".to_string()],
                 builtin_loopback: true,
+                ..McpServerConfig::stdio(
+                    "mrt-native-mcp",
+                    "mrt --mcp-server (in-process)",
+                    vec!["--mcp-server".to_string()],
+                )
             },
             connected: true,
             server_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -54,6 +252,7 @@ impl McpHostManager {
         Self {
             local_server_state,
             servers: vec![builtin_status],
+            sessions: Arc::default(),
         }
     }
 
@@ -69,7 +268,9 @@ impl McpHostManager {
         list
     }
 
-    /// Invokes a tool on either the built-in MRT MCP server or an external stdio MCP server.
+    /// Invokes a tool on the built-in MRT MCP server or on an external stdio / HTTP MCP server.
+    /// External calls reuse the server's live session; if the session ended (stdio child exited,
+    /// HTTP 404 for the session id) MRT reconnects once and retries.
     pub async fn call_tool(
         &self,
         server_name: &str,
@@ -104,7 +305,27 @@ impl McpHostManager {
             return Ok(parsed);
         }
 
-        call_external_stdio_tool(&srv.config, tool_name, arguments).await
+        let session = self.session_for(&srv.config).await?;
+        let first = session.lock().await.call_tool(tool_name, arguments.clone()).await;
+        match first {
+            Err(e) if e.downcast_ref::<SessionExpired>().is_some() => {
+                self.drop_session(&srv.config.name).await;
+                let session = self.session_for(&srv.config).await?;
+                let retry = session.lock().await.call_tool(tool_name, arguments).await;
+                retry
+            }
+            other => other,
+        }
+    }
+
+    /// Notifications and requests the server sent outside a response (for HTTP servers this
+    /// includes the optional GET event stream), oldest first. Draining empties the buffer.
+    pub async fn drain_server_events(&self, server_name: &str) -> Vec<Value> {
+        let session = self.sessions.lock().await.get(server_name).cloned();
+        match session {
+            Some(s) => s.lock().await.events().drain(),
+            None => Vec::new(),
+        }
     }
 
     /// Connects to an external stdio MCP server, runs `initialize` + `tools/list`, and registers its tools.
@@ -114,180 +335,89 @@ impl McpHostManager {
         command: String,
         args: Vec<String>,
     ) -> Result<McpServerStatus> {
-        let config = McpServerConfig {
-            name,
-            command,
-            args,
-            builtin_loopback: false,
-        };
+        self.connect_external_server(McpServerConfig::stdio(name, command, args))
+            .await
+    }
 
-        let status = match probe_external_stdio_server(&config).await {
-            Ok((version, tools, resources)) => McpServerStatus {
-                config,
-                connected: true,
-                server_version: version,
-                tools,
-                resources,
-                last_error: None,
-            },
-            Err(e) => McpServerStatus {
-                config,
-                connected: false,
-                server_version: "unreachable".to_string(),
-                tools: Vec::new(),
-                resources: Vec::new(),
-                last_error: Some(e.to_string()),
-            },
+    /// Connects to a remote MCP server over Streamable HTTP. `headers` (for example
+    /// `Authorization: Bearer ...`) are sent with every request and never logged.
+    pub async fn connect_external_http_server(
+        &mut self,
+        name: String,
+        url: String,
+        headers: Vec<McpHttpHeader>,
+    ) -> Result<McpServerStatus> {
+        self.connect_external_server(McpServerConfig::http(name, url, headers))
+            .await
+    }
+
+    /// Connects to an external server over the transport in `config`, replacing any earlier
+    /// server with the same name. Connection failures are reported in the returned status.
+    pub async fn connect_external_server(&mut self, config: McpServerConfig) -> Result<McpServerStatus> {
+        self.drop_session(&config.name).await;
+
+        let status = match self.open_session(&config).await {
+            Ok((session, tools, resources)) => {
+                let status = McpServerStatus {
+                    config: config.clone(),
+                    connected: true,
+                    server_version: session.server_version.clone(),
+                    tools,
+                    resources,
+                    last_error: None,
+                };
+                self.sessions
+                    .lock()
+                    .await
+                    .insert(config.name.clone(), Arc::new(tokio::sync::Mutex::new(session)));
+                status
+            }
+            Err(e) => McpServerStatus::failed(config, format!("{e:#}")),
         };
 
         self.servers.retain(|s| s.config.name != status.config.name);
         self.servers.push(status.clone());
         Ok(status)
     }
-}
 
-async fn probe_external_stdio_server(
-    config: &McpServerConfig,
-) -> Result<(String, Vec<McpTool>, Vec<McpResource>)> {
-    let mut cmd = Command::new(&config.command);
-    cmd.args(&config.args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    #[cfg(target_os = "windows")]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
+    async fn open_session(
+        &self,
+        config: &McpServerConfig,
+    ) -> Result<(McpClientSession, Vec<McpTool>, Vec<McpResource>)> {
+        let mut session = McpClientSession::open(config).await?;
+        let listed = session.list_all::<McpTool>("tools/list", "tools").await;
+        let tools = match listed {
+            Ok(t) => t,
+            Err(e) => {
+                session.close().await;
+                return Err(e);
+            }
+        };
+        // Resources are optional; servers without them answer "method not found".
+        let resources = session
+            .list_all::<McpResource>("resources/list", "resources")
+            .await
+            .unwrap_or_default();
+        Ok((session, tools, resources))
     }
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("Failed to launch MCP server '{}'", config.command))?;
 
-    let mut stdin = child.stdin.take().context("Failed to open MCP stdin")?;
-    let stdout = child.stdout.take().context("Failed to open MCP stdout")?;
-    let mut reader = BufReader::new(stdout).lines();
-
-    // 1. Send initialize
-    let init_req = JsonRpcRequest {
-        jsonrpc: "2.0".into(),
-        id: Some(json!(1)),
-        method: "initialize".into(),
-        params: Some(json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": { "name": "ModernRustTerminal", "version": env!("CARGO_PKG_VERSION") }
-        })),
-    };
-    let mut line = serde_json::to_string(&init_req)? + "\n";
-    stdin.write_all(line.as_bytes()).await?;
-    stdin.flush().await?;
-
-    let init_resp_str = reader
-        .next_line()
-        .await?
-        .context("MCP server closed stream during initialize")?;
-    let init_resp: JsonRpcResponse = serde_json::from_str(&init_resp_str)?;
-    let version = init_resp
-        .result
-        .as_ref()
-        .and_then(|r| r.get("serverInfo"))
-        .and_then(|s| s.get("version"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("1.0")
-        .to_string();
-
-    // 2. Send initialized notification & tools/list
-    let notif = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
-    line = serde_json::to_string(&notif)? + "\n";
-    stdin.write_all(line.as_bytes()).await?;
-
-    let tools_req = JsonRpcRequest {
-        jsonrpc: "2.0".into(),
-        id: Some(json!(2)),
-        method: "tools/list".into(),
-        params: Some(json!({})),
-    };
-    line = serde_json::to_string(&tools_req)? + "\n";
-    stdin.write_all(line.as_bytes()).await?;
-    stdin.flush().await?;
-
-    let tools_resp_str = reader
-        .next_line()
-        .await?
-        .context("MCP server closed stream during tools/list")?;
-    let tools_resp: JsonRpcResponse = serde_json::from_str(&tools_resp_str)?;
-    let tools: Vec<McpTool> = tools_resp
-        .result
-        .and_then(|r| r.get("tools").cloned())
-        .and_then(|t| serde_json::from_value(t).ok())
-        .unwrap_or_default();
-
-    let _ = child.kill().await;
-    Ok((version, tools, Vec::new()))
-}
-
-async fn call_external_stdio_tool(
-    config: &McpServerConfig,
-    tool_name: &str,
-    arguments: Value,
-) -> Result<McpToolCallResult> {
-    let mut cmd = Command::new(&config.command);
-    cmd.args(&config.args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    #[cfg(target_os = "windows")]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    let mut child = cmd.spawn()?;
-
-    let mut stdin = child.stdin.take().context("Failed to open MCP stdin")?;
-    let stdout = child.stdout.take().context("Failed to open MCP stdout")?;
-    let mut reader = BufReader::new(stdout).lines();
-
-    let init_req = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": { "name": "ModernRustTerminal", "version": env!("CARGO_PKG_VERSION") }
+    /// The live session for `config`, opening (and initializing) one if there is none.
+    async fn session_for(&self, config: &McpServerConfig) -> Result<SharedSession> {
+        let mut sessions = self.sessions.lock().await;
+        if let Some(s) = sessions.get(&config.name) {
+            return Ok(s.clone());
         }
-    });
-    stdin
-        .write_all(format!("{}\n", serde_json::to_string(&init_req)?).as_bytes())
-        .await?;
-    let _ = reader.next_line().await?;
-
-    let call_req = json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/call",
-        "params": {
-            "name": tool_name,
-            "arguments": arguments
-        }
-    });
-    stdin
-        .write_all(format!("{}\n", serde_json::to_string(&call_req)?).as_bytes())
-        .await?;
-    stdin.flush().await?;
-
-    let resp_line = reader
-        .next_line()
-        .await?
-        .context("MCP server closed stream before returning tool result")?;
-    let resp: JsonRpcResponse = serde_json::from_str(&resp_line)?;
-    let _ = child.kill().await;
-
-    if let Some(err) = resp.error {
-        anyhow::bail!("MCP tool error ({}): {}", err.code, err.message);
+        let session = Arc::new(tokio::sync::Mutex::new(McpClientSession::open(config).await?));
+        sessions.insert(config.name.clone(), session.clone());
+        Ok(session)
     }
-    let val = resp.result.unwrap_or_else(|| json!({}));
-    Ok(serde_json::from_value(val)?)
+
+    async fn drop_session(&self, name: &str) {
+        let old = self.sessions.lock().await.remove(name);
+        if let Some(old) = old {
+            old.lock().await.close().await;
+        }
+    }
 }
 
 #[cfg(test)]

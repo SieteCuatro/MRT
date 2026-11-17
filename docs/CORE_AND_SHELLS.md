@@ -9,10 +9,14 @@
 | Module | File | Responsibility |
 | :--- | :--- | :--- |
 | **`pty`** | [`src/pty.rs`](../crates/mrt-core/src/pty.rs) | Multi-shell discovery (`ShellProfile`), per-command & streaming shell execution (`execute_command_in_shell`, `execute_command_streaming`, `execute_command_streaming_with_pid`), and streaming `portable-pty` sessions (`InteractivePty`). |
-| **`vt`** | [`src/vt.rs`](../crates/mrt-core/src/vt.rs) | ANSI / VT100 escape sequence state machine powered by `vte`, producing styled `AnsiSpan` vectors and stripped plain text. |
+| **`vt`** | [`src/vt.rs`](../crates/mrt-core/src/vt.rs) | ANSI / VT100 escape sequence state machine powered by `vte`, producing styled `AnsiSpan` vectors and stripped plain text, plus OSC 7 / OSC 8 / OSC 52 handling. |
+| **`term`** | [`src/term.rs`](../crates/mrt-core/src/term.rs) | Terminal grid emulator (`TerminalEmulator`) wrapping `alacritty_terminal`: turns PTY bytes into a screen of cells with cursor, scrollback, alternate screen, title, input modes, and replies for the PTY. Library only; not wired into the GUI yet. |
+| **`links`** | [`src/links.rs`](../crates/mrt-core/src/links.rs) | Detects plain-text URLs and `path:line[:col]` locations in output, classifies OSC 8 targets, and lists the URL schemes MRT will open. |
 | **`block`** | [`src/block.rs`](../crates/mrt-core/src/block.rs) | `CommandBlock` data model and automatic `StructuredOutput` detector (JSON, CSV/TSV Tables, Markdown, HTTP results). |
 | **`safety`** | [`src/safety.rs`](../crates/mrt-core/src/safety.rs) | Cross-shell destructive command classifier (`RiskLevel::Safe`, `Moderate`, `Critical`) powering the MRT Safety Approval Gate. |
-| **`shell_integration`** | [`src/shell_integration.rs`](../crates/mrt-core/src/shell_integration.rs) | OSC 133 semantic prompt marker parser and shell integration generator for Bash, Zsh, Fish, PowerShell, and CMD. |
+| **`activity`** | [`src/activity.rs`](../crates/mrt-core/src/activity.rs) | Per-tab `ActivityTracker` (idle, running, progress, waiting for input, succeeded, failed): parses `OSC 9;4` progress and MRT's `OSC 678;status=…` sequence, recognises agent CLIs (`claude`, `codex`, `gemini`, `aider`), and applies conservative "waiting for input" heuristics. See the [User Guide](USER_GUIDE.md#tab-activity-status). |
+| **`shell_integration`** | [`src/shell_integration.rs`](../crates/mrt-core/src/shell_integration.rs) | OSC 133 / OSC 7 parsers and shell integration scripts for Bash, Git Bash, sh, Zsh, Fish, PowerShell, and CMD. |
+| **`shell_session`** | [`src/shell_session.rs`](../crates/mrt-core/src/shell_session.rs) | Persistent shell per tab (`ShellSession`): one long-lived PTY shell with the integration script injected, `run(command)` handles that stream output and resolve with exit code, duration and cwd, and a fallback signal when markers never arrive. |
 | **`platform`** | [`src/platform.rs`](../crates/mrt-core/src/platform.rs) | OS-specific environment hydration (macOS/Linux login `$PATH` loader and Windows `AttachConsole` CLI helper). |
 
 ---
@@ -52,6 +56,20 @@ On Windows, `execute_command_in_shell()` applies `.creation_flags(0x08000000)` (
 - **Text Styles**: Bold (`1`/`22`), Italic (`3`/`23`), Underline (`4`/`24`), and Reset (`0`).
 - **Simultaneous Plain Text Stripping**: Produces a clean `plain_text` string free of escape codes so `classify_output` can accurately parse JSON or CSV even if a CLI tool emitted ANSI color codes.
 
+`parse_ansi_rich(input) -> ParsedAnsi { spans, plain_text, events }` does the same pass and also handles OSC sequences (both `BEL` and `ESC \` (ST) terminators). `parse_ansi_text` is a thin wrapper over it, so existing callers are unchanged.
+- **OSC 7 (working directory)**: `OSC 7 ; file://host/path` becomes `VtEvent::WorkingDirectory { host, path }`. The same parsing is public as `vt::parse_osc7_uri(&str) -> Option<PathBuf>` for other modules. The path is percent-decoded and `/C:/...` becomes `C:/...`. Anything that is not a `file://host/path` URI, or has bad percent-escapes, is ignored.
+- **OSC 8 (hyperlinks)**: `OSC 8 ; params ; URI` sets `AnsiSpan::link` on every span until an `OSC 8 ;;` with an empty URI. `;` inside the URI is kept.
+- **Other OSC sequences** (window title, OSC 9, OSC 133, ...) are stripped from the text and not interpreted here.
+- **OSC 52 (clipboard write)**: `OSC 52 ; selection ; base64` becomes `VtEvent::ClipboardWrite { selection, text }`. Read requests (`?`), invalid base64 and payloads over 1 MiB (`MAX_CLIPBOARD_WRITE_BYTES`) are dropped. The parser never touches the clipboard; the GUI asks the user first.
+
+### Link detection (`links.rs`)
+
+`detect_links(text) -> Vec<DetectedLink>` scans whitespace-separated words and returns byte ranges with a `LinkTarget`:
+- **URLs**: `http://`, `https://`, `ftp://` and `file://`, anywhere in a word (`url=https://...`, `<https://...>`). Trailing punctuation and unbalanced closing brackets are trimmed.
+- **File locations**: `path:line` and `path:line:col` as printed by compilers, stack traces and `grep -n` (`src/main.rs:10:5`, `(/app/x.js:42:7)`, `C:\work\lib.rs:3`, `notes.md:12:match`). A path needs a separator or a file extension starting with a letter, so times (`12:30:45`), hosts (`localhost:8080`) and IPs (`127.0.0.1:8080`) are not links.
+
+`classify_uri` turns OSC 8 `file://` targets into `LinkTarget::File` (with `:line:col` or `#L12` suffixes), and `is_openable_uri` allows only `http`, `https`, `ftp`, `mailto` and `file`.
+
 ---
 
 ## 4. Command Blocks & Automatic Structured Output (`block.rs`)
@@ -61,6 +79,8 @@ Every command executed in MRT produces a `CommandBlock`. When a block completes,
 2. **CSV / TSV Table Detection (`StructuredOutput::Table`)**: If the output has 2+ non-empty lines with a consistent `,` or `\t` column count (at least 2 columns), MRT parses the header row and data rows into an interactive filterable **Table** view.
 3. **Markdown Detection (`StructuredOutput::Markdown`)**: If the output contains Markdown headings (`# `, `## `), fenced code blocks (```` ``` ````), and bullet lists, MRT renders it with formatted typography.
 4. **Fallback (`StructuredOutput::RawText`)**: Renders the styled `Vec<AnsiSpan>` in monospace.
+
+While a command streams, `CommandBlock::refresh_output()` re-parses `raw_output` and updates `ansi_spans`, `plain_output`, `reported_cwd` (last OSC 7 path) and `clipboard_requests` (OSC 52 writes, each `Pending`, `Approved` or `Denied`). Decisions already made are kept when more output arrives.
 
 Users can toggle any structured block between **Structured View** and **Raw ANSI View** at any time with a single click in the block header.
 
@@ -84,27 +104,107 @@ Rules are case-insensitive substring matches checked in order: Critical patterns
 
 ---
 
-## 6. Shell Integration & Semantic Prompt Markers (`shell_integration.rs`)
+## 6. Shell Integration & Semantic Prompt Markers (`shell_integration.rs`, `shell_session.rs`)
 
-MRT integrates native support for the **OSC 133 semantic prompt specification**, allowing the terminal to unambiguously separate user prompts, command input, command execution, and exit codes:
+MRT supports the **OSC 133 semantic prompt specification**, which lets the terminal tell prompts, command input, command output, and exit codes apart, plus **OSC 7** for the working directory:
 
 ### Supported Markers
 - **`OSC 133 ; A ST`**: Prompt started.
 - **`OSC 133 ; B ST`**: Prompt ended / command input started.
 - **`OSC 133 ; C ST`**: Command execution initiated (output begins).
 - **`OSC 133 ; D [; <code>] ST`**: Command finished with optional numeric exit code.
+- **`OSC 7 ; file://<host>/<path> ST`**: Current working directory.
 
-### Parser
-`parse_osc133_markers(input: &str) -> Vec<Osc133Event>` finds every marker in a stream (terminated by `BEL` or `ESC \`) and returns its `Osc133Kind` (`PromptStart`, `CommandStart`, `CommandExecuted`, `CommandFinished(Option<i32>)`) with its `byte_offset`.
+`ST` is `ESC \` or `BEL`; both are accepted.
 
-### Shell Integration Generator
-`generate_shell_integration_script(kind: ShellKind) -> &'static str` returns an initialization snippet that configures hooks in:
-- **Bash**: `PROMPT_COMMAND` wrapper.
-- **Zsh**: `precmd` and `preexec` hook functions.
-- **Fish**: `fish_prompt` and `fish_postexec` event handlers.
-- **PowerShell** (Core and Windows): Custom `prompt` function with `$LASTEXITCODE` forwarding.
-- **Windows CMD**: A `PROMPT` string with `$E]133;…$E\` escapes (no Clink required).
-- Other shells (`sh`, Nushell, WSL, Git Bash kinds) get a comment saying OSC 133 is not supported.
+### Parsers
+- `parse_osc133_markers(input: &str) -> Vec<Osc133Event>` finds every marker in a string and returns its `Osc133Kind` (`PromptStart`, `CommandStart`, `CommandExecuted`, `CommandFinished(Option<i32>)`) with its `byte_offset`.
+- `parse_osc7_path(payload) -> Option<PathBuf>` turns an OSC 7 payload into a path (percent escapes decoded, `/C:/x` becomes `C:\x`).
+
+### Shell Integration Scripts
+`generate_shell_integration_script(kind: ShellKind) -> &'static str` returns an idempotent init snippet. Each one reports `A`, `B`, `D;<exit code>` and OSC 7. Most shells have no reliable pre-execution hook, so `C` comes from a helper that MRT puts in front of each command it types (`__mrt_c`, or `__mrt_sb` in PowerShell):
+
+| Shell | Hooks | Exit code |
+| :--- | :--- | :--- |
+| **Bash / Git Bash** | `PROMPT_COMMAND` (chains the user's own) and `PS1` markers | `$?` in the prompt hook |
+| **Zsh** | `precmd_functions` and `PS1` markers | `$?` in `precmd` |
+| **Fish** | `fish_postexec` event and a wrapped `fish_prompt` | `$status` |
+| **POSIX `sh`** | `PS1` markers only; the command wrapper prints `D` (`__mrt_c; . <file>; __mrt_d $?`) | `$?` |
+| **PowerShell** (5.1 and 7+) | Custom `prompt` (keeps the user's prompt text) | `$?`, then `$LASTEXITCODE` for native commands |
+| **CMD** | `PROMPT $E]133;A$E\…` for `A`/`B`/OSC 7; helper batch files print `C` and `D;%ERRORLEVEL%` | `%ERRORLEVEL%` |
+
+WSL and Nushell get a comment saying OSC 133 is not supported.
+
+### Persistent Shell Sessions (`shell_session.rs`)
+`ShellSession` keeps **one long-lived shell in a PTY** (`portable-pty`, ConPTY on Windows), so `cd`, exported/`set` variables, aliases, functions, and venv/conda activation persist between commands. It is a library API; the GUI still runs one process per command.
+
+```rust
+use mrt_core::{ShellSession, ShellSessionOptions};
+
+let session = ShellSession::spawn(&shell, &cwd, ShellSessionOptions::default())?;
+let mut handle = session.run("cd src")?;
+let outcome = handle.wait()?;          // exit_code, duration, output, cwd
+let mut handle = session.run("cargo build")?;
+while let Some(event) = handle.try_next() { /* CommandEvent::Output(chunk) / Finished(outcome) */ }
+```
+
+- **Startup.** The integration script is injected per shell: `bash --rcfile <init> -i` (sources `~/.bashrc` first), `ENV=<init> sh -i`, a temporary `ZDOTDIR` whose `.zshenv`/`.zshrc` load the user's own files first, `fish -C 'source <init>'`, `powershell -NoExit -Command ". ([scriptblock]::Create(...))"` (a script block, so the execution policy does not block it; PSReadLine is unloaded because MRT edits the command line itself), and `cmd /K <init>.cmd`. `ShellSessionOptions::load_user_config = false` skips user config (`-NoProfile`, `/D`, `--no-config`). The files live in a per-session temp directory that is removed when the session is dropped.
+- **Running a command.** `run(command)` returns a `CommandHandle` at once. Commands queue and are typed one at a time, each after the previous prompt's `B` marker. For POSIX shells, fish and PowerShell the command is written to a file in the session directory and sourced in the current scope (`__mrt_c; . <file>` or `. (__mrt_sb <file>)`), so quotes, tabs and multi-line scripts reach the shell unchanged. CMD cannot source a file without batch-file semantics, so its command is typed on one line (multiple lines are joined with ` & `) between `call begin.cmd` and `call end.cmd`.
+- **Output.** Only text between `C` and `D` belongs to the command. The PTY stream goes through a `vte` normalizer that keeps SGR colors, turns ConPTY's cursor positioning back into newlines and spaces, answers cursor-position queries (`CSI 6 n`), and drops the echoed input and prompt. On Windows the session keeps collecting output until the next prompt, because ConPTY passes OSC markers through ahead of text it has not rendered yet. `CommandOutcome::plain_output()` strips the remaining escapes.
+- **Result.** `CommandOutcome` has `exit_code` (`None` if the shell printed a new prompt without `D`, e.g. `sh` abandoning a line), `duration` (from `C` to `D`), `output`, `cwd` (from OSC 7; Git Bash `/c/x` paths become `C:\x`), and `shell_exited`. `ShellSession::cwd()` always has the last reported directory.
+- **Other controls.** `send_input` (stdin for the running program), `interrupt` (Ctrl+C), `resize`, `kill`, `is_idle`, `process_id`.
+- **Fallback.** If no prompt marker arrives within `ready_timeout` (default 20 s), or the shell exits while starting, `spawn` returns `ShellSessionError::IntegrationTimeout` / `StartupExited` (with the startup transcript), and WSL/Nushell return `Unsupported`. For all three `should_fall_back()` is `true`: keep using one process per command (`execute_command_streaming_with_pid`).
+- **Limits.** A user config that replaces `PROMPT_COMMAND`, `precmd_functions` or `prompt` after the script runs hides the markers (the session then times out and falls back). In CMD, `ERRORLEVEL` is reset to 0 before each command so commands that never set it (`echo`, `cd`) report 0, as `cmd /C` would. Typing `exit` ends the session; its command finishes with `shell_exited`.
 
 ### Status
-The parser and scripts are a library API with unit tests. The GUI does not inject the scripts or read markers yet: each command block runs in its own shell process (`-Command` / `/C` / `-c`), so the exit code comes from the process itself. Wiring OSC 133 into persistent PTY tabs is tracked in the [Roadmap](../ROADMAP.md#milestone-2--everyday-terminal-use).
+The parser, scripts, and `ShellSession` are a library API with tests that start real shells (PowerShell, CMD and Git Bash on Windows; bash, sh, zsh, fish and pwsh on Unix when installed). The GUI does not use them yet: each command block still runs in its own shell process (`-Command` / `/C` / `-c`). Wiring sessions into tabs is tracked in the [Roadmap](../ROADMAP.md#milestone-2--everyday-terminal-use).
+
+---
+
+## 7. Terminal Grid Emulator (`term.rs`)
+
+`vt.rs` only colors a text transcript. Full-screen programs (`vim`, `htop`, `less`, `lazygit`) need a real screen: they move the cursor, erase regions, set scroll regions, and switch to the alternate screen. `TerminalEmulator` keeps that screen. It wraps [`alacritty_terminal`](https://crates.io/crates/alacritty_terminal) behind an MRT-owned API, so no `alacritty_terminal` type appears in a public signature.
+
+The emulator is a pure state machine: it never touches a PTY. The caller feeds it PTY output and writes its replies back.
+
+```rust
+use mrt_core::TerminalEmulator;
+
+let mut term = TerminalEmulator::new(120, 35, 10_000); // cols, rows, scrollback lines
+term.feed(&bytes_from_pty);
+pty.write_all(&term.take_replies())?;                 // DA, DSR/CPR, color and size replies
+let screen = term.snapshot();                          // cells, cursor, modes, title
+```
+
+### API
+
+| Method | Returns |
+| :--- | :--- |
+| `new(cols, rows, scrollback)` | Emulator with a `cols` x `rows` screen keeping up to `scrollback` history lines. Sizes below 2x1 are clamped. |
+| `feed(&[u8])` | Parses PTY output. Escape sequences and UTF-8 characters may be split across calls. |
+| `resize(cols, rows)` | Resizes the grid (lines reflow; shrinking rows pushes the top into scrollback). |
+| `take_replies() -> Vec<u8>` | Drains the bytes the terminal must write back to the PTY: primary/secondary device attributes (`CSI c`, `CSI > c`), status and cursor position reports (`CSI 5n`, `CSI 6n`), text area size (`CSI 14t`, `CSI 18t`), and color queries (`OSC 4/10/11 ; ?`). |
+| `snapshot() -> TermSnapshot` | Visible cells (`rows` x `cols` `TermCell`s), cursor, modes and title. |
+| `row_cells(row)` | One visible row as `TermCell`s. |
+| `screen_text()` | Visible screen as plain text, one line per row, trailing spaces trimmed, wide-character spacers skipped. |
+| `scrollback_len()`, `scrollback_lines()`, `scrollback_row_cells(i)` | History that scrolled off the primary screen, oldest first. The alternate screen has no history. |
+| `cursor() -> TermCursor` | 0-based `row`/`col`, `visible` (`CSI ?25 h/l`), and `shape` (`Block`, `Underline`, `Beam` from `CSI n SP q`). |
+| `modes() -> TermModes` | What the input side needs: `app_cursor` (DECCKM), `app_keypad`, `bracketed_paste` (2004), `mouse` (`MouseMode::None/Click/Drag/Motion` for 1000/1002/1003), `sgr_mouse` (1006), `utf8_mouse` (1005), `focus_reporting` (1004), `alternate_scroll` (1007), `alt_screen`. |
+| `is_alt_screen()` | Whether the alternate screen (1049/1047/47) is active. |
+| `title()` | Window title set with `OSC 0` / `OSC 2`. |
+| `take_bell()` | Whether `BEL` rang since the last call. |
+| `sync_deadline()`, `flush_sync()` | Synchronized updates (mode 2026) hold output back until the program ends them; if it never does, call `flush_sync()` once the deadline passes (`feed` also flushes an expired one). |
+| `set_cell_size_px(w, h)` | Cell size reported by `CSI 14t` (default 8x16). |
+
+Each `TermCell` has `ch`, `zero_width` (combining marks), `fg`/`bg`, and the flags `bold`, `dim`, `italic`, `underline`, `strikeout`, `inverse`, `hidden`, `wide` (a double-width CJK or emoji character) and `wide_spacer` (the right half of a wide character, which renderers skip).
+
+Colors stay unresolved as `TermColor::DefaultFg`, `DefaultBg`, `Indexed(0..=255)` or `Rgb(AnsiColor)`, so the renderer applies its theme. `TermColor::to_rgb(fg, bg)` and `xterm_palette(index)` resolve them with the standard xterm 256-color palette.
+
+### Security
+`OSC 52` clipboard access is disabled: programs inside the terminal can neither read nor set the clipboard.
+
+### Dependency note
+`alacritty_terminal` 0.26 depends on `vte` 0.15, while `vt.rs` uses the workspace's `vte` 0.13. Cargo builds both versions side by side; they never meet in a public type. `vt.rs` can move to 0.15 in a later change.
+
+### Status
+Library API with unit tests (cursor movement, erase, alternate screen, scroll regions, 16/256/truecolor, wide and combining characters, resize, replies, modes, and vim-like and htop-like byte streams). The GUI does not use it yet: the TUI overlay still shows the raw PTY transcript. A renderer widget is a follow-up.

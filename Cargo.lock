@@ -2445,6 +2445,7 @@ dependencies = [
  "mrt-mcp",
  "mrt-tools",
  "notify-rust",
+ "raw-window-handle",
  "rusqlite",
  "serde",
  "serde_json",

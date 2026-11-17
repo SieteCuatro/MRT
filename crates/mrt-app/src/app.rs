@@ -593,6 +593,8 @@ pub struct MrtGuiApp {
     /// A `:service` action turned into its shell command, submitted next frame through
     /// the Safety Gate.
     pub(crate) pending_service_command: Option<String>,
+    /// `mrt quit` / `:quit`: close even with work running.
+    pub(crate) quit_requested: bool,
     /// When running blocks were last copied into the MCP mirror.
     mirror_synced_at: std::cell::Cell<Option<Instant>>,
 }
@@ -662,6 +664,59 @@ pub fn wake_ui() {
     }
 }
 
+/// The native window (an `HWND` on Windows), so a window hidden in the background
+/// can be shown from another thread, where the UI loop may not run while hidden.
+static NATIVE_WINDOW: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+/// Set while the window is hidden because MRT kept running after it was closed.
+pub(crate) static IN_BACKGROUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Shows the native window directly (Windows), for a window hidden in the background.
+pub(crate) fn native_show_window() {
+    #[cfg(windows)]
+    {
+        #[link(name = "user32")]
+        extern "system" {
+            fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
+            fn SetForegroundWindow(hwnd: isize) -> i32;
+        }
+        let hwnd = NATIVE_WINDOW.load(std::sync::atomic::Ordering::Relaxed);
+        if hwnd != 0 {
+            // SAFETY: plain Win32 calls on the window MRT created; 9 is SW_RESTORE.
+            unsafe {
+                ShowWindow(hwnd, 9);
+                SetForegroundWindow(hwnd);
+            }
+        }
+    }
+}
+
+/// Like [`waking_channel`] for GUI commands, but a request to show (or quit) a window
+/// hidden in the background shows it right away, so the UI loop runs again.
+fn gui_command_channel() -> (Sender<GuiUiCommand>, Receiver<GuiUiCommand>) {
+    if cfg!(test) {
+        return channel();
+    }
+    let (tx, raw_rx) = channel::<GuiUiCommand>();
+    let (fwd_tx, rx) = channel::<GuiUiCommand>();
+    std::thread::Builder::new()
+        .name("mrt-ui-commands".into())
+        .spawn(move || {
+            while let Ok(command) = raw_rx.recv() {
+                if let GuiUiCommand::SetWindow { action } = &command {
+                    if action != "hide" && IN_BACKGROUND.load(std::sync::atomic::Ordering::Relaxed) {
+                        native_show_window();
+                    }
+                }
+                if fwd_tx.send(command).is_err() {
+                    break;
+                }
+                wake_ui();
+            }
+        })
+        .expect("spawn UI command thread");
+    (tx, rx)
+}
+
 /// A channel whose receiver wakes the UI for every message: a thread forwards
 /// messages from the returned sender to the returned receiver and calls
 /// [`wake_ui`]. The thread ends when every sender is dropped. Unit tests use a
@@ -701,7 +756,7 @@ impl MrtGuiApp {
         let shells = discover_shells();
         let initial_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-        let (gui_cmd_tx, gui_cmd_rx) = waking_channel();
+        let (gui_cmd_tx, gui_cmd_rx) = gui_command_channel();
         let mut mcp_state = MrtMcpServerState::default();
         mcp_state.gui_tx = Some(gui_cmd_tx);
 
@@ -820,6 +875,7 @@ impl MrtGuiApp {
             copy_mode: None,
             pending_window: None,
             pending_service_command: None,
+            quit_requested: false,
             mirror_synced_at: std::cell::Cell::new(None),
         };
         app.apply_config_side_effects();
@@ -2672,6 +2728,11 @@ impl MrtGuiApp {
             }
         }
 
+        if raw_input == ":quit" {
+            self.pending_window = Some("quit".into());
+            return;
+        }
+
         if raw_input == ":assist" || raw_input.starts_with(":assist ") {
             let question = raw_input.trim_start_matches(":assist").trim();
             let question = if question.is_empty() {
@@ -3980,6 +4041,38 @@ impl MrtGuiApp {
         crate::hooks::fire(&self.runtime, hooks, &self.shells[idx], &event);
     }
 
+    /// Whether closing the window now would stop something: running commands, programs
+    /// in the TUI overlay or panes, or PTYs that agents started.
+    pub(crate) fn has_running_work(&self) -> usize {
+        let ptys = self.mcp_host.local_server_state.ptys.lock().map(|p| p.len()).unwrap_or(0);
+        self.running_output.len() + usize::from(self.active_tui.is_some()) + self.pane_tuis.len() + ptys
+    }
+
+    /// Closing the window with work running keeps MRT going in the background
+    /// (`terminal.keep_running_on_close`): the window is hidden (minimized outside
+    /// Windows) and `mrt` / `mrt quick` brings the same window back.
+    fn handle_close_request(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|i| i.viewport().close_requested()) || self.quit_requested {
+            return;
+        }
+        let running = self.has_running_work();
+        if !self.config_state.config.terminal.keep_running_on_close || running == 0 {
+            return;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        if cfg!(windows) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        } else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        }
+        IN_BACKGROUND.store(true, std::sync::atomic::Ordering::Relaxed);
+        let mut note = notify_rust::Notification::new();
+        note.summary("MRT keeps running")
+            .body(&format!("{running} command(s) or program(s) still running. Run `mrt` to bring the window back, or `mrt quit` to stop them."))
+            .appname("MRT");
+        let _ = note.show();
+    }
+
     /// Quick terminal: shows the window in front (as a drop-down across the top of the
     /// screen when `terminal.quick_dropdown` is on) or minimizes it. The window is
     /// minimized rather than hidden, so it can always be brought back from the taskbar.
@@ -3987,10 +4080,17 @@ impl MrtGuiApp {
         let Some(action) = self.pending_window.take() else { return };
         let (focused, minimized, monitor) =
             ctx.input(|i| (i.viewport().focused.unwrap_or(false), i.viewport().minimized.unwrap_or(false), i.viewport().monitor_size));
+        if action == "quit" {
+            self.quit_requested = true;
+            IN_BACKGROUND.store(false, std::sync::atomic::Ordering::Relaxed);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        let hidden = IN_BACKGROUND.swap(false, std::sync::atomic::Ordering::Relaxed);
         let show = match action.as_str() {
             "show" => true,
             "hide" => false,
-            _ => minimized || !focused,
+            _ => hidden || minimized || !focused,
         };
         if show {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
@@ -4619,8 +4719,17 @@ impl eframe::App for MrtGuiApp {
         self.persist_layout(true);
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.persist_layout(false);
+        if NATIVE_WINDOW.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(handle) = frame.window_handle() {
+                if let RawWindowHandle::Win32(win) = handle.as_raw() {
+                    NATIVE_WINDOW.store(win.hwnd.get(), std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+        self.handle_close_request(ctx);
         let first_frame = !self.focused_on_start;
         let mut focus_prompt = first_frame;
         let palette_was_open = self.show_command_palette;

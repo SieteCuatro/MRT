@@ -84,6 +84,18 @@ fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
+    // One MRT window per user: bring back the running one (also after it was closed
+    // with work still running), or replace an idle older version.
+    match cli::handoff_to_running_instance() {
+        cli::Handoff::Shown => return Ok(()),
+        cli::Handoff::OlderBusy(version) => {
+            attach_parent_console_if_cli();
+            eprintln!("MRT {version} is still running commands; it was brought to the front. Start MRT again when they finish to switch to {}.", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        cli::Handoff::Start | cli::Handoff::Replaced => {}
+    }
+
     let native_options = eframe::NativeOptions {
         centered: true,
         viewport: egui::ViewportBuilder::default()

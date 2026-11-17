@@ -179,6 +179,9 @@ pub struct TerminalConfig {
     /// Windows: run plain native programs typed in a PowerShell tab through `cmd.exe`,
     /// which passes large output ~20× faster than Windows PowerShell.
     pub fast_native_output: bool,
+    /// Closing the window while commands, programs or PTYs run keeps MRT running in
+    /// the background; `mrt` (or `mrt quick`) brings the same window back.
+    pub keep_running_on_close: bool,
 }
 
 impl Default for TerminalConfig {
@@ -197,6 +200,7 @@ impl Default for TerminalConfig {
             quick_dropdown: false,
             quick_height_percent: 45,
             fast_native_output: false,
+            keep_running_on_close: true,
         }
     }
 }

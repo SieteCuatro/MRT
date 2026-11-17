@@ -459,7 +459,7 @@ impl MrtMcpServerState {
                         "mosaic_layout": { "type": "string", "enum": ["grid", "columns", "rows", "focus"], "description": "Optional Mosaic arrangement: even grid, side-by-side columns, stacked rows, or focus (active terminal large, others beside it)" },
                         "explorer": { "type": "boolean", "description": "Optional toggle for the left Folder Explorer side panel" },
                         "toolbox": { "type": ["boolean", "string"], "description": "Optional: true/false toggles the Toolbox side panel; \"network\" or \"task_manager\" opens it on that tab; \"hidden\" closes it" },
-                        "window": { "type": "string", "enum": ["show", "hide", "toggle"], "description": "Optional: bring the MRT window to the front, minimize it, or toggle between the two (quick terminal)" }
+                        "window": { "type": "string", "enum": ["show", "hide", "toggle", "quit"], "description": "Optional: bring the MRT window to the front, minimize it, toggle between the two (quick terminal), or quit MRT (stopping what still runs)" }
                     }
                 }),
             },

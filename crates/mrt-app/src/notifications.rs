@@ -20,7 +20,7 @@ use uuid::Uuid;
 const MAX_COMMAND_CHARS: usize = 80;
 
 /// User preferences for command-finished notifications. Edited in the Notifications window;
-/// the `[notifications]` section of the config file will feed the same struct.
+/// the `[notifications]` section of the config file sets it on load and reload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NotificationSettings {

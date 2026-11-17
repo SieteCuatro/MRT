@@ -256,9 +256,9 @@ pub struct MrtGuiApp {
     pub focused_on_start: bool,
     pub active_tui: Option<ActiveTuiSession>,
     /// Resolves key presses into actions (configurable keybindings).
-    key_resolver: KeyResolver,
+    pub(crate) key_resolver: KeyResolver,
     /// Problems found while loading keybinding overrides, shown in the palette.
-    keymap_issues: Vec<String>,
+    pub(crate) keymap_issues: Vec<String>,
     /// Set by the `exit_tui` action; handled by `process_tui_session`.
     tui_exit_requested: bool,
     history: Option<crate::history::HistoryWorker>,
@@ -293,7 +293,7 @@ pub struct MrtGuiApp {
     /// The loaded configuration file and its watcher (see `config_runtime.rs`).
     pub config_state: crate::config_runtime::ConfigState,
     /// Desktop notifications and sidebar badges for commands that finish in the background.
-    notifier: crate::notifications::CommandNotifier,
+    pub(crate) notifier: crate::notifications::CommandNotifier,
 }
 
 impl MrtGuiApp {
@@ -358,7 +358,7 @@ impl MrtGuiApp {
             Err(error) => (None, Some(error.to_string())),
         };
 
-        let (key_resolver, keymap_issues) = load_key_resolver();
+        let (key_resolver, keymap_issues) = load_key_resolver(config_state.config.keybindings());
 
         let mut app = Self {
             runtime,
@@ -2821,10 +2821,9 @@ fn read_directory(path: &std::path::Path) -> std::io::Result<Vec<(PathBuf, bool)
 }
 
 /// Builds the key resolver: the default keymap plus user overrides
-/// (`binding -> action`). The config file's `[keybindings]` table plugs in here.
-fn load_key_resolver() -> (KeyResolver, Vec<String>) {
-    let overrides: HashMap<String, String> = HashMap::new();
-    let (keymap, issues) = Keymap::with_overrides(&overrides, Platform::current());
+/// (`binding -> action`) from the config file's `[keybindings]` table.
+pub(crate) fn load_key_resolver(overrides: &HashMap<String, String>) -> (KeyResolver, Vec<String>) {
+    let (keymap, issues) = Keymap::with_overrides(overrides, Platform::current());
     (KeyResolver::new(keymap), issues.iter().map(|i| i.to_string()).collect())
 }
 

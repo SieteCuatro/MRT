@@ -51,8 +51,8 @@ pub struct MrtConfig {
     pub ai: AiConfig,
     pub mcp: McpConfig,
     pub notifications: NotificationsConfig,
-    /// `[keybindings]`: binding (e.g. `"ctrl+t"`) -> action name. Parsed only; the
-    /// keymap module interprets it. Read it with [`MrtConfig::keybindings`].
+    /// `[keybindings]`: binding (e.g. `"ctrl+t"`) -> action name. The GUI keymap
+    /// (`mrt-app/src/keymap.rs`) interprets it. Read it with [`MrtConfig::keybindings`].
     pub keybindings: HashMap<String, String>,
 }
 

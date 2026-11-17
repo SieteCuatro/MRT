@@ -102,6 +102,16 @@ impl MrtGuiApp {
     /// Pushes the parts of the config that live outside the GUI state: AI provider
     /// preferences and the MCP servers to connect (already-known names are skipped).
     pub(crate) fn apply_config_side_effects(&mut self) {
+        let config = &self.config_state.config;
+        let (key_resolver, keymap_issues) = crate::app::load_key_resolver(config.keybindings());
+        self.key_resolver = key_resolver;
+        self.keymap_issues = keymap_issues;
+        let notifications = config.notifications();
+        self.notifier.settings = crate::notifications::NotificationSettings {
+            enabled: notifications.enabled,
+            threshold_secs: notifications.threshold_secs,
+        };
+
         let ai = &self.config_state.config.ai;
         mrt_ai::set_ai_preferences(mrt_ai::AiPreferences {
             provider: Some(ai.provider.clone()),

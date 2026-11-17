@@ -195,6 +195,8 @@ Full-screen programs need a real terminal. MRT opens them in a full-screen PTY o
 - The overlay closes when the program exits, or when you press `Ctrl+Q` (the `exit_tui` action; rebindable).
 - The session is saved as a normal command block in the tab: what the terminal showed (its history and main screen) with colors. A full-screen program such as vim leaves nothing behind once it exits, so its block is empty.
 
+**In a split tab** (`:split`, `:split-v`), the program runs **inside the active pane** instead of the overlay, so you can keep using the other pane next to it. Click inside a pane's terminal (or its **Focus** button) to give it the keyboard; the other pane's program keeps running and its cursor shows as an outline. Each pane runs one program at a time; a second one in the same pane opens the overlay. When the program exits its block appears in that pane. Removing the split (`:unsplit`) ends the program in the second pane. While the active pane runs a program, the command input does not take keys; focus the other pane to run commands.
+
 Agent CLIs such as `claude`, `codex`, `gemini` and `aider` are interactive, so start them with `:tui claude` (and so on). The tab then shows when the agent waits for your approval (see [Tab activity status](#tab-activity-status)).
 
 ### Tab activity status

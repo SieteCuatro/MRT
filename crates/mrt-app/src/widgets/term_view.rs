@@ -17,10 +17,17 @@ pub const TERM_FG: Color32 = Palette::TEXT_BODY;
 /// Default background of the terminal grid.
 pub const TERM_BG: Color32 = Palette::BG_INSET;
 
-/// Size of one cell for `font`: the advance of `M` and the font's row height.
+/// Size of one cell for `font`: the advance of `M` as egui actually lays out text, and
+/// the font's row height.
+///
+/// `glyph_width` is not enough: text layout rounds glyph positions, so a run of N
+/// characters can be wider than N × `glyph_width`, which pushed the last character of
+/// each row past the grid. Measuring a long run gives the real per-cell advance.
 pub fn cell_size(ui: &Ui, font: &FontId) -> Vec2 {
+    const SAMPLE: usize = 100;
     ui.fonts(|fonts| {
-        let width = fonts.glyph_width(font, 'M');
+        let run = fonts.layout_no_wrap("M".repeat(SAMPLE), font.clone(), Color32::WHITE);
+        let width = run.size().x / SAMPLE as f32;
         let height = fonts.row_height(font);
         Vec2::new(width.max(1.0), height.max(1.0))
     })
@@ -35,9 +42,14 @@ pub fn grid_dims(available: Vec2, cell: Vec2) -> (u16, u16) {
 
 /// Draws `snapshot` at the cursor of `ui`. `focused` draws a filled cursor; otherwise
 /// the cursor is an outline, like other terminals show an unfocused window.
-pub fn paint_terminal(ui: &mut Ui, snapshot: &TermSnapshot, font: &FontId, cell: Vec2, focused: bool) -> Response {
+///
+/// `id` must be the same every frame for this terminal: egui hit-tests clicks against
+/// the widget rectangles of the previous frame by id, so an automatic id that shifts
+/// with the surrounding layout would make clicks miss the terminal.
+pub fn paint_terminal(ui: &mut Ui, id: egui::Id, snapshot: &TermSnapshot, font: &FontId, cell: Vec2, focused: bool) -> Response {
     let size = Vec2::new(cell.x * snapshot.cols as f32, cell.y * snapshot.rows as f32);
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let response = ui.interact(rect, id, Sense::click_and_drag());
     if !ui.is_rect_visible(rect) {
         return response;
     }

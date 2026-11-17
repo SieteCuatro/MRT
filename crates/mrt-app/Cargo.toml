@@ -27,3 +27,4 @@ tracing-subscriber.workspace = true
 similar = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 directories = "6"
+notify-rust = "=4.11.3"

@@ -2,6 +2,7 @@
 
 mod app;
 mod history;
+mod notifications;
 mod theme;
 mod widgets;
 

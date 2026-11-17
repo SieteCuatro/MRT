@@ -73,6 +73,6 @@ The Cargo workspace contains 5 modular crates:
 2. **Multi-AI Provider Neutrality**:
    - Keep `mrt-ai` compatible with all major LLM providers (Gemini, OpenAI, Anthropic, Grok, DeepSeek, OpenRouter, Ollama) plus the offline fallback so MRT always works with zero configuration.
 3. **Zero Warnings Policy**:
-   - Always run `cargo test --workspace` before finishing a task and resolve any compiler warnings (such as unused imports or `f32` literal annotations in `egui`). CI runs with `RUSTFLAGS=-D warnings` and `--locked`, so a warning fails the build.
+   - Always run `cargo test --workspace` before finishing a task and resolve any compiler warnings (such as unused imports or `f32` literal annotations in `egui`). CI runs with `RUSTFLAGS=-D warnings` and `--locked`, so a warning fails the build. The CI workflow is currently disabled (no Actions minutes): run that command locally on Windows and Linux before merging.
 4. **Keep the Docs in Sync**:
    - When you change behavior, update the matching document (see the table in [CONTRIBUTING.md](CONTRIBUTING.md#which-documents-to-update)). User-facing commands, shortcuts, and file locations live in [docs/USER_GUIDE.md](docs/USER_GUIDE.md).

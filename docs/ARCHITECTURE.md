@@ -88,7 +88,7 @@ flowchart LR
 ## Build, Tests, CI & Release
 
 - **Tests**: `RUSTFLAGS="-D warnings" cargo test --workspace --locked` runs unit tests in every crate and `crates/mrt-app/tests/e2e_processes.rs`, which starts real `mrt` processes (`server`, `share`, `pair`, `--host`, `session-host`) with separate `MRT_DATA_DIR`s. `scripts/e2e/` drives the real window on an offscreen X server (crash and reattach, feature tour).
-- **CI (`.github/workflows/ci.yml`)**: the same test command on Ubuntu, Windows and macOS for pushes to `main` and pull requests.
+- **CI (`.github/workflows/ci.yml`)**: the same test command on Ubuntu, Windows and macOS for pushes to `main` and pull requests. *Currently disabled in the repository settings (no GitHub Actions minutes); run the tests locally before merging.*
 - **Benchmarks (`.github/workflows/bench.yml`)**: manual `criterion` throughput suite; see [PERFORMANCE.md](PERFORMANCE.md).
-- **Release (`.github/workflows/release.yml`)**: on `v*` tags, release builds for Windows (ZIP), Linux and macOS Intel / Apple Silicon (tar.gz) attached to the GitHub Release.
+- **Release (`.github/workflows/release.yml`)**: on `v*` tags, release builds for Windows (ZIP), Linux and macOS Intel / Apple Silicon (tar.gz) attached to the GitHub Release. *Currently disabled (no Actions minutes): v0.2.0 was published with Windows and Linux archives built locally (`cargo build --release --locked`).*
 - **Packaging metadata**: `packaging/linux/mrt.desktop` and `packaging/macos/Info.plist` (not used by the release workflow yet).

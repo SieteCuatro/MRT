@@ -15,7 +15,7 @@ MRT is an open-source MIT-licensed project. Contributions from both human develo
 
 ## Pull Request Checklist
 
-Before opening a PR, verify that all checks pass with zero errors and zero compiler warnings. CI treats warnings as errors, so run the same command locally:
+Before opening a PR, verify that all checks pass with zero errors and zero compiler warnings. The CI workflow is currently disabled (no GitHub Actions minutes), so this local run is the check; it uses the same settings CI does:
 
 ```bash
 RUSTFLAGS="-D warnings" cargo test --workspace --locked

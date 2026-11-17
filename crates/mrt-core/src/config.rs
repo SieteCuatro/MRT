@@ -84,6 +84,10 @@ pub struct TerminalConfig {
     pub theme: Option<String>,
     pub scrollback_blocks: usize,
     pub auto_detect_structured_output: bool,
+    /// Run each tab's commands in one long-lived shell (`ShellSession`), so `cd`,
+    /// variables, aliases and activated environments persist between commands.
+    /// `false` runs every command in a new shell process.
+    pub persistent_shell: bool,
 }
 
 impl Default for TerminalConfig {
@@ -94,6 +98,7 @@ impl Default for TerminalConfig {
             theme: None,
             scrollback_blocks: 500,
             auto_detect_structured_output: true,
+            persistent_shell: true,
         }
     }
 }

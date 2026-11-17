@@ -157,7 +157,7 @@ while let Some(event) = handle.try_next() { /* CommandEvent::Output(chunk) / Fin
 - **Limits.** A user config that replaces `PROMPT_COMMAND`, `precmd_functions` or `prompt` after the script runs hides the markers (the session then times out and falls back). In CMD, `ERRORLEVEL` is reset to 0 before each command so commands that never set it (`echo`, `cd`) report 0, as `cmd /C` would. Typing `exit` ends the session; its command finishes with `shell_exited`.
 
 ### Status
-The parser, scripts, and `ShellSession` are a library API with tests that start real shells (PowerShell, CMD and Git Bash on Windows; bash, sh, zsh, fish and pwsh on Unix when installed). The GUI does not use them yet: each command block still runs in its own shell process (`-Command` / `/C` / `-c`). Wiring sessions into tabs is tracked in the [Roadmap](../ROADMAP.md#milestone-2--everyday-terminal-use).
+The parser, scripts, and `ShellSession` have tests that start real shells (PowerShell, CMD and Git Bash on Windows; bash, sh, zsh, fish and pwsh on Unix when installed). The GUI runs tab commands through them with `mrt-app/src/shell_pool.rs`: one session per tab and shell, used when it is idle; a busy or starting session, WSL/Nushell, a failed integration, or `terminal.persistent_shell = false` run the command in its own shell process (`-Command` / `/C` / `-c`) as before. Through Windows ConPTY the Ctrl+C byte from `interrupt()` does not reach the running program, so the GUI's **Stop** also ends the shell's child processes a second later; on Unix Ctrl+C is enough.
 
 ---
 
@@ -207,4 +207,4 @@ Colors stay unresolved as `TermColor::DefaultFg`, `DefaultBg`, `Indexed(0..=255)
 `alacritty_terminal` 0.26 depends on `vte` 0.15, while `vt.rs` uses the workspace's `vte` 0.13. Cargo builds both versions side by side; they never meet in a public type. `vt.rs` can move to 0.15 in a later change.
 
 ### Status
-Library API with unit tests (cursor movement, erase, alternate screen, scroll regions, 16/256/truecolor, wide and combining characters, resize, replies, modes, and vim-like and htop-like byte streams). The GUI does not use it yet: the TUI overlay still shows the raw PTY transcript. A renderer widget is a follow-up.
+Library API with unit tests (cursor movement, erase, alternate screen, scroll regions, 16/256/truecolor, wide and combining characters, resize, replies, modes, and vim-like and htop-like byte streams). The GUI's TUI overlay draws from it (`mrt-app/src/widgets/term_view.rs`). Mouse reporting is not sent to programs yet.

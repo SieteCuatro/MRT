@@ -106,6 +106,10 @@ impl MrtGuiApp {
         let (key_resolver, keymap_issues) = crate::app::load_key_resolver(config.keybindings());
         self.key_resolver = key_resolver;
         self.keymap_issues = keymap_issues;
+        // Unit tests opt in to persistent shells themselves.
+        if !cfg!(test) {
+            self.shell_pool.set_enabled(config.terminal.persistent_shell);
+        }
         let notifications = config.notifications();
         self.notifier.settings = crate::notifications::NotificationSettings {
             enabled: notifications.enabled,

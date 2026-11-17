@@ -14,12 +14,12 @@ These comparisons shaped the order of the milestones.
 
 ## Milestone 1 — A real terminal core
 
-Today `mrt-core::vt` turns ANSI text into colored spans, and the TUI overlay shows the raw PTY transcript in a scrolling label. Cursor movement, screen clears, the alternate screen, and redraws are ignored. The PTY is fixed at 120×35. Everything else in this roadmap depends on fixing this.
+The TUI overlay now draws from a real screen emulator and follows the window size. What is left is mouse and Alt input, inline interactive panes, and screen-accurate MCP reads.
 
-- **Terminal grid emulator.** *(library implemented, #9; the GUI does not use it yet)* Wrap `alacritty_terminal` (it uses the same `vte` parser MRT already depends on) or `libghostty-vt` behind a `mrt-core::term` module that exposes a cell grid, cursor, scrollback, modes, and title. Keep `vt::parse_ansi_text` for finished command blocks. *Done when:* `vim`, `htop`, `less`, `lazygit`, and `top` display and redraw correctly, and a unit test feeds recorded escape-sequence fixtures and checks the resulting grid.
-- **Grid renderer widget.** An egui widget that paints the grid cell by cell: colors, bold, italic, underline, inverse, wide CJK characters and emoji, the cursor, and selection. Use it in the TUI overlay and in the MCP PTY tools.
-- **Resize.** Compute columns and rows from the widget size and font metrics, and call `InteractivePty::resize` when the window or pane changes size. *Done when:* resizing the window while `htop` runs reflows it.
-- **Complete keyboard and mouse input.** Function keys, Alt/Meta, Home/End/PgUp/PgDn, and application cursor mode. Mouse reporting (SGR 1006) for TUIs that ask for it. Bracketed paste. Later, the kitty keyboard protocol.
+- **Terminal grid emulator.** *(implemented, #9; the TUI overlay uses it)* Wrap `alacritty_terminal` (it uses the same `vte` parser MRT already depends on) or `libghostty-vt` behind a `mrt-core::term` module that exposes a cell grid, cursor, scrollback, modes, and title. Keep `vt::parse_ansi_text` for finished command blocks. *Done when:* `vim`, `htop`, `less`, `lazygit`, and `top` display and redraw correctly, and a unit test feeds recorded escape-sequence fixtures and checks the resulting grid.
+- **Grid renderer widget.** *(implemented in the TUI overlay: `widgets/term_view.rs`; selection is not done yet, and the MCP PTY tools do not use it)* An egui widget that paints the grid cell by cell: colors, bold, italic, underline, inverse, wide CJK characters and emoji, the cursor, and selection. Use it in the TUI overlay and in the MCP PTY tools.
+- **Resize.** *(implemented for the TUI overlay)* Compute columns and rows from the widget size and font metrics, and call `InteractivePty::resize` when the window or pane changes size. *Done when:* resizing the window while `htop` runs reflows it.
+- **Complete keyboard and mouse input.** *(keyboard implemented except Alt+letter: `term_input.rs`; mouse not started)* Function keys, Alt/Meta, Home/End/PgUp/PgDn, and application cursor mode. Mouse reporting (SGR 1006) for TUIs that ask for it. Bracketed paste. Later, the kitty keyboard protocol.
 - **Inline interactive panes.** Show a running PTY directly inside a split pane instead of a modal overlay, so `htop` can run next to a shell.
 - **Screen-accurate MCP reads.** `mrt_pty_read` can return the visible screen as text, the cursor position, and the scrollback, not only the raw byte transcript, so agents can drive TUIs reliably.
 
@@ -27,7 +27,7 @@ Today `mrt-core::vt` turns ANSI text into colored spans, and the TUI overlay sho
 
 These items make MRT usable as a person's main terminal.
 
-- **Persistent shell per tab.** *(library implemented, #16: `ShellSession`; tested on Windows only, GUI wiring pending)* Run each tab or pane as one long-lived PTY shell with the `mrt-core::shell_integration` script injected. Use the OSC 133 markers to split output into command blocks with exact exit codes. *Done when:* `cd`, `export`, aliases, shell functions, `source venv/bin/activate`, and `conda activate` persist between blocks in PowerShell, CMD, Bash, Zsh, and Fish. Keep the one-process-per-command mode as a fallback for shells where injection fails.
+- **Persistent shell per tab.** *(implemented: `ShellSession` #16, used by the GUI through `shell_pool.rs`; tested on Windows only. Stop sends Ctrl+C, then ends the shell's child processes. Programs that wait for keyboard input still need `:tui`)* Run each tab or pane as one long-lived PTY shell with the `mrt-core::shell_integration` script injected. Use the OSC 133 markers to split output into command blocks with exact exit codes. *Done when:* `cd`, `export`, aliases, shell functions, `source venv/bin/activate`, and `conda activate` persist between blocks in PowerShell, CMD, Bash, Zsh, and Fish. Keep the one-process-per-command mode as a fallback for shells where injection fails.
 - **Working-directory tracking.** *(OSC 7 parsing implemented, #15 and #16)* Read OSC 7 (and the OSC 133 prompt) to keep the tab's working directory, the folder explorer, and new splits in sync with the shell.
 - **Configuration file.** *(implemented, #8)* Load `~/.config/mrt/config.toml` and per-project `.mrt.toml` using the schema in [`mrt.example.toml`](mrt.example.toml): default shell, font and size, theme, Safety Gate options, AI provider, keybindings, and MCP servers to connect at startup. Reload automatically when the file changes.
 - **Scrollback search.** Search the live terminal buffer as well as saved history, with match highlighting and next/previous navigation. This is separate from the FTS5 history search.
@@ -96,9 +96,9 @@ The first version is implemented in the **Runbooks** panel and SQLite `HistorySt
 
 ### Terminal basics
 
-- **Interactive TUI overlay.** *(first version)* `vim`, `nano`, `htop`, `lazygit`, `less`, and `:tui <cmd>` open a PTY in a full-screen overlay. Text and control keys are forwarded, `Ctrl+Q` or the program exiting closes it, and the transcript is saved as a command block. The overlay shows the raw PTY output as text and the PTY is fixed at 120×35, so full-screen programs do not display correctly yet. [Milestone 1](#milestone-1--a-real-terminal-core) fixes this.
+- **Interactive TUI overlay.** *(implemented)* `vim`, `nano`, `htop`, `lazygit`, `less`, and `:tui <cmd>` open a PTY in a full-screen overlay drawn from the terminal grid emulator, sized to the window. Keys are encoded the xterm way, `Ctrl+Q` or the program exiting closes it, and the session is saved as a command block. Mouse input is not sent yet.
 - **Split panes within a tab.** *(implemented)* Split any tab horizontally or vertically into independent panes (`:split`, `:split-h`, `:split-v`, `:unsplit`, and UI buttons), each with its own block stream, shell, and focus management.
-- **Shell integration.** *(library only)* `mrt-core::shell_integration` parses OSC 133 and OSC 7 and generates integration scripts for Bash, Git Bash, sh, Zsh, Fish, PowerShell, and CMD, and `mrt-core::shell_session` runs a persistent shell with them. Wiring it into the GUI is the [persistent shell per tab](#milestone-2--everyday-terminal-use) item.
+- **Shell integration.** *(implemented)* `mrt-core::shell_integration` parses OSC 133 and OSC 7 and generates integration scripts for Bash, Git Bash, sh, Zsh, Fish, PowerShell, and CMD, and `mrt-core::shell_session` runs a persistent shell with them, which each GUI tab uses (see [persistent shell per tab](#milestone-2--everyday-terminal-use)).
 
 ### Debugging and sharing results
 

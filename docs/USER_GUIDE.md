@@ -62,7 +62,11 @@ Type in the composer at the bottom of the window and press `Enter`.
 | `vim notes.txt`, `htop`, `:tui <cmd>` | Opens the full-screen interactive mode (see [§4](#4-interactive-tui-mode)). |
 | `:command …` | A built-in MRT command (below). |
 
-Each command runs in a fresh shell process in the tab's working directory. MRT tracks `cd`, `cd /d`, `Set-Location`, and `cd ~` so the next command starts in the new folder. Other shell state (variables, aliases, functions) does not carry over between commands.
+Each tab keeps **one shell running** for its commands, so `cd`, variables, aliases, functions, and activated environments (`source .venv/bin/activate`, `conda activate`) carry over from one command to the next. **■ Stop** interrupts the running command (Ctrl+C, then its child processes) and keeps the shell. If you change folder another way (the Explorer), MRT moves the shell there before the next command.
+
+A command runs in a fresh shell process instead, without that state, when the tab's shell is busy with another command, when the shell is WSL or Nushell, when its shell integration does not start (for example a profile that replaces the prompt), or when `terminal.persistent_shell = false`. In that mode MRT still tracks `cd`, `cd /d`, `Set-Location`, and `cd ~`.
+
+Commands run in a terminal, so a program that waits for keyboard input (`python` with no script, `read`, a password prompt) waits until you press **■ Stop**. Run interactive programs with `:tui` instead.
 
 Commands that may be destructive open the **Safety Approval Gate** first (see [Core & Shells](CORE_AND_SHELLS.md#5-cross-shell-safety-approval-gate-safetyrs)).
 
@@ -183,9 +187,10 @@ Keys a binding consumes are not sent to the shell or TUI program; everything els
 
 Full-screen programs need a real terminal. MRT opens them in a full-screen PTY overlay when the command starts with `vim`, `vi`, `nvim`, `nano`, `htop`, `top`, `lazygit`, `lazydocker`, `less`, `man`, or `fzf`, or when you type `:tui <command>` for anything else (for example `:tui ssh myserver` or `:tui python`).
 
-- Text, `Enter`, `Backspace`, `Tab`, `Esc`, arrows, `Home` / `End`, `PageUp` / `PageDown`, `Delete`, and `Ctrl+A/C/D/E/L/U/W/Z` are sent to the program.
+- The overlay is a real terminal screen: the program can move the cursor, use colors and the alternate screen, and set the window title. The screen is sized to the overlay in whole characters and follows the window when you resize it.
+- Keys are sent the way xterm sends them: text, `Enter`, `Backspace`, `Tab` / `Shift+Tab`, `Esc`, arrows (application cursor mode when the program asks), `Home` / `End`, `Insert` / `Delete`, `PageUp` / `PageDown`, `F1`-`F12` (with Shift/Alt/Ctrl), and `Ctrl+` any letter. Pasted text is wrapped in bracketed-paste markers when the program enables them. Mouse input and `Alt+` letter are not sent yet.
 - The overlay closes when the program exits, or when you press `Ctrl+Q` (the `exit_tui` action; rebindable).
-- The session transcript is saved as a normal command block in the tab.
+- The session is saved as a normal command block in the tab: for a full-screen program, the text left on the main screen; otherwise the colored output.
 
 Agent CLIs such as `claude`, `codex`, `gemini` and `aider` are interactive, so start them with `:tui claude` (and so on). The tab then shows when the agent waits for your approval (see [Tab activity status](#tab-activity-status)).
 
@@ -283,6 +288,7 @@ MRT reads two optional [TOML](https://toml.io) files. Every setting is optional:
 | `terminal.default_shell` | `"auto"` | Shell of the first tab at startup: `auto` (first discovered shell) or a label from **+ New tab** (`pwsh`, `powershell`, `cmd`, `bash`, `git-bash`, `wsl`, `zsh`, `fish`, `nu`, `sh`). An unknown or missing shell falls back to `auto`. |
 | `terminal.font_size` | `13.0` | Terminal (monospace) font size, clamped to 8–40. Applied live. |
 | `terminal.theme` | built-in | `graphite-calm` (aliases `dark`, `default`) is the only theme today. |
+| `terminal.persistent_shell` | `true` | Run each tab's commands in one long-lived shell so state carries over (see [§2](#2-the-prompt)). `false` runs every command in a new shell process. Applied on reload; turning it off ends the running shells. |
 | `terminal.scrollback_blocks`, `terminal.auto_detect_structured_output` | `500`, `true` | Reserved; parsed but not applied yet. |
 | `safety.enabled` | `true` | `false` turns off approval prompts for commands you type and runbook steps. Blocked patterns still apply, and `:kill` still confirms. |
 | `safety.require_approval_for_moderate` | `false` | `true` asks before every Moderate command, not only process-control ones. |

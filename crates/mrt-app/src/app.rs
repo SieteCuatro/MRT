@@ -309,6 +309,8 @@ pub struct MrtGuiApp {
     process_sampler: SharedProcessSampler,
     /// OS PID of the shell behind each running command block.
     running_pids: Arc<Mutex<HashMap<Uuid, u32>>>,
+    /// Each tab's persistent shell (`shell_pool.rs`).
+    pub(crate) shell_pool: crate::shell_pool::ShellPool,
     live_top: Option<LiveTopBlock>,
     process_watches: Vec<ActiveProcessWatch>,
     next_watch_id: usize,
@@ -426,6 +428,10 @@ impl MrtGuiApp {
             sidebar_collapsed: false,
             process_sampler,
             running_pids: Arc::new(Mutex::new(HashMap::new())),
+            // Unit tests run one process per command unless a test opts in.
+            shell_pool: crate::shell_pool::ShellPool::new(
+                !cfg!(test) && config_state.config.terminal.persistent_shell,
+            ),
             live_top: None,
             process_watches: Vec::new(),
             next_watch_id: 1,
@@ -917,6 +923,29 @@ impl MrtGuiApp {
             self.stop_live_top();
             return;
         }
+        // A command in a persistent shell gets Ctrl+C; killing the shell's process tree
+        // would end the shell and lose its state. If the command is still running a moment
+        // later (Ctrl+C does not reach programs through Windows ConPTY), stop the shell's
+        // child processes instead, which leaves the shell at its prompt.
+        if let Some(session) = self.shell_pool.interrupt(block_id) {
+            if let Some(shell_pid) = session.process_id() {
+                let pool = self.shell_pool.clone();
+                let sampler = self.process_sampler.clone();
+                self.runtime.spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                    if !pool.is_running(block_id) {
+                        return;
+                    }
+                    if let Ok(snapshot) = sampler.snapshot().await {
+                        let children: Vec<u32> = snapshot.children_of(shell_pid).iter().map(|e| e.pid).collect();
+                        if !children.is_empty() {
+                            let _ = sampler.terminate(children, true, true).await;
+                        }
+                    }
+                });
+            }
+            return;
+        }
         let Some(pid) = self.running_pids.lock().ok().and_then(|g| g.get(&block_id).copied()) else {
             return;
         };
@@ -1127,6 +1156,7 @@ impl MrtGuiApp {
         }
         let active_id = self.tabs[self.active_tab].id;
         self.tabs.retain(|tab| tab.id != id);
+        self.shell_pool.close_tab(id);
         self.active_tab = self
             .tabs
             .iter()
@@ -2317,9 +2347,31 @@ impl MrtGuiApp {
         self.running_output.insert(block_id, (tab_id, output.clone()));
         let running_pids = self.running_pids.clone();
         let tx = self.tx.clone();
+        let pool = self.shell_pool.clone();
         self.busy_count += 1;
         self.runtime.spawn(async move {
             let cwd_str = cwd.display().to_string();
+
+            // Run in the tab's persistent shell when it is free; otherwise in a new process.
+            if let Some(result) = crate::shell_pool::run_with_pool(&pool, tab_id, block_id, &shell, &raw_input, &cwd, &output, &running_pids).await {
+                let (text, exit_code, duration_ms, updated_cwd) = match result {
+                    Ok(run) => (run.output, run.exit_code, run.duration_ms, run.cwd),
+                    Err(e) => (format!("Error: {e}"), 1, 0, None),
+                };
+                let mut block = CommandBlock::new_completed(
+                    &raw_input,
+                    shell.kind.short_label(),
+                    cwd_str,
+                    text,
+                    exit_code,
+                    duration_ms,
+                );
+                block.id = block_id;
+                block.timestamp = timestamp;
+                let _ = tx.send(AsyncWorkerEvent::BlockCompleted { tab_id, block, updated_cwd });
+                return;
+            }
+
             let on_spawn = |pid: u32| {
                 if let Ok(mut pids) = running_pids.lock() {
                     pids.insert(block_id, pid);
@@ -4400,6 +4452,7 @@ impl eframe::App for MrtGuiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mrt_core::{ShellKind, ShellSession};
 
     fn key_event(key: Key, modifiers: egui::Modifiers) -> egui::Event {
         egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }
@@ -5067,6 +5120,121 @@ mod tests {
         let block = app.tabs[0].blocks.iter().find(|b| b.id == block_id).unwrap();
         assert!(block.exit_code.is_some_and(|c| c != 0), "stopped command should report failure");
         assert!(app.running_pids.lock().unwrap().is_empty());
+    }
+
+    /// Commands for the persistent-shell tests in the syntax of `kind`:
+    /// (set a variable, print it, print the working directory, wait a minute).
+    fn session_test_commands(kind: &ShellKind) -> (&'static str, &'static str, &'static str, &'static str) {
+        match kind {
+            ShellKind::PowerShellCore | ShellKind::WindowsPowerShell => (
+                "$env:MRT_SESSION_TEST = 'kept-between-commands'",
+                "Write-Output \"value=$env:MRT_SESSION_TEST\"",
+                "(Get-Location).Path",
+                "ping -n 60 127.0.0.1",
+            ),
+            ShellKind::CmdBatch => (
+                "set MRT_SESSION_TEST=kept-between-commands",
+                "echo value=%MRT_SESSION_TEST%",
+                "cd",
+                "ping -n 60 127.0.0.1",
+            ),
+            ShellKind::Fish => (
+                "set -gx MRT_SESSION_TEST kept-between-commands",
+                "echo value=$MRT_SESSION_TEST",
+                "pwd",
+                "sleep 60",
+            ),
+            _ => (
+                "export MRT_SESSION_TEST=kept-between-commands",
+                "echo value=$MRT_SESSION_TEST",
+                "pwd",
+                "sleep 60",
+            ),
+        }
+    }
+
+    /// Runs `cmd` in tab 0 with its first shell and waits for the block to finish.
+    fn run_to_completion(app: &mut MrtGuiApp, cmd: &str) -> CommandBlock {
+        let block_id = app.spawn_shell_command(app.tabs[0].id, app.shells[0].clone(), app.tabs[0].cwd.clone(), cmd.to_string());
+        let start = Instant::now();
+        loop {
+            if let Some(block) = app.tabs[0].blocks.iter().find(|b| b.id == block_id && b.exit_code.is_some()) {
+                return block.clone();
+            }
+            assert!(start.elapsed() < Duration::from_secs(60), "`{cmd}` did not finish");
+            pump_one(app);
+        }
+    }
+
+    #[test]
+    fn persistent_shell_keeps_variables_and_directory_between_commands() {
+        let mut app = MrtGuiApp::new();
+        app.shell_pool.set_enabled(true);
+        let shell = app.shells[0].clone();
+        if !ShellSession::supports(&shell.kind) {
+            return;
+        }
+        let (set_var, print_var, print_cwd, _) = session_test_commands(&shell.kind);
+
+        run_to_completion(&mut app, set_var);
+        let block = run_to_completion(&mut app, print_var);
+        assert!(
+            block.plain_output.contains("value=kept-between-commands"),
+            "variable lost between commands (session unavailable: {:?}); output: {:?}",
+            app.shell_pool.unavailable_reason(app.tabs[0].id, &shell.id),
+            block.plain_output
+        );
+
+        let root = std::env::temp_dir().join(format!("mrt-session-test-{}", Uuid::new_v4()));
+        let target = root.join("mrt session cd");
+        std::fs::create_dir_all(&target).unwrap();
+        let cd = crate::shell_pool::cd_command(&shell.kind, &target).unwrap();
+        let block = run_to_completion(&mut app, &cd);
+        assert_eq!(block.exit_code, Some(0), "cd failed: {:?}", block.plain_output);
+        assert!(
+            app.tabs[0].cwd.to_string_lossy().contains("mrt session cd"),
+            "tab cwd not updated from the shell: {:?}",
+            app.tabs[0].cwd
+        );
+        let block = run_to_completion(&mut app, print_cwd);
+        assert!(block.plain_output.contains("mrt session cd"), "pwd output: {:?}", block.plain_output);
+        drop(app);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stop_interrupts_a_persistent_shell_command_and_keeps_the_shell() {
+        let mut app = MrtGuiApp::new();
+        app.shell_pool.set_enabled(true);
+        let shell = app.shells[0].clone();
+        if !ShellSession::supports(&shell.kind) {
+            return;
+        }
+        let (set_var, print_var, _, long) = session_test_commands(&shell.kind);
+        run_to_completion(&mut app, set_var);
+
+        let block_id = app.spawn_shell_command(app.tabs[0].id, shell.clone(), app.tabs[0].cwd.clone(), long.to_string());
+        let start = Instant::now();
+        while app.running_pids.lock().unwrap().get(&block_id).is_none() && start.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // Give the command a moment to start inside the shell before interrupting it.
+        std::thread::sleep(Duration::from_millis(1500));
+        app.handle_block_action(BlockAction::StopBlock(block_id));
+        let start = Instant::now();
+        while !app.tabs[0].blocks.iter().any(|b| b.id == block_id && b.exit_code.is_some()) {
+            assert!(start.elapsed() < Duration::from_secs(30), "interrupted command did not finish");
+            pump_one(&mut app);
+        }
+        assert!(start.elapsed() < Duration::from_secs(30));
+
+        // The shell survived the Stop, so the variable is still set.
+        let block = run_to_completion(&mut app, print_var);
+        assert!(
+            block.plain_output.contains("value=kept-between-commands"),
+            "shell state lost after Stop: {:?}",
+            block.plain_output
+        );
     }
 
     #[test]

@@ -391,11 +391,12 @@ impl MrtMcpServerState {
             },
             McpTool {
                 name: "mrt_pty_read".into(),
-                description: "Read buffered output from an interactive PTY session (either draining only new unread output or reading the full session transcript).".into(),
+                description: "Read from an interactive PTY session: its output (new unread output, or the full transcript), or with view='screen' what the terminal shows right now (screen rows, cursor, alternate screen, title), which is what you need to drive full-screen programs such as vim, htop or less.".into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "pty_id": { "type": "string", "description": "UUID of the PTY session" },
+                        "view": { "type": "string", "enum": ["output", "screen"], "description": "'output' (default): the program's output as text. 'screen': the visible terminal screen as rows of text plus cursor position, alternate-screen flag and title, rebuilt from the whole session. 'drain' and 'strip_ansi' apply to 'output' only." },
                         "drain": { "type": "boolean", "description": "If true (default), return and clear unread output; if false, return full transcript" },
                         "strip_ansi": { "type": "boolean", "description": "If true (default), strip ANSI escape codes for clean agent reading" },
                         "wait_ms": { "type": "integer", "description": "Optional milliseconds to wait before reading output (default 0)" }
@@ -706,8 +707,8 @@ pub async fn handle_mcp_jsonrpc(
                                 "shell_id": pty.shell_id,
                                 "shell_name": pty.shell_name,
                                 "cwd": pty.cwd.display().to_string(),
-                                "cols": pty.cols,
-                                "rows": pty.rows,
+                                "cols": pty.size().0,
+                                "rows": pty.size().1,
                                 "running": exit_code.is_none(),
                                 "exit_code": exit_code,
                             })
@@ -1647,6 +1648,14 @@ pub async fn execute_mrt_mcp_tool(
             if wait_ms > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
             }
+            if args.get("view").and_then(|v| v.as_str()) == Some("screen") {
+                let exit_code = pty.try_wait_exit().ok().flatten();
+                let mut payload = pty_screen_view(&pty);
+                payload["pty_id"] = json!(pty_id);
+                payload["running"] = json!(exit_code.is_none());
+                payload["exit_code"] = json!(exit_code);
+                return McpToolCallResult::text(serde_json::to_string_pretty(&payload).unwrap_or_default(), false);
+            }
             let raw = if drain {
                 pty.drain_output()
             } else {
@@ -1714,8 +1723,8 @@ pub async fn execute_mrt_mcp_tool(
                         "shell_id": pty.shell_id,
                         "shell_name": pty.shell_name,
                         "cwd": pty.cwd.display().to_string(),
-                        "cols": pty.cols,
-                        "rows": pty.rows,
+                        "cols": pty.size().0,
+                        "rows": pty.size().1,
                         "running": exit_code.is_none(),
                         "exit_code": exit_code,
                     })
@@ -2182,6 +2191,27 @@ fn format_processes_delta(
         s.push_str(&format!("▲ memory: {line}\n"));
     }
     s
+}
+
+/// What a PTY session's terminal shows now, rebuilt by replaying its whole transcript
+/// into a `TerminalEmulator` at the session's current size. Replaying (rather than
+/// keeping an emulator fed with live output) leaves `drain_output` to the other tools.
+/// A session resized midway is replayed at its final size; full-screen programs
+/// redraw after a resize, so their screen still comes out right.
+fn pty_screen_view(pty: &InteractivePty) -> Value {
+    let (cols, rows) = pty.size();
+    let mut term = mrt_core::TerminalEmulator::new(cols, rows, 0);
+    term.feed(pty.read_transcript().as_bytes());
+    let cursor = term.cursor();
+    let screen: Vec<String> = term.screen_text().split('\n').map(str::to_string).collect();
+    json!({
+        "cols": cols,
+        "rows": rows,
+        "screen": screen,
+        "cursor": { "row": cursor.row, "col": cursor.col, "visible": cursor.visible },
+        "alt_screen": term.is_alt_screen(),
+        "title": term.title(),
+    })
 }
 
 fn format_block_summary(b: &CommandBlock, tab_id: Option<Uuid>) -> Value {

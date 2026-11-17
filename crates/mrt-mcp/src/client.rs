@@ -647,6 +647,34 @@ mod tests {
             .unwrap();
         assert!(!resized.is_error);
 
+        // The screen view shows what the terminal displays, at the new size.
+        let screen_res = host
+            .call_tool(
+                "mrt-native-mcp",
+                "mrt_pty_read",
+                json!({ "pty_id": pty_id, "view": "screen" }),
+            )
+            .await
+            .unwrap();
+        assert!(!screen_res.is_error, "{}", screen_res.content[0].text);
+        let screen: Value = serde_json::from_str(&screen_res.content[0].text).unwrap();
+        assert_eq!(screen["cols"], 132);
+        assert_eq!(screen["rows"], 40);
+        let rows = screen["screen"].as_array().expect("screen rows");
+        assert_eq!(rows.len(), 40);
+        assert!(
+            rows.iter().any(|r| r.as_str().is_some_and(|r| r.contains("MRT_PTY_STREAM_OK"))),
+            "screen should show the echoed line: {rows:?}"
+        );
+        assert!(screen["cursor"]["row"].is_u64() && screen["cursor"]["col"].is_u64());
+
+        // The list reports the size after the resize, not the size at spawn.
+        let listed = host
+            .call_tool("mrt-native-mcp", "mrt_pty_list", json!({}))
+            .await
+            .unwrap();
+        assert!(listed.content[0].text.contains("132"), "{}", listed.content[0].text);
+
         // Kill PTY
         let killed = host
             .call_tool(

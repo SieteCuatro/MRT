@@ -197,6 +197,8 @@ Full-screen programs need a real terminal. MRT opens them in a full-screen PTY o
 
 **In a split tab** (`:split`, `:split-v`), the program runs **inside the active pane** instead of the overlay, so you can keep using the other pane next to it. Click inside a pane's terminal (or its **Focus** button) to give it the keyboard; the other pane's program keeps running and its cursor shows as an outline. Each pane runs one program at a time; a second one in the same pane opens the overlay. When the program exits its block appears in that pane. Removing the split (`:unsplit`) ends the program in the second pane. While the active pane runs a program, the command input does not take keys; focus the other pane to run commands.
 
+In **Mosaic**, a tab that is running a program shows that program's screen in its tile (read-only); open the tab to use it.
+
 Agent CLIs such as `claude`, `codex`, `gemini` and `aider` are interactive, so start them with `:tui claude` (and so on). The tab then shows when the agent waits for your approval (see [Tab activity status](#tab-activity-status)).
 
 ### Tab activity status

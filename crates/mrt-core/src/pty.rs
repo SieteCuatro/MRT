@@ -534,6 +534,8 @@ pub struct InteractivePty {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     output_buffer: Arc<Mutex<String>>,
     full_transcript: Arc<Mutex<String>>,
+    /// The size after the last `resize` (`cols`/`rows` keep the size at spawn).
+    current_size: Mutex<(u16, u16)>,
 }
 
 impl InteractivePty {
@@ -621,6 +623,7 @@ impl InteractivePty {
             writer: Arc::new(Mutex::new(writer)),
             output_buffer,
             full_transcript,
+            current_size: Mutex::new((cols, rows)),
         })
     }
 
@@ -685,7 +688,15 @@ impl InteractivePty {
             pixel_width: 0,
             pixel_height: 0,
         })?;
+        if let Ok(mut size) = self.current_size.lock() {
+            *size = (cols, rows);
+        }
         Ok(())
+    }
+
+    /// Current size as `(cols, rows)`, including resizes since spawn.
+    pub fn size(&self) -> (u16, u16) {
+        self.current_size.lock().map(|s| *s).unwrap_or((self.cols, self.rows))
     }
 
     pub fn try_wait_exit(&self) -> Result<Option<u32>> {

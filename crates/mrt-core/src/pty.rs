@@ -535,7 +535,23 @@ fn strip_windows_unc_prefix(path: PathBuf) -> PathBuf {
     }
 }
 
+/// Where an [`InteractivePty`]'s program runs.
+enum Backend {
+    /// A PTY of this process.
+    Local {
+        master: Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
+        child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
+        writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    },
+    /// A PTY owned by the session host, reached over an event-stream connection
+    /// ([`crate::pty_host`]). It keeps running when this process exits.
+    Hosted(crate::pty_host::HostedPty),
+}
+
 /// Interactive cross-platform PTY wrapper using `portable-pty` for live streaming sessions.
+///
+/// When a session host is set ([`crate::pty_host::set_pty_host`]), new PTYs run in it
+/// and survive this process; the API is the same either way.
 pub struct InteractivePty {
     pub id: uuid::Uuid,
     pub shell_id: String,
@@ -543,9 +559,7 @@ pub struct InteractivePty {
     pub cwd: PathBuf,
     pub cols: u16,
     pub rows: u16,
-    master: Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
-    child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    backend: Backend,
     output_buffer: Arc<Mutex<String>>,
     full_transcript: Arc<Mutex<String>>,
     /// The size after the last `resize` (`cols`/`rows` keep the size at spawn).
@@ -558,6 +572,37 @@ impl InteractivePty {
     }
 
     pub fn spawn_with_command(
+        shell: &ShellProfile,
+        cwd: &Path,
+        cols: u16,
+        rows: u16,
+        initial_command: Option<&str>,
+    ) -> Result<Self> {
+        Self::spawn_with_owner(shell, cwd, cols, rows, initial_command, None)
+    }
+
+    /// Like [`spawn_with_command`](Self::spawn_with_command); `owner` is an opaque label
+    /// the session host keeps with the PTY so a later window can reattach it to the
+    /// right place. Falls back to a local PTY when the host cannot be reached.
+    pub fn spawn_with_owner(
+        shell: &ShellProfile,
+        cwd: &Path,
+        cols: u16,
+        rows: u16,
+        initial_command: Option<&str>,
+        owner: Option<&str>,
+    ) -> Result<Self> {
+        if let Some(endpoint) = crate::pty_host::pty_host() {
+            match crate::pty_host::spawn_in_host(&endpoint, shell, cwd, cols, rows, initial_command, owner) {
+                Ok(pty) => return Ok(pty),
+                Err(error) => tracing_warn(&format!("session host PTY failed, running it here: {error}")),
+            }
+        }
+        Self::spawn_local(shell, cwd, cols, rows, initial_command)
+    }
+
+    /// A PTY of this process, never in the session host (the host itself uses this).
+    pub fn spawn_local(
         shell: &ShellProfile,
         cwd: &Path,
         cols: u16,
@@ -632,41 +677,64 @@ impl InteractivePty {
             cwd: cwd.to_path_buf(),
             cols,
             rows,
-            master: Arc::new(Mutex::new(pair.master)),
-            child: Arc::new(Mutex::new(child)),
-            writer: Arc::new(Mutex::new(writer)),
+            backend: Backend::Local {
+                master: Arc::new(Mutex::new(pair.master)),
+                child: Arc::new(Mutex::new(child)),
+                writer: Arc::new(Mutex::new(writer)),
+            },
             output_buffer,
             full_transcript,
             current_size: Mutex::new((cols, rows)),
         })
     }
 
-    pub fn send_input(&self, input: &str, append_newline: bool) -> Result<()> {
-        let mut guard = self
-            .writer
-            .lock()
-            .map_err(|_| anyhow::anyhow!("PTY writer mutex poisoned"))?;
-        write!(guard, "{input}")?;
-        if append_newline {
-            #[cfg(target_os = "windows")]
-            write!(guard, "\r\n")?;
-            #[cfg(not(target_os = "windows"))]
-            write!(guard, "\n")?;
+    /// Wraps a hosted PTY connection (see [`crate::pty_host`]).
+    pub(crate) fn from_hosted(
+        hosted: crate::pty_host::HostedPty,
+        info: (uuid::Uuid, String, String, PathBuf, u16, u16),
+        output_buffer: Arc<Mutex<String>>,
+        full_transcript: Arc<Mutex<String>>,
+    ) -> Self {
+        let (id, shell_id, shell_name, cwd, cols, rows) = info;
+        Self {
+            id,
+            shell_id,
+            shell_name,
+            cwd,
+            cols,
+            rows,
+            backend: Backend::Hosted(hosted),
+            output_buffer,
+            full_transcript,
+            current_size: Mutex::new((cols, rows)),
         }
-        guard.flush()?;
-        Ok(())
+    }
+
+    /// Whether the program runs in the session host.
+    pub fn is_hosted(&self) -> bool {
+        matches!(self.backend, Backend::Hosted(_))
+    }
+
+    pub fn send_input(&self, input: &str, append_newline: bool) -> Result<()> {
+        let mut text = input.to_string();
+        if append_newline {
+            text.push_str(if cfg!(target_os = "windows") { "\r\n" } else { "\n" });
+        }
+        self.send_bytes(text.as_bytes())
     }
 
     /// Writes raw bytes to the program, e.g. key and mouse reports that are not UTF-8
     /// (X10 mouse coordinates above 127).
     pub fn send_bytes(&self, bytes: &[u8]) -> Result<()> {
-        let mut guard = self
-            .writer
-            .lock()
-            .map_err(|_| anyhow::anyhow!("PTY writer mutex poisoned"))?;
-        guard.write_all(bytes)?;
-        guard.flush()?;
-        Ok(())
+        match &self.backend {
+            Backend::Local { writer, .. } => {
+                let mut guard = writer.lock().map_err(|_| anyhow::anyhow!("PTY writer mutex poisoned"))?;
+                guard.write_all(bytes)?;
+                guard.flush()?;
+                Ok(())
+            }
+            Backend::Hosted(hosted) => hosted.send(&crate::pty_host::ClientEvent::Input(bytes.to_vec())),
+        }
     }
 
     pub fn send_line(&self, input: &str) -> Result<()> {
@@ -675,9 +743,7 @@ impl InteractivePty {
 
     pub fn drain_output(&self) -> String {
         if let Ok(mut guard) = self.output_buffer.lock() {
-            let out = guard.clone();
-            guard.clear();
-            out
+            std::mem::take(&mut *guard)
         } else {
             String::new()
         }
@@ -691,17 +757,24 @@ impl InteractivePty {
         }
     }
 
+    /// Transcript text from byte offset `from` and the offset after it (for streaming).
+    pub fn transcript_since(&self, from: usize) -> (String, usize) {
+        let Ok(guard) = self.full_transcript.lock() else { return (String::new(), from) };
+        let mut start = from.min(guard.len());
+        while !guard.is_char_boundary(start) {
+            start -= 1;
+        }
+        (guard[start..].to_string(), guard.len())
+    }
+
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        let guard = self
-            .master
-            .lock()
-            .map_err(|_| anyhow::anyhow!("PTY master mutex poisoned"))?;
-        guard.resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })?;
+        match &self.backend {
+            Backend::Local { master, .. } => {
+                let guard = master.lock().map_err(|_| anyhow::anyhow!("PTY master mutex poisoned"))?;
+                guard.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
+            }
+            Backend::Hosted(hosted) => hosted.send(&crate::pty_host::ClientEvent::Resize(cols, rows))?,
+        }
         if let Ok(mut size) = self.current_size.lock() {
             *size = (cols, rows);
         }
@@ -714,30 +787,37 @@ impl InteractivePty {
     }
 
     pub fn try_wait_exit(&self) -> Result<Option<u32>> {
-        let mut guard = self
-            .child
-            .lock()
-            .map_err(|_| anyhow::anyhow!("PTY child mutex poisoned"))?;
-        if let Some(status) = guard.try_wait()? {
-            Ok(Some(status.exit_code()))
-        } else {
-            Ok(None)
+        match &self.backend {
+            Backend::Local { child, .. } => {
+                let mut guard = child.lock().map_err(|_| anyhow::anyhow!("PTY child mutex poisoned"))?;
+                Ok(guard.try_wait()?.map(|status| status.exit_code()))
+            }
+            Backend::Hosted(hosted) => Ok(hosted.exit_code()),
         }
     }
 
     /// OS process id of the PTY child, when the platform reports one.
     pub fn process_id(&self) -> Option<u32> {
-        self.child.lock().ok().and_then(|guard| guard.process_id())
+        match &self.backend {
+            Backend::Local { child, .. } => child.lock().ok().and_then(|guard| guard.process_id()),
+            Backend::Hosted(hosted) => hosted.process_id,
+        }
     }
 
     pub fn kill(&self) -> Result<()> {
-        let mut guard = self
-            .child
-            .lock()
-            .map_err(|_| anyhow::anyhow!("PTY child mutex poisoned"))?;
-        guard.kill()?;
-        Ok(())
+        match &self.backend {
+            Backend::Local { child, .. } => {
+                let mut guard = child.lock().map_err(|_| anyhow::anyhow!("PTY child mutex poisoned"))?;
+                guard.kill()?;
+                Ok(())
+            }
+            Backend::Hosted(hosted) => hosted.send(&crate::pty_host::ClientEvent::Kill),
+        }
     }
+}
+
+fn tracing_warn(message: &str) {
+    eprintln!("mrt: {message}");
 }
 
 #[cfg(test)]

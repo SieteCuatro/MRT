@@ -18,9 +18,16 @@ This page covers what is built, and the plan for the rest of Milestone 4 in the 
 | Remote connections | `mrt-mcp/src/remote.rs`, `mrt-app/src/remote_cli.rs` | `mrt share` / `mrt pair` / `mrt attach`: SPAKE2 pairing, Noise-encrypted relay to the bridge, paired keys only, live revocation, reconnect with missed output shown once. |
 | Phone companion | `mrt-mcp/src/companion.rs` | `mrt share --web`: HTTPS web app with token pairing, live tabs and blocks, a command box and Safety Gate answers (opt-in). |
 
-With the session host, the shells and running commands no longer live in the window process: a window that closes or crashes does not take them along, and the next window reattaches. Full-screen programs (TUI PTYs) and agents' PTYs still live in the window process; section 2 describes moving those and replacing polling with event streams.
+With the session host, the shells, running commands, full-screen programs and agents' PTYs no longer live in the window process: a window that closes or crashes does not take them along, and the next window reattaches.
 
-## 2. GUI attached to the server (implemented for tab commands)
+**Event streams.** Both kinds of work are followed over long-lived connections on which the host pushes events, not by polling:
+
+- `job_stream` (command blocks): `{"out": text}` lines as output appears, then `{"done": {exit_code, duration_ms, cwd}, "output": full}`. It starts at a byte offset, so a dropped stream resumes where it stopped.
+- `pty_stream` (programs, `mrt_core::pty_host`): `{"ok": {pid, cols, rows}}`, then `{"out"}` / `{"exit"}` lines from the host; `{"in": base64}`, `{"resize": [c, r]}`, `{"kill": true}` from the window. Starting at offset 0 replays the whole session, which rebuilds the screen of a reattached program.
+
+`InteractivePty` has a hosted backend with the same API, so the TUI overlay, pane programs and `mrt_pty_*` do not know whether their PTY is local or in the host. PTYs carry an owner label (`{"kind": "tui", "tab_id", "pane", "command"}` or `{"kind": "mcp"}`) that tells a new window where to put them back.
+
+## 2. GUI attached to the server (implemented)
 
 **Goal.** Close the window during a build, reopen it, and see the same tabs, the finished blocks and the live output.
 
@@ -80,3 +87,9 @@ A phone app is a paired guest from section 4 with a smaller UI: a tab list with 
 4. Keep the old server alive across upgrades.
 5. LAN pairing, encryption and revocation, then the reconnect test.
 6. Internet transport, then the mobile companion.
+
+## 7. Verification
+
+- Unit and app tests: `session_host.rs` (jobs survive their client, hosted PTYs replay on reattach) and `app.rs` (a command runs through the host; a new window reattaches a job and a running full-screen program).
+- `crates/mrt-app/tests/e2e_processes.rs`: real `mrt server`, `mrt share`, `mrt pair`, `--host`, revocation and `mrt session-host` processes with separate `MRT_DATA_DIR`s.
+- `scripts/e2e/gui_crash_reattach.py`: the real window on an offscreen X server (`scripts/e2e/xvfb_offscreen.sh`, no root needed): it types a long command and a full-screen program into a tab, kills the window with SIGKILL, checks that the session host still runs both, starts the window again and checks (over MCP, with screenshots) that the program is back in the same tab with its screen and that both end as blocks there.

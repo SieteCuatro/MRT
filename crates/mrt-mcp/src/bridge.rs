@@ -22,8 +22,7 @@ pub struct GuiBridgeEndpoint {
 }
 
 pub fn bridge_port_file_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "MRT")
-        .map(|dirs| dirs.data_local_dir().join("mcp-bridge.json"))
+    mrt_core::data_dir().map(|dir| dir.join("mcp-bridge.json"))
 }
 
 /// Generates a random bridge token (two v4 UUIDs, 244 random bits, hex encoded).

@@ -163,6 +163,8 @@ pub enum AsyncWorkerEvent {
     ExternalMcpConnected(mrt_mcp::McpServerStatus),
     /// The session host's jobs, after connecting: blocks to show again (reattach).
     HostJobs(Vec<crate::session_host::JobInfo>),
+    /// The session host's PTYs, after connecting: programs and agent PTYs to reattach.
+    HostPtys(Vec<mrt_core::pty_host::HostedPtyInfo>),
     /// Periodic process sample for the Task Manager, live `:top` blocks and watches.
     /// Background events do not count towards `busy_count`.
     ProcessSnapshot(Result<Arc<ProcessSnapshot>, String>),
@@ -203,7 +205,7 @@ fn shorten(text: &str, max: usize) -> String {
 
 impl AsyncWorkerEvent {
     fn is_background(&self) -> bool {
-        matches!(self, AsyncWorkerEvent::ProcessSnapshot(_) | AsyncWorkerEvent::HostJobs(_))
+        matches!(self, AsyncWorkerEvent::ProcessSnapshot(_) | AsyncWorkerEvent::HostJobs(_) | AsyncWorkerEvent::HostPtys(_))
     }
 }
 
@@ -637,6 +639,15 @@ pub(crate) fn plain_native_invocation(command: &str, path: &std::ffi::OsStr) -> 
     })
 }
 
+/// Tells the session host an exited PTY is no longer needed (in the background).
+fn forget_hosted_pty(pty_id: Uuid) {
+    if let Some(endpoint) = mrt_core::pty_host::pty_host() {
+        std::thread::spawn(move || {
+            let _ = mrt_core::pty_host::request(&endpoint, &serde_json::json!({ "op": "pty_forget", "pty_id": pty_id }));
+        });
+    }
+}
+
 /// How often a running block's output is copied into the MCP mirror.
 const MIRROR_RUNNING_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -811,9 +822,9 @@ impl MrtGuiApp {
         let history_result = if cfg!(test) {
             Ok(None)
         } else {
-            directories::ProjectDirs::from("", "", "MRT")
+            mrt_core::data_dir()
                 .ok_or_else(|| anyhow::anyhow!("Unable to locate the application data directory"))
-                .and_then(|dirs| Ok(Some(crate::history::HistoryWorker::start(dirs.data_local_dir().join("history.sqlite")))))
+                .and_then(|dir| Ok(Some(crate::history::HistoryWorker::start(dir.join("history.sqlite")))))
         };
         let (history, history_error) = match history_result {
             Ok(store) => (store, None),
@@ -2568,6 +2579,7 @@ impl MrtGuiApp {
                     }
                 }
                 AsyncWorkerEvent::HostJobs(jobs) => self.reattach_host_jobs(jobs),
+                AsyncWorkerEvent::HostPtys(ptys) => self.reattach_host_ptys(ptys),
                 AsyncWorkerEvent::ExternalMcpConnected(status) => {
                     self.mcp_host
                         .servers
@@ -2866,7 +2878,8 @@ impl MrtGuiApp {
                 .is_some()
                 .then_some(tab.active_pane_idx)
                 .filter(|p| !self.pane_tuis.iter().any(|s| s.tab_id == tab_id && s.pane == Some(*p)));
-            match InteractivePty::spawn_with_command(&shell, &cwd, cols, rows, Some(&tui_cmd)) {
+            let owner = serde_json::json!({ "kind": "tui", "tab_id": tab_id, "pane": pane, "command": tui_cmd }).to_string();
+            match InteractivePty::spawn_with_owner(&shell, &cwd, cols, rows, Some(&tui_cmd), Some(&owner)) {
                 Ok(pty) => {
                     if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
                         tab.activity.command_started(&tui_cmd, Instant::now());
@@ -3609,6 +3622,9 @@ impl MrtGuiApp {
 
     /// Stores a finished TUI session as a command block in the pane it ran in.
     fn finish_tui(&mut self, mut session: ActiveTuiSession, exit_code: i32) {
+        if session.pty.is_hosted() {
+            forget_hosted_pty(session.pty.id);
+        }
         // Pick up output that arrived after this frame's drain.
         let rest = session.pty.drain_output();
         if !rest.is_empty() {
@@ -4140,10 +4156,11 @@ impl MrtGuiApp {
     /// Whether closing the window now would stop something: running commands, programs
     /// in the TUI overlay or panes, or PTYs that agents started.
     pub(crate) fn has_running_work(&self) -> usize {
-        let ptys = self.mcp_host.local_server_state.ptys.lock().map(|p| p.len()).unwrap_or(0);
-        // Commands in the session host keep running without this window.
+        // Commands, programs and PTYs in the session host keep running without this window.
+        let ptys = self.mcp_host.local_server_state.ptys.lock().map(|p| p.values().filter(|p| !p.is_hosted()).count()).unwrap_or(0);
         let in_host = self.host_blocks.lock().map(|b| b.len()).unwrap_or(0);
-        self.running_output.len().saturating_sub(in_host) + usize::from(self.active_tui.is_some()) + self.pane_tuis.len() + ptys
+        let tuis = self.active_tui.iter().chain(self.pane_tuis.iter()).filter(|s| !s.pty.is_hosted()).count();
+        self.running_output.len().saturating_sub(in_host) + tuis + ptys
     }
 
     /// Closing the window with work running keeps MRT going in the background
@@ -4321,10 +4338,17 @@ impl MrtGuiApp {
             match crate::session_host::ensure_host().await {
                 Ok(host) => {
                     let jobs = host.jobs().await.unwrap_or_default();
+                    let endpoint = host.endpoint();
+                    // New full-screen programs and agent PTYs run in the host from now on.
+                    mrt_core::pty_host::set_pty_host(Some(endpoint.clone()));
+                    let ptys = tokio::task::spawn_blocking(move || mrt_core::pty_host::list(&endpoint).unwrap_or_default())
+                        .await
+                        .unwrap_or_default();
                     if let Ok(mut slot) = slot.lock() {
                         *slot = Some(host);
                     }
                     let _ = tx.send(AsyncWorkerEvent::HostJobs(jobs));
+                    let _ = tx.send(AsyncWorkerEvent::HostPtys(ptys));
                 }
                 Err(e) => tracing::warn!("session host unavailable, running commands in this window: {e}"),
             }
@@ -4368,6 +4392,52 @@ impl MrtGuiApp {
                 block.timestamp = timestamp;
                 let _ = tx.send(AsyncWorkerEvent::BlockCompleted { tab_id, block, updated_cwd });
             });
+        }
+    }
+
+    /// Reattaches the session host's PTYs after this window (re)started: full-screen
+    /// programs go back to their tab (the overlay, or their pane) with the screen rebuilt
+    /// from the whole session, and agents' PTYs back into the MCP state.
+    pub(crate) fn reattach_host_ptys(&mut self, ptys: Vec<mrt_core::pty_host::HostedPtyInfo>) {
+        let endpoint = self.session_host.lock().ok().and_then(|h| h.as_ref().map(|h| h.endpoint())).or_else(mrt_core::pty_host::pty_host);
+        let Some(endpoint) = endpoint else { return };
+        for info in ptys {
+            let owner: serde_json::Value = info.owner.as_deref().and_then(|o| serde_json::from_str(o).ok()).unwrap_or_default();
+            let known = self.active_tui.as_ref().is_some_and(|s| s.pty.id == info.pty_id)
+                || self.pane_tuis.iter().any(|s| s.pty.id == info.pty_id)
+                || self.mcp_host.local_server_state.ptys.lock().is_ok_and(|p| p.contains_key(&info.pty_id));
+            if known {
+                continue;
+            }
+            if info.exited {
+                forget_hosted_pty(info.pty_id);
+                continue;
+            }
+            let Ok(pty) = mrt_core::pty_host::attach(&endpoint, &info) else { continue };
+            match owner["kind"].as_str() {
+                Some("tui") => {
+                    let tab_id = owner["tab_id"].as_str().and_then(|t| Uuid::parse_str(t).ok());
+                    let tab_id = tab_id.filter(|id| self.tabs.iter().any(|t| t.id == *id)).unwrap_or(self.tabs[self.active_tab].id);
+                    let pane = owner["pane"].as_u64().map(|p| p as usize).filter(|p| {
+                        *p == 0 || self.tabs.iter().any(|t| t.id == tab_id && t.secondary_pane.is_some())
+                    });
+                    let command = owner["command"].as_str().or(info.command.as_deref()).unwrap_or("program").to_string();
+                    let session = ActiveTuiSession::new(pty, tab_id, command, pane, info.cols, info.rows);
+                    if pane.is_some() {
+                        self.pane_tuis.push(session);
+                    } else if self.active_tui.is_none() {
+                        self.active_tui = Some(session);
+                    } else {
+                        // Only one overlay at a time; the program keeps running in the host.
+                        continue;
+                    }
+                }
+                _ => {
+                    if let Ok(mut map) = self.mcp_host.local_server_state.ptys.lock() {
+                        map.insert(info.pty_id, std::sync::Arc::new(pty));
+                    }
+                }
+            }
         }
     }
 
@@ -6561,6 +6631,63 @@ error: test failed
         let answer = block.ai_explanation.as_deref().unwrap_or("");
         assert!(answer.contains("`cargo test` failed (exit code 101)"), "{answer}");
         assert!(answer.contains("earlier run"), "{answer}");
+    }
+
+    /// A full-screen program started by one window keeps running in the session host
+    /// when that window goes away, and the next window shows it again in the same tab
+    /// with its screen rebuilt; typing reaches it and its exit becomes a block.
+    #[test]
+    fn a_new_window_reattaches_a_running_full_screen_program() {
+        let first = MrtGuiApp::new();
+        let host = first.runtime.block_on(crate::session_host::start_in_process());
+        let endpoint = host.endpoint();
+        let tab_id = first.tabs[0].id;
+        let shell = first.shells[0].clone();
+        let owner = serde_json::json!({ "kind": "tui", "tab_id": tab_id, "pane": null, "command": "shell" }).to_string();
+        let pty = mrt_core::pty_host::spawn_in_host(&endpoint, &shell, &std::env::temp_dir(), 80, 24, None, Some(&owner)).unwrap();
+        pty.send_line("echo before-the-crash").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !pty.read_transcript().contains("before-the-crash") && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let pty_id = pty.id;
+        drop(pty);
+        // The first window "crashes" (dropped without any cleanup); the host keeps running
+        // on its runtime, so keep that runtime alive by leaking the window.
+        std::mem::forget(first);
+
+        let mut next = MrtGuiApp::new();
+        next.tabs[0].id = tab_id;
+        *next.session_host.lock().unwrap() = Some(host.clone());
+        let ptys = mrt_core::pty_host::list(&endpoint).unwrap();
+        next.reattach_host_ptys(ptys);
+        let session = next.active_tui.as_mut().expect("the program is back in its tab's overlay");
+        assert_eq!(session.tab_id, tab_id);
+        assert_eq!(session.pty.id, pty_id);
+        assert!(session.pty.is_hosted());
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut screen = String::new();
+        while Instant::now() < deadline {
+            session.pump_output();
+            screen = session.term.screen_text();
+            if screen.contains("before-the-crash") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(screen.contains("before-the-crash"), "the screen is rebuilt from the session: {screen}");
+        session.pty.send_line("echo after-reattach").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline && !session.term.screen_text().contains("after-reattach") {
+            session.pump_output();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(session.term.screen_text().contains("after-reattach"), "typing reaches the program");
+        assert_eq!(next.has_running_work(), 0, "a hosted program does not keep the window open");
+        // Reattaching again does not duplicate it.
+        next.reattach_host_ptys(mrt_core::pty_host::list(&endpoint).unwrap());
+        assert!(next.pane_tuis.is_empty());
+        next.active_tui.as_ref().unwrap().pty.kill().unwrap();
     }
 
     #[test]

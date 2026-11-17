@@ -70,3 +70,15 @@ pub fn attach_parent_console_if_cli() {
         }
     }
 }
+
+/// Environment variable that moves MRT's data folder (history, layout, bridge and
+/// pairing files), for portable installs and isolated tests.
+pub const DATA_DIR_ENV_VAR: &str = "MRT_DATA_DIR";
+
+/// MRT's per-user data folder: `$MRT_DATA_DIR`, else the platform's local data folder.
+pub fn data_dir() -> Option<std::path::PathBuf> {
+    if let Some(dir) = std::env::var_os(DATA_DIR_ENV_VAR).filter(|d| !d.is_empty()) {
+        return Some(std::path::PathBuf::from(dir));
+    }
+    directories::ProjectDirs::from("", "", "MRT").map(|d| d.data_local_dir().to_path_buf())
+}

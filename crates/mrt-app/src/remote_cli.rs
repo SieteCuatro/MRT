@@ -124,7 +124,7 @@ async fn share(args: &[String]) -> Result<()> {
                 if !store.revoke(name) {
                     bail!("no paired device called {name}");
                 }
-                store.save()?;
+                store.save_guests()?;
                 println!("Revoked {name}. A running `mrt share` drops its connections at their next request.");
                 return Ok(());
             }
@@ -193,7 +193,7 @@ async fn pair(args: &[String]) -> Result<()> {
     let key_hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
     store.hosts.retain(|h| h.address.as_deref() != Some(address.as_str()));
     store.hosts.push(PairedDevice { name: host_name.clone(), key: key_hex, address: Some(address.clone()) });
-    store.save()?;
+    store.save_hosts()?;
     println!("Paired with {host_name} ({address}). Try: mrt attach {host_name}");
     Ok(())
 }

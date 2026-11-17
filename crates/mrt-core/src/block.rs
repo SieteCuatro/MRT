@@ -79,6 +79,10 @@ pub struct CommandBlock {
     /// output limit ([`set_max_block_output_bytes`]); the block keeps the end.
     #[serde(default)]
     pub truncated_bytes: u64,
+    /// Inline images in the output, anchored at byte offsets of `plain_output`.
+    /// Not saved in history (they are rebuilt from `raw_output` when needed).
+    #[serde(skip)]
+    pub images: Vec<crate::images::InlineImage>,
 }
 
 /// Default limit for the output one block keeps (32 MiB of text).
@@ -185,6 +189,11 @@ impl CommandBlock {
     fn append_output_with_limit(&mut self, chunk: &str, stream: &mut VtStream, max: usize) {
         self.raw_output.push_str(chunk);
         let delta = stream.feed(chunk);
+        let base = self.plain_output.len();
+        self.images.extend(delta.images.into_iter().map(|mut image| {
+            image.anchor += base;
+            image
+        }));
         self.plain_output.push_str(&delta.plain_text);
         self.ansi_spans.extend(delta.spans);
         for event in delta.events {
@@ -231,6 +240,11 @@ impl CommandBlock {
             }
         }
         self.ansi_spans.drain(..whole);
+        self.images.retain_mut(|image| {
+            let kept = image.anchor >= removed;
+            image.anchor = image.anchor.saturating_sub(removed);
+            kept
+        });
         self.truncated_bytes += removed as u64;
     }
 
@@ -253,7 +267,7 @@ impl CommandBlock {
         let mut raw_output = raw_output.into();
         let max = max_block_output_bytes();
         let truncated_bytes = if max == 0 { 0 } else { keep_tail(&mut raw_output, max) as u64 };
-        let ParsedAnsi { spans: ansi_spans, plain_text: plain_output, events } = parse_ansi_rich(&raw_output);
+        let ParsedAnsi { spans: ansi_spans, plain_text: plain_output, events, images } = parse_ansi_rich(&raw_output);
         let (reported_cwd, clipboard_requests) = split_events(events, &[]);
         let structured = if plain_output.len() <= STRUCTURED_CLASSIFY_LIMIT {
             classify_output(&plain_output)
@@ -285,6 +299,7 @@ impl CommandBlock {
             reported_cwd,
             clipboard_requests,
             truncated_bytes,
+            images,
         }
     }
 
@@ -298,7 +313,7 @@ impl CommandBlock {
         duration_ms: u64,
     ) -> Self {
         let raw_output = raw_output.into();
-        let ParsedAnsi { spans: ansi_spans, plain_text: plain_output, events } = parse_ansi_rich(&raw_output);
+        let ParsedAnsi { spans: ansi_spans, plain_text: plain_output, events, images } = parse_ansi_rich(&raw_output);
         let (reported_cwd, clipboard_requests) = split_events(events, &[]);
         Self {
             id: Uuid::new_v4(),
@@ -319,6 +334,7 @@ impl CommandBlock {
             reported_cwd,
             clipboard_requests,
             truncated_bytes: 0,
+            images,
         }
     }
 }

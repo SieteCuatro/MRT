@@ -112,6 +112,18 @@ A block draws its **last 2,000 lines**. When there are more, a line above the ou
 
 Each block keeps at most `terminal.max_block_output_mb` (32 MiB by default) of output; beyond that the oldest part is dropped and the block shows how much was not kept. Output over 4 MiB is not checked for JSON, CSV or Markdown and is shown as text. On Windows, Windows PowerShell itself passes native program output through at about 1 MiB/s (see [PERFORMANCE.md](PERFORMANCE.md)); use `cmd`, `pwsh` 7 or a POSIX shell for very large outputs.
 
+### Images in output
+
+Programs can show images in a command block with any of the three common protocols:
+
+| Protocol | Example tools | Notes |
+| :--- | :--- | :--- |
+| iTerm2 `OSC 1337 ; File=…inline=1` | `imgcat`, `wezterm imgcat`, `chafa -f iterm` | PNG, JPEG and GIF (first frame). `width=` / `height=` in cells, `px` or `%` are honoured. |
+| kitty graphics (`ESC _ G …`) | `chafa -f kitty`, `timg -pk` | Direct transmission only (`t=d`); PNG (`f=100`), RGB and RGBA, zlib (`o=z`), chunked data (`m=1`), and `a=t` + `a=p` placement. MRT never reads files or shared memory a program names, and does not answer `a=q` queries, so tools that require a reply (`kitty +kitten icat`) may wait or fall back. |
+| Sixel (`ESC P … q`) | `img2sixel`, `chafa -f sixels`, `lsix` | Color registers in RGB or HLS, repeats and transparent backgrounds (`P2=1`). |
+
+Images appear where they were printed, scaled down to the block's width and at most 600 points high. Images larger than 8192 pixels on a side, or payloads over 64 MiB, are refused with a short note in the output. Images are not saved in history, and full-screen programs in the TUI overlay (`:tui`) do not show them yet.
+
 ### Remote tabs (SSH)
 
 `:ssh user@host` (any `ssh` options may follow, e.g. `-p 2222` or `-i ~/.ssh/key`) opens a tab whose commands run **on that host**, with the same command blocks, exit codes, Stop button and folder tracking as a local tab. MRT starts `ssh -tt -o BatchMode=yes` and types the shell integration into the remote Bash or Zsh as base64 `eval` lines; **nothing is written on the remote machine**. The tab runs `hostname` first, so its first block shows which machine it is on.

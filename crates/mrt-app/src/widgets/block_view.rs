@@ -535,7 +535,9 @@ fn render_ansi_spans(ui: &mut Ui, block: &CommandBlock) -> Option<BlockAction> {
         });
         ui.add_space(4.0);
     }
-    if block.ansi_spans.is_empty() {
+    let images: Vec<(usize, &mrt_core::InlineImage)> =
+        block.images.iter().enumerate().filter(|(_, image)| image.anchor >= prefix).collect();
+    if block.ansi_spans.is_empty() && images.is_empty() {
         ui.label(
             RichText::new("(no output)")
                 .italics()
@@ -543,15 +545,148 @@ fn render_ansi_spans(ui: &mut Ui, block: &CommandBlock) -> Option<BlockAction> {
         );
         return None;
     }
-    render_spans_with_links(
-        ui,
-        &spans,
-        &SpanStyle { font_size: 13.0, backgrounds: true },
-        block_cwd(block),
-        egui::Id::new(("link_error", block.id)),
-        find.as_ref(),
-    )
-    .map(link_request_action)
+    let style = SpanStyle { font_size: 13.0, backgrounds: true };
+    if images.is_empty() {
+        return render_spans_with_links(
+            ui,
+            &spans,
+            &style,
+            block_cwd(block),
+            egui::Id::new(("link_error", block.id)),
+            find.as_ref(),
+        )
+        .map(link_request_action);
+    }
+
+    // Text and images in output order: each text segment is its own galley.
+    let cuts: Vec<usize> = images.iter().map(|(_, image)| image.anchor - prefix).collect();
+    let segments = split_spans_at(&spans, &cuts);
+    let mut action = None;
+    let mut matches_before = 0;
+    for (n, segment) in segments.iter().enumerate() {
+        let text: String = segment.iter().map(|s| s.text.as_str()).collect();
+        if !text.is_empty() {
+            let count = find.as_ref().map(|f| crate::find::match_ranges(&text, f.query).len()).unwrap_or(0);
+            let segment_find = find.as_ref().map(|f| crate::widgets::links::FindView {
+                query: f.query,
+                current: f.current.and_then(|c| c.checked_sub(matches_before)).filter(|c| *c < count),
+                scroll: f.scroll,
+            });
+            matches_before += count;
+            if let Some(request) = render_spans_with_links(
+                ui,
+                segment,
+                &style,
+                block_cwd(block),
+                egui::Id::new(("link_error", block.id, n)),
+                segment_find.as_ref(),
+            ) {
+                action = Some(link_request_action(request));
+            }
+        }
+        if let Some((index, image)) = images.get(n) {
+            render_inline_image(ui, block.id, *index, image);
+        }
+    }
+    action
+}
+
+/// Splits `spans` at byte offsets `cuts` (sorted) of their joined text. Returns
+/// `cuts.len() + 1` segments; a line break right before a cut is dropped, because
+/// the image that follows starts on its own line anyway.
+pub fn split_spans_at(spans: &[AnsiSpan], cuts: &[usize]) -> Vec<Vec<AnsiSpan>> {
+    let mut segments: Vec<Vec<AnsiSpan>> = vec![Vec::new()];
+    let mut offset = 0;
+    let mut next_cut = cuts.iter().copied().peekable();
+    for span in spans {
+        let mut start = 0;
+        let end = span.text.len();
+        while let Some(&cut) = next_cut.peek() {
+            if cut > offset + end {
+                break;
+            }
+            let at = cut.saturating_sub(offset).max(start).min(end);
+            if at > start {
+                let mut piece = span.clone();
+                piece.text = span.text[start..at].to_string();
+                segments.last_mut().unwrap().push(piece);
+            }
+            start = at;
+            segments.push(Vec::new());
+            next_cut.next();
+        }
+        if start < end {
+            let mut piece = span.clone();
+            piece.text = span.text[start..].to_string();
+            segments.last_mut().unwrap().push(piece);
+        }
+        offset += end;
+    }
+    // Cuts past the end of the text still get their (empty) segment.
+    for _ in next_cut {
+        segments.push(Vec::new());
+    }
+    let last = segments.len() - 1;
+    for segment in &mut segments[..last] {
+        if let Some(span) = segment.last_mut() {
+            if span.text.ends_with('\n') {
+                span.text.pop();
+            }
+        }
+        segment.retain(|s| !s.text.is_empty());
+    }
+    segments
+}
+
+/// Display size of an inline image: the size the program asked for (cells,
+/// pixels or percent), else its pixel size, fitted to the available width and at
+/// most 600 points high, keeping the aspect ratio.
+pub fn inline_image_size(
+    image: &mrt_core::InlineImage,
+    available_width: f32,
+    cell: egui::Vec2,
+    pixels_per_point: f32,
+) -> egui::Vec2 {
+    use mrt_core::ImageSize;
+    let natural = egui::vec2(image.width as f32, image.height as f32) / pixels_per_point.max(0.5);
+    let resolve = |size: Option<ImageSize>, per_cell: f32, full: f32| -> Option<f32> {
+        match size? {
+            ImageSize::Cells(n) => Some(n as f32 * per_cell),
+            ImageSize::Pixels(px) => Some(px as f32 / pixels_per_point.max(0.5)),
+            ImageSize::Percent(p) => Some(full * p as f32 / 100.0),
+        }
+    };
+    let aspect = natural.y / natural.x.max(1.0);
+    let mut size = match (
+        resolve(image.requested_width, cell.x, available_width),
+        resolve(image.requested_height, cell.y, 600.0),
+    ) {
+        (Some(w), Some(h)) => egui::vec2(w, h),
+        (Some(w), None) => egui::vec2(w, w * aspect),
+        (None, Some(h)) => egui::vec2(h / aspect.max(0.0001), h),
+        (None, None) => natural,
+    };
+    let scale = (available_width / size.x.max(1.0)).min(600.0 / size.y.max(1.0)).min(1.0);
+    size *= scale;
+    size.max(egui::vec2(1.0, 1.0))
+}
+
+fn render_inline_image(ui: &mut Ui, block_id: uuid::Uuid, index: usize, image: &mrt_core::InlineImage) {
+    let id = egui::Id::new(("block_image", block_id, index, image.anchor));
+    let texture = match ui.ctx().data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        Some(texture) => texture,
+        None => {
+            let pixels = egui::ColorImage::from_rgba_unmultiplied([image.width as usize, image.height as usize], &image.rgba);
+            let texture = ui.ctx().load_texture(format!("block-image-{block_id}-{index}"), pixels, egui::TextureOptions::LINEAR);
+            ui.ctx().data_mut(|d| d.insert_temp(id, texture.clone()));
+            texture
+        }
+    };
+    let font = egui::TextStyle::Monospace.resolve(ui.style());
+    let cell = egui::vec2(font.size * 0.6, font.size * 1.35);
+    let size = inline_image_size(image, ui.available_width(), cell, ui.ctx().pixels_per_point());
+    ui.add(egui::Image::new((texture.id(), size)))
+        .on_hover_text(format!("{}×{} image", image.width, image.height));
 }
 
 /// The find-in-output highlight for this frame, if the find bar is open.
@@ -1065,6 +1200,44 @@ mod tests {
         let (prefix, tail) = tail_spans(&all, total, 10);
         assert_eq!(prefix, 0);
         assert_eq!(text(&tail), text(&all));
+    }
+
+    #[test]
+    fn split_spans_at_cuts_inside_and_between_spans() {
+        let all = spans(&["ab\n", "cd\nef"]);
+        let parts = split_spans_at(&all, &[3, 5, 8]);
+        let texts: Vec<String> = parts.iter().map(|p| text(p)).collect();
+        assert_eq!(texts, vec!["ab", "cd", "\nef", ""]);
+        let parts = split_spans_at(&all, &[0]);
+        assert_eq!(parts.len(), 2);
+        assert!(parts[0].is_empty());
+        assert_eq!(text(&parts[1]), "ab\ncd\nef");
+    }
+
+    #[test]
+    fn inline_images_fit_the_width_and_honour_requests() {
+        use mrt_core::{ImageSize, InlineImage};
+        let image = |w, h, rw, rh| InlineImage {
+            width: w,
+            height: h,
+            rgba: std::sync::Arc::new(Vec::new()),
+            anchor: 0,
+            requested_width: rw,
+            requested_height: rh,
+        };
+        let cell = egui::vec2(8.0, 16.0);
+        assert_eq!(inline_image_size(&image(200, 100, None, None), 1000.0, cell, 1.0), egui::vec2(200.0, 100.0));
+        assert_eq!(inline_image_size(&image(200, 100, None, None), 1000.0, cell, 2.0), egui::vec2(100.0, 50.0));
+        assert_eq!(inline_image_size(&image(2000, 1000, None, None), 500.0, cell, 1.0), egui::vec2(500.0, 250.0));
+        assert_eq!(
+            inline_image_size(&image(200, 100, Some(ImageSize::Cells(10)), None), 1000.0, cell, 1.0),
+            egui::vec2(80.0, 40.0)
+        );
+        assert_eq!(
+            inline_image_size(&image(200, 100, Some(ImageSize::Percent(50)), None), 1000.0, cell, 1.0),
+            egui::vec2(500.0, 250.0)
+        );
+        assert_eq!(inline_image_size(&image(100, 4000, None, None), 1000.0, cell, 1.0).y, 600.0);
     }
 
     #[test]

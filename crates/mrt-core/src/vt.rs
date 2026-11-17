@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use crate::images::{ApcScanner, DecodedImage, InlineImage, KittyGraphics, SixelDecoder};
 use vte::{Params, Perform};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +70,8 @@ pub struct ParsedAnsi {
     pub spans: Vec<AnsiSpan>,
     pub plain_text: String,
     pub events: Vec<VtEvent>,
+    /// Inline images (iTerm2 OSC 1337, kitty graphics, Sixel), anchored in `plain_text`.
+    pub images: Vec<InlineImage>,
 }
 
 /// Largest OSC 52 payload (decoded bytes) MRT will offer to put on the clipboard.
@@ -80,9 +83,42 @@ pub struct VtParserState {
     current: AnsiSpan,
     pub plain_text: String,
     pub events: Vec<VtEvent>,
+    pub images: Vec<InlineImage>,
+    apc: ApcScanner,
+    kitty: KittyGraphics,
+    sixel: Option<SixelDecoder>,
 }
 
 impl VtParserState {
+    /// Feeds bytes to `parser` and to the APC scanner (kitty graphics), which
+    /// `vte` does not report.
+    fn advance(&mut self, parser: &mut vte::Parser, bytes: &[u8]) {
+        for &byte in bytes {
+            if let Some(apc) = self.apc.advance(byte) {
+                if let Some(result) = self.kitty.handle_apc(&apc) {
+                    self.add_image(result);
+                }
+            }
+            parser.advance(self, byte);
+        }
+    }
+
+    /// Anchors a decoded image at the current end of the text, or writes why it
+    /// could not be shown.
+    fn add_image(&mut self, result: Result<DecodedImage, String>) {
+        match result {
+            Ok(image) => {
+                let anchor = self.plain_text.len();
+                self.images.push(image.anchored(anchor));
+            }
+            Err(reason) => {
+                let note = format!("[image not shown: {reason}]\n");
+                self.current.text.push_str(&note);
+                self.plain_text.push_str(&note);
+            }
+        }
+    }
+
     fn flush_current(&mut self) {
         if !self.current.text.is_empty() {
             self.spans.push(self.current.clone());
@@ -140,6 +176,11 @@ impl VtParserState {
                 } else {
                     Some(uri.to_string())
                 };
+            }
+            b"1337" => {
+                if let Some(result) = crate::images::parse_iterm_file(&rest(1)) {
+                    self.add_image(result);
+                }
             }
             b"52" => {
                 if params.len() < 3 {
@@ -205,7 +246,7 @@ fn percent_decode(input: &str) -> Option<String> {
 
 /// Decodes standard (RFC 4648) base64, ignoring ASCII whitespace.
 /// Returns `None` for any other invalid character or a malformed length.
-fn decode_base64(input: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn decode_base64(input: &[u8]) -> Option<Vec<u8>> {
     fn value(c: u8) -> Option<u32> {
         match c {
             b'A'..=b'Z' => Some((c - b'A') as u32),
@@ -248,6 +289,27 @@ fn decode_base64(input: &[u8]) -> Option<Vec<u8>> {
 impl Perform for VtParserState {
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
         self.handle_osc(params);
+    }
+
+    fn hook(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
+        // DCS P1 ; P2 ; P3 q starts a Sixel image.
+        if action == 'q' && intermediates.is_empty() {
+            let p2 = params.iter().nth(1).and_then(|p| p.first().copied()).unwrap_or(0);
+            self.sixel = Some(SixelDecoder::new(p2));
+        }
+    }
+
+    fn put(&mut self, byte: u8) {
+        if let Some(sixel) = self.sixel.as_mut() {
+            sixel.put(byte);
+        }
+    }
+
+    fn unhook(&mut self) {
+        if let Some(sixel) = self.sixel.take() {
+            let result = sixel.finish();
+            self.add_image(result);
+        }
     }
 
     fn print(&mut self, c: char) {
@@ -346,14 +408,13 @@ pub fn parse_ansi_text(input: &str) -> (Vec<AnsiSpan>, String) {
 pub fn parse_ansi_rich(input: &str) -> ParsedAnsi {
     let mut parser = vte::Parser::new();
     let mut state = VtParserState::default();
-    for byte in input.as_bytes() {
-        parser.advance(&mut state, *byte);
-    }
+    state.advance(&mut parser, input.as_bytes());
     state.flush_current();
     ParsedAnsi {
         spans: state.spans,
         plain_text: state.plain_text,
         events: state.events,
+        images: state.images,
     }
 }
 
@@ -389,14 +450,14 @@ impl VtStream {
     /// starts a new span with the same style. Concatenating the returned spans of
     /// every call gives the same text as [`parse_ansi_rich`] on the whole input.
     pub fn feed(&mut self, chunk: &str) -> ParsedAnsi {
-        for byte in chunk.as_bytes() {
-            self.parser.advance(&mut self.state, *byte);
-        }
+        self.state.advance(&mut self.parser, chunk.as_bytes());
         self.state.flush_current();
+        // Anchors are offsets in the plain text of this chunk.
         ParsedAnsi {
             spans: std::mem::take(&mut self.state.spans),
             plain_text: std::mem::take(&mut self.state.plain_text),
             events: std::mem::take(&mut self.state.events),
+            images: std::mem::take(&mut self.state.images),
         }
     }
 }

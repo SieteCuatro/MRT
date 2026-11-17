@@ -18,6 +18,8 @@ chrono.workspace = true
 uuid.workspace = true
 toml = "1"
 directories = "6"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
+flate2 = "1"
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }

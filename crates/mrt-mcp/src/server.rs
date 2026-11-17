@@ -412,6 +412,7 @@ impl MrtMcpServerState {
                     "properties": {
                         "pty_id": { "type": "string", "description": "UUID of the PTY session" },
                         "view": { "type": "string", "enum": ["output", "screen"], "description": "'output' (default): the program's output as text. 'screen': the visible terminal screen as rows of text plus cursor position, alternate-screen flag and title, rebuilt from the whole session. 'drain' and 'strip_ansi' apply to 'output' only." },
+                        "scrollback_lines": { "type": "integer", "description": "With view 'screen': also return up to this many lines that scrolled off the top of the screen, oldest first (default 0, max 10000)" },
                         "drain": { "type": "boolean", "description": "If true (default), return and clear unread output; if false, return full transcript" },
                         "strip_ansi": { "type": "boolean", "description": "If true (default), strip ANSI escape codes for clean agent reading" },
                         "wait_ms": { "type": "integer", "description": "Optional milliseconds to wait before reading output (default 0)" }
@@ -1695,7 +1696,8 @@ pub async fn execute_mrt_mcp_tool(
             }
             if args.get("view").and_then(|v| v.as_str()) == Some("screen") {
                 let exit_code = pty.try_wait_exit().ok().flatten();
-                let mut payload = pty_screen_view(&pty);
+                let scrollback = args.get("scrollback_lines").and_then(|v| v.as_u64()).unwrap_or(0).min(10_000) as usize;
+                let mut payload = pty_screen_view(&pty, scrollback);
                 payload["pty_id"] = json!(pty_id);
                 payload["running"] = json!(exit_code.is_none());
                 payload["exit_code"] = json!(exit_code);
@@ -2250,16 +2252,25 @@ fn format_processes_delta(
 /// keeping an emulator fed with live output) leaves `drain_output` to the other tools.
 /// A session resized midway is replayed at its final size; full-screen programs
 /// redraw after a resize, so their screen still comes out right.
-fn pty_screen_view(pty: &InteractivePty) -> Value {
+/// The visible screen of a PTY rebuilt from its transcript, plus up to `scrollback`
+/// lines that scrolled off the top (oldest first; the alternate screen has none).
+fn pty_screen_view(pty: &InteractivePty, scrollback: usize) -> Value {
     let (cols, rows) = pty.size();
-    let mut term = mrt_core::TerminalEmulator::new(cols, rows, 0);
-    term.feed(pty.read_transcript().as_bytes());
+    screen_view(&pty.read_transcript(), cols, rows, scrollback)
+}
+
+fn screen_view(transcript: &str, cols: u16, rows: u16, scrollback: usize) -> Value {
+    let mut term = mrt_core::TerminalEmulator::new(cols, rows, scrollback);
+    term.feed(transcript.as_bytes());
     let cursor = term.cursor();
     let screen: Vec<String> = term.screen_text().split('\n').map(str::to_string).collect();
+    let history = term.scrollback_lines();
+    let history: Vec<String> = history[history.len().saturating_sub(scrollback)..].to_vec();
     json!({
         "cols": cols,
         "rows": rows,
         "screen": screen,
+        "scrollback": history,
         "cursor": { "row": cursor.row, "col": cursor.col, "visible": cursor.visible },
         "alt_screen": term.is_alt_screen(),
         "title": term.title(),
@@ -2328,6 +2339,18 @@ pub async fn run_stdio_mcp_server(state: MrtMcpServerState) -> Result<()> {
 #[cfg(test)]
 mod sandbox_tests {
     use super::*;
+
+    #[test]
+    fn screen_view_returns_the_requested_scrollback() {
+        let transcript: String = (0..100).map(|i| format!("line {i}\r\n")).collect();
+        let view = screen_view(&transcript, 40, 10, 5);
+        let screen = view["screen"].as_array().unwrap();
+        assert_eq!(screen.len(), 10);
+        assert_eq!(screen[0], "line 91");
+        let history: Vec<&str> = view["scrollback"].as_array().unwrap().iter().map(|l| l.as_str().unwrap()).collect();
+        assert_eq!(history, vec!["line 86", "line 87", "line 88", "line 89", "line 90"]);
+        assert!(screen_view(&transcript, 40, 10, 0)["scrollback"].as_array().unwrap().is_empty());
+    }
 
     async fn call(state: &MrtMcpServerState, name: &str, arguments: Value) -> (String, bool) {
         let req = JsonRpcRequest {

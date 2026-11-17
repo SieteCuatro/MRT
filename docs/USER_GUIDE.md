@@ -131,6 +131,7 @@ Commands that may be destructive open the **Safety Approval Gate** first (see [C
 | `:toolbox [network\|task-manager\|close]` | Shows the Toolbox panel, opens it on a tab, or hides it. With no argument it toggles. |
 | `:assist [question]` | Asks the assistant to investigate with MRT's read-only tools (blocks, tabs, ports, processes), choosing each next step from the last result. With no question it explains the latest failed command: it finds an earlier successful run of the same command, compares the two outputs and diagnoses. Each step appears in the block; the answer and any suggested fix appear in its AI panel, and **Apply fix** goes through the Safety Gate. Works offline; with an AI provider configured, the model drives the investigation (at most 6 tool calls). |
 | `:sandbox [folder]` | Opens an **agent sandbox tab** rooted at the folder (default: the current one). Its commands always start in that folder, and every command the Safety Gate does not rate Safe asks for approval, even with `safety.enabled = false`. Agents calling `mrt_run_command` on it can only run Safe commands. |
+| `:agents` | Opens (or closes) the **Agent terminals** window: the live screen of every PTY agents started with `mrt_pty_spawn`, drawn like a terminal, read-only. |
 | `:broadcast [on\|off]` | In a split tab, sends keys typed into one pane's program to the program in the other pane too (both panes show a **broadcast** marker). With no argument it toggles. Commands typed in the prompt are not duplicated. |
 | `:ssh <host> [ssh options]` | Opens a **remote tab**: its commands run on the host with blocks, exit codes and the remote folder (see [Remote tabs](#remote-tabs-ssh)). |
 
@@ -266,7 +267,7 @@ Keys a binding consumes are not sent to the shell or TUI program; everything els
 
 ### Copy mode
 
-Inside a full-screen program (`vim`, `htop`, `:tui …`), `Ctrl+Shift+Space` starts **grid copy mode** instead: a cursor over the program's screen that moves with `h` `j` `k` `l` or the arrows, `0` / `$` (line start / end), `g` / `G` and `PgUp` / `PgDn`; `v` starts a selection, `y` or `Enter` copies it (or the cursor's line), `Esc` leaves. While it is on, keys go to MRT, not the program.
+Inside a full-screen program (`vim`, `htop`, `:tui …`), `Ctrl+Shift+Space` starts **grid copy mode** instead: a cursor over the program's screen that moves with `h` `j` `k` `l` or the arrows, `0` / `$` (line start / end), `g` / `G` and `PgUp` / `PgDn`; `v` starts a selection, `y` or `Enter` copies it (or the cursor's line), `Esc` leaves. While it is on, keys go to MRT, not the program. Moving past the top row (or `PgUp` / `PgDn`) scrolls through the program's scrollback. `/` starts a search: type the text and press `Enter` to jump to the newest match (the view scrolls back to it, and the top-right corner shows `/text (2 of 5)`); `n` goes to the next older match and `N` to the next newer one, wrapping around. Leaving copy mode returns to the live screen.
 
 `Ctrl+Shift+Space` starts copy mode on the last line of the active tab's last block. A panel at the bottom shows the lines around the cursor and what is selected; the prompt does not receive keys while it is open.
 

@@ -14,6 +14,9 @@ use mrt_core::TermModes;
 /// letter in a text event right after it. The key event is sent as `ESC letter`, so
 /// that text event is dropped instead of sending the letter twice.
 pub fn encode_events(events: &[Event], modes: &TermModes) -> Vec<u8> {
+    if modes.kitty_keyboard != 0 {
+        return encode_events_kitty(events, modes);
+    }
     let mut out = Vec::new();
     let mut skip_text: Option<char> = None;
     for event in events {
@@ -128,6 +131,167 @@ pub fn encode_key(key: Key, modifiers: Modifiers, modes: &TermModes) -> Option<V
         _ => return None,
     };
     Some(seq.into_bytes())
+}
+
+const KITTY_EVENT_TYPES: u8 = 2;
+const KITTY_ALTERNATE_KEYS: u8 = 4;
+const KITTY_ALL_KEYS: u8 = 8;
+const KITTY_ASSOCIATED_TEXT: u8 = 16;
+
+/// The kitty key code of a key that has one: Unicode for text keys (lowercase),
+/// C0 codes for Enter/Tab/Backspace/Escape.
+fn kitty_code(key: Key) -> Option<u32> {
+    Some(match key {
+        Key::Enter => 13,
+        Key::Tab => 9,
+        Key::Backspace => 127,
+        Key::Escape => 27,
+        Key::Space => 32,
+        other => {
+            let name = other.name();
+            let mut chars = name.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) if !c.is_control() => c.to_ascii_lowercase() as u32,
+                _ => match other {
+                    Key::Minus => '-' as u32,
+                    Key::Equals | Key::Plus => '=' as u32,
+                    Key::Comma => ',' as u32,
+                    Key::Period => '.' as u32,
+                    Key::Semicolon => ';' as u32,
+                    Key::Colon => ';' as u32,
+                    Key::Slash => '/' as u32,
+                    Key::Backslash => '\\' as u32,
+                    Key::OpenBracket => '[' as u32,
+                    Key::CloseBracket => ']' as u32,
+                    Key::Backtick => '`' as u32,
+                    Key::Quote => '\'' as u32,
+                    _ => return None,
+                },
+            }
+        }
+    })
+}
+
+/// A key's sequence under the kitty keyboard protocol (`flags` from the program).
+/// `kind` is 1 press, 2 repeat, 3 release. `None`: nothing to send (or the key is
+/// sent as plain text by its `Event::Text`).
+pub fn encode_key_kitty(key: Key, modifiers: Modifiers, kind: u8, flags: u8) -> Option<Vec<u8>> {
+    let mods = 1 + u8::from(modifiers.shift) + 2 * u8::from(modifiers.alt) + 4 * u8::from(modifiers.ctrl) + 8 * u8::from(modifiers.mac_cmd);
+    let report_events = flags & KITTY_EVENT_TYPES != 0;
+    let all_keys = flags & KITTY_ALL_KEYS != 0;
+    if kind == 3 && !report_events {
+        return None;
+    }
+    let params = |mods: u8| -> String {
+        match (mods, kind) {
+            (1, 1) => String::new(),
+            (m, 1) => format!(";{m}"),
+            (m, k) => format!(";{m}:{k}"),
+        }
+    };
+    // Keys with a legacy CSI form keep it, with the modifier (and event type) parameter.
+    let legacy = |final_char: char| -> Vec<u8> {
+        let p = params(mods);
+        if p.is_empty() {
+            format!("\x1b[{final_char}").into_bytes()
+        } else {
+            format!("\x1b[1{p}{final_char}").into_bytes()
+        }
+    };
+    let tilde = |n: u8| -> Vec<u8> { format!("\x1b[{n}{}~", params(mods)).into_bytes() };
+    match key {
+        Key::ArrowUp => return Some(legacy('A')),
+        Key::ArrowDown => return Some(legacy('B')),
+        Key::ArrowRight => return Some(legacy('C')),
+        Key::ArrowLeft => return Some(legacy('D')),
+        Key::Home => return Some(legacy('H')),
+        Key::End => return Some(legacy('F')),
+        Key::F1 => return Some(legacy('P')),
+        Key::F2 => return Some(legacy('Q')),
+        Key::F3 => return Some(tilde(13)),
+        Key::F4 => return Some(legacy('S')),
+        Key::Insert => return Some(tilde(2)),
+        Key::Delete => return Some(tilde(3)),
+        Key::PageUp => return Some(tilde(5)),
+        Key::PageDown => return Some(tilde(6)),
+        Key::F5 => return Some(tilde(15)),
+        Key::F6 => return Some(tilde(17)),
+        Key::F7 => return Some(tilde(18)),
+        Key::F8 => return Some(tilde(19)),
+        Key::F9 => return Some(tilde(20)),
+        Key::F10 => return Some(tilde(21)),
+        Key::F11 => return Some(tilde(23)),
+        Key::F12 => return Some(tilde(24)),
+        _ => {}
+    }
+    let code = kitty_code(key)?;
+    let is_text = !matches!(code, 9 | 13 | 27 | 127);
+    let only_shift = !(modifiers.ctrl || modifiers.alt || modifiers.mac_cmd);
+    if !all_keys {
+        // Disambiguate: text (also with Shift) stays text; Enter/Tab/Backspace without
+        // modifiers stay legacy; Escape and every modified key become CSI u.
+        if is_text && only_shift {
+            return None;
+        }
+        if !is_text && code != 27 && mods == 1 && kind == 1 {
+            return Some(match code {
+                13 => vec![b'\r'],
+                9 => vec![b'\t'],
+                _ => vec![0x7f],
+            });
+        }
+    }
+    // Flag 4: the shifted form of a letter as an alternate key code (`97:65`).
+    let shifted = (flags & KITTY_ALTERNATE_KEYS != 0 && modifiers.shift && is_text)
+        .then(|| char::from_u32(code).map(|c| c.to_ascii_uppercase() as u32).filter(|u| *u != code))
+        .flatten();
+    let key_field = match shifted {
+        Some(upper) => format!("{code}:{upper}"),
+        None => code.to_string(),
+    };
+    // Flag 16 (with 8): the text the key types, as code points, in a third field.
+    let text = (flags & KITTY_ASSOCIATED_TEXT != 0 && all_keys && kind != 3 && is_text && !(modifiers.ctrl || modifiers.alt || modifiers.mac_cmd))
+        .then(|| shifted.unwrap_or(code));
+    let mut p = params(mods);
+    if let Some(t) = text {
+        if p.is_empty() {
+            p = ";1".to_string();
+        }
+        p.push_str(&format!(";{t}"));
+    }
+    Some(format!("\x1b[{key_field}{p}u").into_bytes())
+}
+
+/// Encodes one frame's input under the kitty keyboard protocol.
+fn encode_events_kitty(events: &[Event], modes: &TermModes) -> Vec<u8> {
+    let flags = modes.kitty_keyboard;
+    let all_keys = flags & KITTY_ALL_KEYS != 0;
+    let mut out = Vec::new();
+    // A key sent as CSI u also arrives as text on some platforms; skip that text.
+    let mut skip_text = false;
+    for event in events {
+        match event {
+            Event::Text(text) => {
+                if all_keys || std::mem::take(&mut skip_text) {
+                    continue;
+                }
+                out.extend_from_slice(text.as_bytes());
+            }
+            Event::Key { key, pressed, repeat, modifiers, .. } => {
+                let kind = if !*pressed { 3 } else if *repeat { 2 } else { 1 };
+                if let Some(bytes) = encode_key_kitty(*key, *modifiers, kind, flags) {
+                    skip_text = kind != 3 && bytes.ends_with(b"u") && kitty_code(*key).is_some_and(|c| !matches!(c, 9 | 13 | 27 | 127));
+                    out.extend(bytes);
+                }
+            }
+            // Ctrl+C / Ctrl+X reach egui only as Copy / Cut.
+            Event::Copy if !cfg!(target_os = "macos") => out.extend(format!("\x1b[99;5u").into_bytes()),
+            Event::Cut if !cfg!(target_os = "macos") => out.extend(format!("\x1b[120;5u").into_bytes()),
+            Event::Paste(text) if !text.is_empty() => out.extend(encode_paste(text, modes)),
+            _ => {}
+        }
+    }
+    out
 }
 
 /// A mouse button the terminal reports.
@@ -479,4 +643,50 @@ mod tests {
         // A pasted end marker cannot close the bracket early.
         assert_eq!(encode_paste("x\x1b[201~y", &bracketed), b"\x1b[200~xy\x1b[201~");
     }
+
+    #[test]
+    fn kitty_keyboard_protocol_encodings() {
+        let none = Modifiers::NONE;
+        let ctrl = Modifiers::CTRL;
+        // Disambiguate (flag 1).
+        assert_eq!(encode_key_kitty(Key::Escape, none, 1, 1), Some(b"\x1b[27u".to_vec()));
+        assert_eq!(encode_key_kitty(Key::A, ctrl, 1, 1), Some(b"\x1b[97;5u".to_vec()));
+        assert_eq!(encode_key_kitty(Key::A, Modifiers::ALT, 1, 1), Some(b"\x1b[97;3u".to_vec()));
+        assert_eq!(encode_key_kitty(Key::A, none, 1, 1), None, "plain text stays text");
+        assert_eq!(encode_key_kitty(Key::Enter, none, 1, 1), Some(b"\r".to_vec()));
+        assert_eq!(encode_key_kitty(Key::Enter, ctrl, 1, 1), Some(b"\x1b[13;5u".to_vec()));
+        assert_eq!(encode_key_kitty(Key::ArrowUp, ctrl, 1, 1), Some(b"\x1b[1;5A".to_vec()));
+        assert_eq!(encode_key_kitty(Key::ArrowUp, none, 1, 1), Some(b"\x1b[A".to_vec()));
+        assert_eq!(encode_key_kitty(Key::F3, none, 1, 1), Some(b"\x1b[13~".to_vec()));
+        assert_eq!(encode_key_kitty(Key::A, ctrl, 3, 1), None, "no releases without flag 2");
+        // Event types (flag 2) and all keys as escape codes (flag 8).
+        assert_eq!(encode_key_kitty(Key::A, none, 1, 1 | 8), Some(b"\x1b[97u".to_vec()));
+        assert_eq!(encode_key_kitty(Key::A, none, 3, 1 | 2 | 8), Some(b"\x1b[97;1:3u".to_vec()));
+        assert_eq!(encode_key_kitty(Key::A, ctrl, 2, 1 | 2), Some(b"\x1b[97;5:2u".to_vec()));
+        assert_eq!(encode_key_kitty(Key::Enter, none, 1, 8), Some(b"\x1b[13u".to_vec()));
+        // Alternate keys (flag 4) and associated text (flag 16).
+        assert_eq!(encode_key_kitty(Key::A, Modifiers::SHIFT, 1, 8 | 4), Some(b"\x1b[97:65;2u".to_vec()));
+        assert_eq!(encode_key_kitty(Key::A, none, 1, 8 | 16), Some(b"\x1b[97;1;97u".to_vec()));
+        assert_eq!(encode_key_kitty(Key::A, Modifiers::SHIFT, 1, 8 | 4 | 16), Some(b"\x1b[97:65;2;65u".to_vec()));
+        assert_eq!(encode_key_kitty(Key::A, ctrl, 1, 8 | 16), Some(b"\x1b[97;5u".to_vec()), "no text with Ctrl");
+    }
+
+    #[test]
+    fn kitty_mode_frames_drop_duplicate_text() {
+        let modes = TermModes { kitty_keyboard: 1, ..TermModes::default() };
+        let events = vec![
+            Event::Key { key: Key::A, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::ALT },
+            Event::Text("a".into()),
+            Event::Text("b".into()),
+            Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE },
+        ];
+        assert_eq!(encode_events(&events, &modes), b"\x1b[97;3ub\x1b[27u".to_vec());
+        let all = TermModes { kitty_keyboard: 9, ..TermModes::default() };
+        let typed = vec![
+            Event::Key { key: Key::B, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE },
+            Event::Text("b".into()),
+        ];
+        assert_eq!(encode_events(&typed, &all), b"\x1b[98u".to_vec(), "with flag 8 text comes only as key codes");
+    }
+
 }

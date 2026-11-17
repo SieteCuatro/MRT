@@ -264,6 +264,11 @@ pub struct TermModes {
     pub alternate_scroll: bool,
     /// The alternate screen (mode 1049/47/1047) is active.
     pub alt_screen: bool,
+    /// Kitty keyboard protocol flags the program enabled (`CSI > flags u`): 1
+    /// disambiguate, 2 report event types, 4 alternate keys, 8 all keys as escape
+    /// codes, 16 associated text. `0` means legacy xterm keys.
+    #[serde(default)]
+    pub kitty_keyboard: u8,
 }
 
 /// A copy of the visible screen at one moment.
@@ -382,6 +387,8 @@ pub struct TerminalEmulator {
     images: Vec<crate::grid_images::GridImage>,
     next_image_id: u64,
     images_on_alt_screen: bool,
+    /// Lines the view is scrolled back into the history (0 = the live screen).
+    view_offset: usize,
 }
 
 /// Most images kept per emulator; older ones are dropped.
@@ -414,6 +421,9 @@ impl TerminalEmulator {
             // Never let a program read or overwrite the clipboard through the
             // terminal; MRT can opt in later with an explicit setting.
             osc52: Osc52::Disabled,
+            // Programs may turn on the kitty keyboard protocol (CSI > flags u); the
+            // window encodes keys accordingly (`TermModes::kitty_keyboard`).
+            kitty_keyboard: true,
             ..Config::default()
         };
         let size = GridSize {
@@ -430,12 +440,23 @@ impl TerminalEmulator {
             images: Vec::new(),
             next_image_id: 0,
             images_on_alt_screen: false,
+            view_offset: 0,
         }
     }
 
     /// Feeds raw PTY output into the emulator. Inline images (iTerm2, kitty, Sixel)
     /// are placed at the cursor ([`images_on_screen`](Self::images_on_screen)).
     pub fn feed(&mut self, bytes: &[u8]) {
+        let history_before = self.scrollback_len();
+        self.feed_inner(bytes);
+        // A view scrolled into the history stays on the same lines while output arrives.
+        if self.view_offset > 0 {
+            let grown = self.scrollback_len().saturating_sub(history_before);
+            self.view_offset = (self.view_offset + grown).min(self.scrollback_len());
+        }
+    }
+
+    fn feed_inner(&mut self, bytes: &[u8]) {
         self.flush_expired_sync();
         for segment in self.graphics.split(bytes) {
             match segment {
@@ -483,7 +504,7 @@ impl TerminalEmulator {
     /// Images that are at least partly on the visible screen. `row` is relative to the
     /// top of the screen and may be negative for an image scrolled partly off it.
     pub fn images_on_screen(&self) -> Vec<crate::grid_images::GridImagePlacement> {
-        let top = self.scrollback_len() as i64;
+        let top = self.scrollback_len() as i64 - self.view_offset as i64;
         let rows = self.rows() as i64;
         self.images
             .iter()
@@ -619,6 +640,17 @@ impl TerminalEmulator {
             focus_reporting: mode.contains(TermMode::FOCUS_IN_OUT),
             alternate_scroll: mode.contains(TermMode::ALTERNATE_SCROLL),
             alt_screen: mode.contains(TermMode::ALT_SCREEN),
+            kitty_keyboard: [
+                (TermMode::DISAMBIGUATE_ESC_CODES, 1u8),
+                (TermMode::REPORT_EVENT_TYPES, 2),
+                (TermMode::REPORT_ALTERNATE_KEYS, 4),
+                (TermMode::REPORT_ALL_KEYS_AS_ESC, 8),
+                (TermMode::REPORT_ASSOCIATED_TEXT, 16),
+            ]
+            .iter()
+            .filter(|(flag, _)| mode.contains(*flag))
+            .map(|(_, bit)| bit)
+            .sum(),
         }
     }
 
@@ -632,16 +664,66 @@ impl TerminalEmulator {
         (row < self.rows()).then(|| self.line_cells(Line(row as i32)))
     }
 
-    /// A copy of the visible screen, cursor, modes and title.
+    /// Lines the view is scrolled back into the history (0 = the live screen).
+    pub fn view_offset(&self) -> usize {
+        self.view_offset
+    }
+
+    /// Scrolls the view `lines` into the history (clamped; 0 shows the live screen).
+    /// [`snapshot`](Self::snapshot) and the image placements follow it.
+    pub fn set_view_offset(&mut self, lines: usize) {
+        self.view_offset = lines.min(self.scrollback_len());
+    }
+
+    /// Every case-insensitive match of `query` in the history and the screen, as
+    /// `(line, column)` where line 0 is the oldest history line, oldest first.
+    pub fn search(&self, query: &str) -> Vec<(usize, u16)> {
+        let needle: Vec<char> = query.to_lowercase().chars().collect();
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let history = self.scrollback_len();
+        let mut found = Vec::new();
+        for index in 0..history + self.rows() as usize {
+            let text: Vec<char> = self.line_text(Line(index as i32 - history as i32)).to_lowercase().chars().collect();
+            if text.len() < needle.len() {
+                continue;
+            }
+            for col in 0..=text.len() - needle.len() {
+                if text[col..col + needle.len()] == needle[..] {
+                    found.push((index, col as u16));
+                }
+            }
+        }
+        found
+    }
+
+    /// Scrolls the view so history line `index` (0 = oldest) is visible, near the
+    /// middle; returns the row it is shown on.
+    pub fn reveal_line(&mut self, index: usize) -> u16 {
+        let history = self.scrollback_len() as i64;
+        let rows = self.rows() as i64;
+        let offset = (history - index as i64 + rows / 2).clamp(0, history);
+        self.view_offset = offset as usize;
+        (index as i64 - history + offset).clamp(0, rows - 1) as u16
+    }
+
+    /// A copy of the visible screen (scrolled back by the view offset), cursor, modes
+    /// and title. The cursor is hidden while the view is in the history.
     pub fn snapshot(&self) -> TermSnapshot {
         let rows = self.rows();
+        let offset = self.view_offset as i32;
+        let mut cursor = self.cursor();
+        if offset > 0 {
+            cursor.visible = false;
+        }
         TermSnapshot {
             cols: self.cols(),
             rows,
             cells: (0..rows as i32)
-                .map(|row| self.line_cells(Line(row)))
+                .map(|row| self.line_cells(Line(row - offset)))
                 .collect(),
-            cursor: self.cursor(),
+            cursor,
             modes: self.modes(),
             title: self.title(),
         }
@@ -789,6 +871,48 @@ fn convert_cell(cell: &Cell) -> TermCell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_and_scroll_back_through_the_history() {
+        let mut term = TerminalEmulator::new(40, 5, 1000);
+        for i in 0..50 {
+            term.feed(format!("row {i:02}{}\r\n", if i == 7 { " NEEDLE" } else { "" }).as_bytes());
+        }
+        let found = term.search("needle");
+        assert_eq!(found.len(), 1);
+        let (line, col) = found[0];
+        assert_eq!(col, 7);
+        let row = term.reveal_line(line);
+        assert!(term.view_offset() > 0);
+        let snap = term.snapshot();
+        let text: String = snap.cells[row as usize].iter().map(|c| c.ch).collect();
+        assert!(text.contains("row 07 NEEDLE"), "{text}");
+        assert!(!snap.cursor.visible, "no cursor while looking at the history");
+        // Output keeps the view on the same lines.
+        let offset = term.view_offset();
+        term.feed(b"more\r\n");
+        assert_eq!(term.view_offset(), offset + 1);
+        term.set_view_offset(0);
+        assert!(term.snapshot().cursor.visible);
+        assert!(term.search("").is_empty());
+    }
+
+    #[test]
+    fn programs_can_turn_on_the_kitty_keyboard_protocol() {
+        let mut term = TerminalEmulator::new(80, 24, 100);
+        assert_eq!(term.modes().kitty_keyboard, 0);
+        term.feed(b"\x1b[>1u");
+        assert_eq!(term.modes().kitty_keyboard, 1);
+        term.feed(b"\x1b[?u");
+        let reply = String::from_utf8(term.take_replies()).unwrap();
+        assert_eq!(reply, "\x1b[?1u", "the program can ask which flags are on");
+        term.feed(b"\x1b[>11u");
+        assert_eq!(term.modes().kitty_keyboard, 11);
+        term.feed(b"\x1b[<u");
+        assert_eq!(term.modes().kitty_keyboard, 1, "popping restores the previous flags");
+        term.feed(b"\x1b[<u");
+        assert_eq!(term.modes().kitty_keyboard, 0);
+    }
 
     fn png(w: u32, h: u32) -> String {
         let mut out = Vec::new();

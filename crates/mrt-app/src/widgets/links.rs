@@ -87,10 +87,10 @@ pub fn render_spans_with_links(
             if matches.iter().any(|m| m.start <= a && b <= m.end) {
                 let is_current = current_match.as_ref().is_some_and(|m| m.start <= a && b <= m.end);
                 if is_current {
-                    format.background = Palette::ACCENT_AMBER;
-                    format.color = Palette::ON_ACCENT;
+                    format.background = Palette::ACCENT_AMBER();
+                    format.color = Palette::ON_ACCENT();
                 } else {
-                    format.background = Palette::ACCENT_AMBER.gamma_multiply(0.35);
+                    format.background = Palette::ACCENT_AMBER().gamma_multiply(0.35);
                 }
             }
             job.append(&text[a..b], 0.0, format);
@@ -157,7 +157,7 @@ pub fn render_spans_with_links(
             ui.label(
                 egui::RichText::new(format!("Could not open link: {err}"))
                     .size(11.5)
-                    .color(Palette::ACCENT_RED),
+                    .color(Palette::ACCENT_RED()),
             );
             if ui.small_button("✕").clicked() {
                 ui.ctx().data_mut(|d| d.remove::<String>(error_id));
@@ -171,9 +171,9 @@ fn span_format(span: &AnsiSpan, style: &SpanStyle, in_link: bool) -> egui::TextF
     let mut fg = span
         .fg
         .map(|c| Color32::from_rgb(c.r, c.g, c.b))
-        .unwrap_or(Palette::TEXT_BODY);
+        .unwrap_or(Palette::TEXT_BODY());
     if in_link && span.fg.is_none() {
-        fg = Palette::ACCENT_TEXT;
+        fg = Palette::ACCENT_TEXT();
     }
     let background = match span.bg {
         Some(c) if style.backgrounds => Color32::from_rgb(c.r, c.g, c.b),

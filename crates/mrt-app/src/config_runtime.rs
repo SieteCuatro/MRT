@@ -30,6 +30,8 @@ pub struct ConfigState {
     pub style_dirty: bool,
     /// Fonts last installed in the egui context; reinstalled when the config changes them.
     applied_fonts: Option<crate::fonts::FontPrefs>,
+    /// `terminal.theme` last applied (outer `None`: not applied yet).
+    applied_theme: Option<Option<String>>,
 }
 
 impl ConfigState {
@@ -45,6 +47,7 @@ impl ConfigState {
             notice: None,
             style_dirty: true,
             applied_fonts: None,
+            applied_theme: None,
         };
         state.reload();
         state
@@ -180,6 +183,31 @@ impl MrtGuiApp {
             }
             self.config_state.applied_fonts = Some(prefs);
         }
+        let theme_setting = self.config_state.config.terminal.theme.clone();
+        if self.config_state.applied_theme.as_ref() != Some(&theme_setting) {
+            let config_dir = self.config_state.sources.user.as_deref().and_then(|p| p.parent()).map(|p| p.to_path_buf());
+            match crate::theme::resolve_theme(theme_setting.as_deref(), config_dir.as_deref()) {
+                Ok(theme) => {
+                    crate::theme::set_theme_colors(theme.colors);
+                    mrt_core::set_ansi_palette(theme.ansi);
+                    if !theme.unknown_keys.is_empty() {
+                        self.config_state.notice = Some(ConfigNotice {
+                            text: format!("Config: theme \"{}\" sets unknown colors: {}.", theme.name, theme.unknown_keys.join(", ")),
+                            is_error: false,
+                        });
+                    }
+                }
+                Err(error) => {
+                    crate::theme::set_theme_colors(crate::theme::GRAPHITE_CALM);
+                    mrt_core::set_ansi_palette(None);
+                    self.config_state.notice = Some(ConfigNotice { text: format!("Config: {error}; using graphite-calm."), is_error: false });
+                }
+            }
+            // Widget visuals are built from the palette, so rebuild them.
+            crate::theme::apply_mrt_theme(ctx);
+            self.config_state.applied_theme = Some(theme_setting);
+            self.config_state.style_dirty = true;
+        }
         if self.config_state.style_dirty {
             self.config_state.style_dirty = false;
             let size = self.config_state.config.terminal.effective_font_size();
@@ -197,15 +225,15 @@ impl MrtGuiApp {
             return;
         };
         let color = if notice.is_error {
-            Palette::ACCENT_RED
+            Palette::ACCENT_RED()
         } else {
-            Palette::ACCENT_AMBER
+            Palette::ACCENT_AMBER()
         };
         let mut dismiss = false;
         egui::TopBottomPanel::top("mrt_config_notice")
             .frame(
                 egui::Frame::none()
-                    .fill(Palette::BG_SURFACE)
+                    .fill(Palette::BG_SURFACE())
                     .inner_margin(egui::Margin::symmetric(20.0, 6.0)),
             )
             .show(ctx, |ui| {

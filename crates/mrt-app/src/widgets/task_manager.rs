@@ -162,7 +162,7 @@ impl TaskManagerState {
 fn sparkline(ui: &mut Ui, values: impl Iterator<Item = f32>, max: f32, size: egui::Vec2, color: Color32) {
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 3.0, Palette::BG_INSET);
+    painter.rect_filled(rect, 3.0, Palette::BG_INSET());
     let values: Vec<f32> = values.collect();
     if values.len() < 2 || max <= 0.0 {
         return;
@@ -182,11 +182,11 @@ fn sparkline(ui: &mut Ui, values: impl Iterator<Item = f32>, max: f32, size: egu
 
 fn cpu_color(cpu: f32) -> Color32 {
     if cpu >= 50.0 {
-        Palette::ACCENT_RED
+        Palette::ACCENT_RED()
     } else if cpu >= 15.0 {
-        Palette::ACCENT_AMBER
+        Palette::ACCENT_AMBER()
     } else {
-        Palette::ACCENT_GREEN
+        Palette::ACCENT_GREEN()
     }
 }
 
@@ -202,7 +202,7 @@ pub fn render_task_manager_tab(
     ui.label(
         RichText::new("Running processes, CPU and memory. Stopping a process goes through the Safety Gate.")
             .size(11.5)
-            .color(Palette::TEXT_SECONDARY),
+            .color(Palette::TEXT_SECONDARY()),
     );
     ui.add_space(4.0);
 
@@ -210,10 +210,10 @@ pub fn render_task_manager_tab(
     ui.horizontal_wrapped(|ui| {
         match &state.snapshot {
             Some(snap) => {
-                ui.label(RichText::new(snapshot_summary(snap, shown)).size(12.0).color(Palette::TEXT_BODY));
+                ui.label(RichText::new(snapshot_summary(snap, shown)).size(12.0).color(Palette::TEXT_BODY()));
             }
             None => {
-                ui.label(RichText::new("Loading processes…").size(12.0).color(Palette::TEXT_MUTED));
+                ui.label(RichText::new("Loading processes…").size(12.0).color(Palette::TEXT_MUTED()));
             }
         }
         if state.refreshing {
@@ -221,7 +221,7 @@ pub fn render_task_manager_tab(
         }
     });
     if let Some(err) = &state.error {
-        ui.colored_label(Palette::ACCENT_RED, err);
+        ui.colored_label(Palette::ACCENT_RED(), err);
     }
 
     ui.add(
@@ -285,7 +285,7 @@ pub fn render_task_manager_tab(
                     .spacing([8.0, 3.0])
                     .show(ui, |ui| {
                         for h in ["Name", "PID", "CPU", "", "Memory"] {
-                            ui.label(RichText::new(h).size(11.5).strong().color(Palette::TEXT_MUTED));
+                            ui.label(RichText::new(h).size(11.5).strong().color(Palette::TEXT_MUTED()));
                         }
                         ui.end_row();
                         for row in rows.iter().take(MAX_VISIBLE_ROWS) {
@@ -297,9 +297,9 @@ pub fn render_task_manager_tab(
                             };
                             let mut name = RichText::new(format!("{indent}{}", e.name)).size(12.5);
                             name = if row.owner.is_some() {
-                                name.color(Palette::ACCENT_TEXT)
+                                name.color(Palette::ACCENT_TEXT())
                             } else {
-                                name.color(Palette::TEXT_PRIMARY)
+                                name.color(Palette::TEXT_PRIMARY())
                             };
                             let resp = ui
                                 .selectable_label(selected == Some(e.pid), name)
@@ -311,7 +311,7 @@ pub fn render_task_manager_tab(
                             if resp.clicked() {
                                 clicked_pid = Some(e.pid);
                             }
-                            ui.label(RichText::new(e.pid.to_string()).monospace().size(12.0).color(Palette::TEXT_SECONDARY));
+                            ui.label(RichText::new(e.pid.to_string()).monospace().size(12.0).color(Palette::TEXT_SECONDARY()));
                             ui.label(
                                 RichText::new(format!("{:.1}%", e.cpu_percent))
                                     .monospace()
@@ -330,7 +330,7 @@ pub fn render_task_manager_tab(
                                 egui::vec2(46.0, 14.0),
                                 cpu_color(e.cpu_percent),
                             );
-                            ui.label(RichText::new(format_bytes(e.memory_bytes)).monospace().size(12.0).color(Palette::TEXT_BODY));
+                            ui.label(RichText::new(format_bytes(e.memory_bytes)).monospace().size(12.0).color(Palette::TEXT_BODY()));
                             ui.end_row();
                         }
                     });
@@ -339,7 +339,7 @@ pub fn render_task_manager_tab(
                     ui.label(
                         RichText::new(format!("{} more — narrow the filter to see them", total - MAX_VISIBLE_ROWS))
                             .size(11.5)
-                            .color(Palette::TEXT_MUTED),
+                            .color(Palette::TEXT_MUTED()),
                     );
                 }
             });
@@ -353,7 +353,7 @@ pub fn render_task_manager_tab(
         ui.separator();
         match snap.get(pid) {
             None => {
-                ui.label(RichText::new(format!("PID {pid} is no longer running.")).color(Palette::TEXT_MUTED));
+                ui.label(RichText::new(format!("PID {pid} is no longer running.")).color(Palette::TEXT_MUTED()));
                 if ui.small_button("Clear selection").clicked() {
                     state.selected_pid = None;
                 }
@@ -365,10 +365,10 @@ pub fn render_task_manager_tab(
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         ui.horizontal_wrapped(|ui| {
-                            ui.label(RichText::new(&e.name).size(14.0).strong().color(Palette::TEXT_PRIMARY));
-                            ui.label(RichText::new(format!("PID {}", e.pid)).monospace().size(12.0).color(Palette::TEXT_SECONDARY));
+                            ui.label(RichText::new(&e.name).size(14.0).strong().color(Palette::TEXT_PRIMARY()));
+                            ui.label(RichText::new(format!("PID {}", e.pid)).monospace().size(12.0).color(Palette::TEXT_SECONDARY()));
                             if let Some(owner) = &owner {
-                                chip(ui, &format!("MRT · {owner}"), Color32::from_rgb(34, 38, 58), Palette::ACCENT_TEXT);
+                                chip(ui, &format!("MRT · {owner}"), Color32::from_rgb(34, 38, 58), Palette::ACCENT_TEXT());
                             }
                             if mrt_core::is_protected_process_name(&e.name) || e.pid <= 4 {
                                 chip(ui, "OS-critical", Color32::from_rgb(74, 31, 31), Color32::from_rgb(252, 165, 165));
@@ -378,11 +378,11 @@ pub fn render_task_manager_tab(
                             RichText::new(&e.command_line)
                                 .monospace()
                                 .size(11.5)
-                                .color(Palette::TEXT_BODY),
+                                .color(Palette::TEXT_BODY()),
                         );
                         ui.horizontal_wrapped(|ui| {
                             let parent = e.parent_pid.and_then(|pp| snap.get(pp));
-                            ui.label(RichText::new("Parent:").size(11.5).color(Palette::TEXT_MUTED));
+                            ui.label(RichText::new("Parent:").size(11.5).color(Palette::TEXT_MUTED()));
                             match (e.parent_pid, parent) {
                                 (Some(pp), Some(p)) => {
                                     if ui.link(format!("{} ({pp})", p.name)).clicked() {
@@ -390,10 +390,10 @@ pub fn render_task_manager_tab(
                                     }
                                 }
                                 (Some(pp), None) => {
-                                    ui.label(RichText::new(pp.to_string()).size(11.5).color(Palette::TEXT_SECONDARY));
+                                    ui.label(RichText::new(pp.to_string()).size(11.5).color(Palette::TEXT_SECONDARY()));
                                 }
                                 _ => {
-                                    ui.label(RichText::new("none").size(11.5).color(Palette::TEXT_SECONDARY));
+                                    ui.label(RichText::new("none").size(11.5).color(Palette::TEXT_SECONDARY()));
                                 }
                             }
                             ui.label(
@@ -404,7 +404,7 @@ pub fn render_task_manager_tab(
                                     mrt_tools::process_inspector::format_duration(e.run_time_secs)
                                 ))
                                 .size(11.5)
-                                .color(Palette::TEXT_SECONDARY),
+                                .color(Palette::TEXT_SECONDARY()),
                             );
                         });
                         ui.horizontal(|ui| {
@@ -419,7 +419,7 @@ pub fn render_task_manager_tab(
                             ui.label(
                                 RichText::new(format!("Mem {}", format_bytes(e.memory_bytes)))
                                     .size(11.5)
-                                    .color(Palette::TEXT_BODY),
+                                    .color(Palette::TEXT_BODY()),
                             );
                             let mem = state.mem_history.get(&pid);
                             let mem_peak = mem.map(|h| h.iter().cloned().max().unwrap_or(0)).unwrap_or(0) as f32;
@@ -428,7 +428,7 @@ pub fn render_task_manager_tab(
                                 mem.into_iter().flatten().map(|v| *v as f32),
                                 mem_peak,
                                 egui::vec2(90.0, 18.0),
-                                Palette::ACCENT,
+                                Palette::ACCENT(),
                             );
                         });
                         let children = snap.children_of(pid).len();
@@ -437,21 +437,21 @@ pub fn render_task_manager_tab(
                             ui.label(
                                 RichText::new(format!("{children} child process(es) · listening:"))
                                     .size(11.5)
-                                    .color(Palette::TEXT_MUTED),
+                                    .color(Palette::TEXT_MUTED()),
                             );
                             if listening.is_empty() {
                                 ui.label(
                                     RichText::new(if ports.is_empty() { "scan ports to check" } else { "none" })
                                         .size(11.5)
-                                        .color(Palette::TEXT_SECONDARY),
+                                        .color(Palette::TEXT_SECONDARY()),
                                 );
                             }
                             for p in &listening {
                                 chip(
                                     ui,
                                     &format!("{} :{}", p.protocol, p.port),
-                                    Palette::BG_OVERLAY,
-                                    Palette::TEXT_BODY,
+                                    Palette::BG_OVERLAY(),
+                                    Palette::TEXT_BODY(),
                                 );
                             }
                             if ui.small_button("Scan ports").clicked() {

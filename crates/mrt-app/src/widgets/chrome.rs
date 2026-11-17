@@ -10,19 +10,19 @@ use egui::{Align2, Color32, FontId, Rect, Response, Rounding, Sense, Stroke, Ui}
 pub fn brand_mark(ui: &mut Ui, size: f32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), Sense::hover());
     let painter = ui.painter();
-    painter.rect_filled(rect, Rounding::same(Radius::ICON), Palette::ACCENT);
+    painter.rect_filled(rect, Rounding::same(Radius::ICON), Palette::ACCENT());
     painter.text(
         rect.center(),
         Align2::CENTER_CENTER,
         "›_",
         FontId::monospace(size * 0.5),
-        Palette::ON_ACCENT,
+        Palette::ON_ACCENT(),
     );
 }
 
 fn row_background(ui: &Ui, rect: Rect, response: &Response, selected: bool) {
     let fill = if selected {
-        Palette::BG_SELECTED
+        Palette::BG_SELECTED()
     } else if response.hovered() {
         Color32::from_rgb(28, 28, 32)
     } else {
@@ -46,9 +46,9 @@ pub fn nav_row(
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 36.0), Sense::click());
     row_background(ui, rect, &response, selected);
     let text_color = if selected {
-        Palette::TEXT_PRIMARY
+        Palette::TEXT_PRIMARY()
     } else {
-        Palette::TEXT_BODY
+        Palette::TEXT_BODY()
     };
     let painter = ui.painter();
     if compact {
@@ -66,7 +66,7 @@ pub fn nav_row(
         Align2::CENTER_CENTER,
         icon,
         FontId::proportional(15.0),
-        Palette::TEXT_SECONDARY,
+        Palette::TEXT_SECONDARY(),
     );
     painter.text(
         egui::pos2(rect.left() + 42.0, rect.center().y),
@@ -81,7 +81,7 @@ pub fn nav_row(
             Align2::RIGHT_CENTER,
             trailing,
             FontId::proportional(12.0),
-            Palette::TEXT_MUTED,
+            Palette::TEXT_MUTED(),
         );
     }
     response
@@ -119,9 +119,9 @@ pub fn tab_row(
             initial,
             FontId::proportional(14.0),
             if active {
-                Palette::TEXT_PRIMARY
+                Palette::TEXT_PRIMARY()
             } else {
-                Palette::TEXT_SECONDARY
+                Palette::TEXT_SECONDARY()
             },
         );
         paint_activity_indicator(
@@ -152,31 +152,31 @@ pub fn tab_row(
         title.to_owned(),
         FontId::proportional(14.0),
         if active {
-            Palette::TEXT_PRIMARY
+            Palette::TEXT_PRIMARY()
         } else {
-            Palette::TEXT_BODY
+            Palette::TEXT_BODY()
         },
         max_text,
     );
     painter.galley(
         egui::pos2(text_left, rect.top() + 6.0),
         title_galley,
-        Palette::TEXT_PRIMARY,
+        Palette::TEXT_PRIMARY(),
     );
     let subtitle_galley = painter.layout(
         subtitle.to_owned(),
         FontId::proportional(12.0),
         if active {
-            Palette::TEXT_SECONDARY
+            Palette::TEXT_SECONDARY()
         } else {
-            Palette::TEXT_MUTED
+            Palette::TEXT_MUTED()
         },
         max_text,
     );
     painter.galley(
         egui::pos2(text_left, rect.top() + 25.0),
         subtitle_galley,
-        Palette::TEXT_MUTED,
+        Palette::TEXT_MUTED(),
     );
 
     let close_rect = Rect::from_center_size(
@@ -202,14 +202,14 @@ pub fn tab_row(
             .map(|p| close_rect.contains(p))
             .unwrap_or(false);
         if pointer_on_close {
-            painter.rect_filled(close_rect, Rounding::same(6.0), Palette::BG_OVERLAY);
+            painter.rect_filled(close_rect, Rounding::same(6.0), Palette::BG_OVERLAY());
         }
         painter.text(
             close_rect.center(),
             Align2::CENTER_CENTER,
             "×",
             FontId::proportional(16.0),
-            Palette::TEXT_SECONDARY,
+            Palette::TEXT_SECONDARY(),
         );
         if response.clicked() && pointer_on_close {
             close = true;
@@ -230,30 +230,30 @@ pub fn search_pill(ui: &mut Ui, width: f32, placeholder: &str, shortcut: &str) -
         rect,
         Rounding::same(Radius::BUTTON),
         if response.hovered() {
-            Palette::BG_ELEVATED
+            Palette::BG_ELEVATED()
         } else {
-            Palette::BG_PANEL
+            Palette::BG_PANEL()
         },
-        Stroke::new(1.0_f32, Palette::BORDER_SUBTLE),
+        Stroke::new(1.0_f32, Palette::BORDER_SUBTLE()),
     );
     painter.text(
         egui::pos2(rect.left() + 16.0, rect.center().y),
         Align2::CENTER_CENTER,
         "🔍",
         FontId::proportional(12.0),
-        Palette::TEXT_MUTED,
+        Palette::TEXT_MUTED(),
     );
     painter.text(
         egui::pos2(rect.left() + 32.0, rect.center().y),
         Align2::LEFT_CENTER,
         placeholder,
         FontId::proportional(13.0),
-        Palette::TEXT_MUTED,
+        Palette::TEXT_MUTED(),
     );
     let kbd = painter.layout_no_wrap(
         shortcut.to_owned(),
         FontId::proportional(11.0),
-        Palette::TEXT_SECONDARY,
+        Palette::TEXT_SECONDARY(),
     );
     let kbd_rect = Rect::from_min_size(
         egui::pos2(
@@ -262,11 +262,11 @@ pub fn search_pill(ui: &mut Ui, width: f32, placeholder: &str, shortcut: &str) -
         ),
         kbd.size() + egui::vec2(12.0, 4.0),
     );
-    painter.rect_filled(kbd_rect, Rounding::same(6.0), Palette::BG_OVERLAY);
+    painter.rect_filled(kbd_rect, Rounding::same(6.0), Palette::BG_OVERLAY());
     painter.galley(
         kbd_rect.min + egui::vec2(6.0, 2.0),
         kbd,
-        Palette::TEXT_SECONDARY,
+        Palette::TEXT_SECONDARY(),
     );
     response.on_hover_text("Open the command palette")
 }
@@ -290,13 +290,13 @@ pub fn palette_row(ui: &mut Ui, icon: &str, title: &str, hint: &str) -> Response
         icon,
         FontId::proportional(14.0),
         if highlighted {
-            Palette::ACCENT_TEXT
+            Palette::ACCENT_TEXT()
         } else {
-            Palette::TEXT_SECONDARY
+            Palette::TEXT_SECONDARY()
         },
     );
     let hint_galley =
-        painter.layout_no_wrap(hint.to_owned(), FontId::monospace(12.0), Palette::TEXT_MUTED);
+        painter.layout_no_wrap(hint.to_owned(), FontId::monospace(12.0), Palette::TEXT_MUTED());
     let hint_width = hint_galley.size().x;
     painter.galley(
         egui::pos2(
@@ -304,22 +304,22 @@ pub fn palette_row(ui: &mut Ui, icon: &str, title: &str, hint: &str) -> Response
             rect.center().y - hint_galley.size().y / 2.0,
         ),
         hint_galley,
-        Palette::TEXT_MUTED,
+        Palette::TEXT_MUTED(),
     );
     let title_galley = painter.layout(
         title.to_owned(),
         FontId::proportional(14.0),
         if highlighted {
-            Palette::TEXT_PRIMARY
+            Palette::TEXT_PRIMARY()
         } else {
-            Palette::TEXT_BODY
+            Palette::TEXT_BODY()
         },
         (rect.width() - 80.0 - hint_width).max(60.0),
     );
     painter.galley(
         egui::pos2(rect.left() + 40.0, rect.center().y - title_galley.size().y / 2.0),
         title_galley,
-        Palette::TEXT_PRIMARY,
+        Palette::TEXT_PRIMARY(),
     );
     response
 }

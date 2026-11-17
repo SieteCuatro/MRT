@@ -53,13 +53,13 @@ pub fn render_command_block(
     }
 
     egui::Frame::none()
-        .fill(Palette::BG_SURFACE)
+        .fill(Palette::BG_SURFACE())
         .stroke(egui::Stroke::new(
             1.0_f32,
             if failed {
-                Palette::FAILED_BORDER
+                Palette::FAILED_BORDER()
             } else {
-                Palette::BORDER_FAINT
+                Palette::BORDER_FAINT()
             },
         ))
         .rounding(egui::Rounding::same(Radius::BLOCK))
@@ -128,7 +128,7 @@ pub fn render_command_block(
                                 egui::Button::new(
                                     RichText::new("✨ Diagnose")
                                         .size(12.5)
-                                        .color(Palette::ACCENT_TEXT),
+                                        .color(Palette::ACCENT_TEXT()),
                                 )
                                 .frame(false)
                                 .min_size(egui::vec2(0.0, 28.0)),
@@ -149,7 +149,7 @@ pub fn render_command_block(
                         ),
                         None => "running".to_string(),
                     };
-                    ui.label(RichText::new(meta).size(12.0).color(Palette::TEXT_MUTED))
+                    ui.label(RichText::new(meta).size(12.0).color(Palette::TEXT_MUTED()))
                         .on_hover_text(format!(
                             "{} · {} · {}",
                             block.shell_name,
@@ -172,22 +172,22 @@ pub fn render_command_block(
                             .next()
                             .unwrap_or("Data")
                             .to_owned();
-                        chip(ui, &badge, Color32::from_rgb(34, 38, 58), Palette::ACCENT_TEXT);
+                        chip(ui, &badge, Color32::from_rgb(34, 38, 58), Palette::ACCENT_TEXT());
                     }
 
                     ui.add_space(8.0);
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         match block.exit_code {
                             Some(0) => {
-                                ui.label(RichText::new("✔").size(14.0).color(Palette::ACCENT_GREEN))
+                                ui.label(RichText::new("✔").size(14.0).color(Palette::ACCENT_GREEN()))
                                     .on_hover_text("Succeeded");
                             }
                             Some(_) => {
-                                ui.label(RichText::new("✖").size(14.0).color(Palette::ACCENT_RED))
+                                ui.label(RichText::new("✖").size(14.0).color(Palette::ACCENT_RED()))
                                     .on_hover_text("Failed");
                             }
                             None => {
-                                ui.add(egui::Spinner::new().size(14.0).color(Palette::ACCENT));
+                                ui.add(egui::Spinner::new().size(14.0).color(Palette::ACCENT()));
                             }
                         }
                         ui.add(
@@ -195,7 +195,7 @@ pub fn render_command_block(
                                 RichText::new(&block.command)
                                     .monospace()
                                     .size(13.5)
-                                    .color(Palette::TEXT_PRIMARY),
+                                    .color(Palette::TEXT_PRIMARY()),
                             )
                             .truncate(),
                         )
@@ -217,7 +217,7 @@ pub fn render_command_block(
                     match (&block.view_mode, &block.structured) {
                         (ViewMode::Structured, StructuredOutput::Json(val)) => {
                             egui::Frame::none()
-                                .fill(Palette::BG_INSET)
+                                .fill(Palette::BG_INSET())
                                 .rounding(egui::Rounding::same(Radius::BUTTON))
                                 .inner_margin(egui::Margin::symmetric(14.0, 10.0))
                                 .show(ui, |ui| {
@@ -249,31 +249,31 @@ pub fn render_command_block(
                     if let Some(ref explanation) = block.ai_explanation {
                         ui.add_space(10.0);
                         egui::Frame::none()
-                            .fill(Palette::AI_FILL)
-                            .stroke(egui::Stroke::new(1.0_f32, Palette::AI_BORDER))
+                            .fill(Palette::AI_FILL())
+                            .stroke(egui::Stroke::new(1.0_f32, Palette::AI_BORDER()))
                             .rounding(egui::Rounding::same(12.0))
                             .inner_margin(egui::Margin::symmetric(16.0, 12.0))
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
                                 ui.horizontal(|ui| {
-                                    ui.label(RichText::new("✨").size(14.0).color(Palette::ACCENT));
+                                    ui.label(RichText::new("✨").size(14.0).color(Palette::ACCENT()));
                                     ui.label(
                                         RichText::new("Diagnosis")
                                             .size(13.0)
                                             .strong()
-                                            .color(Palette::ACCENT_TEXT),
+                                            .color(Palette::ACCENT_TEXT()),
                                     );
                                 });
                                 ui.add_space(2.0);
                                 ui.label(
                                     RichText::new(explanation)
                                         .size(14.0)
-                                        .color(Palette::TEXT_BODY),
+                                        .color(Palette::TEXT_BODY()),
                                 );
                                 if let Some(ref fix_cmd) = block.ai_suggested_fix {
                                     ui.add_space(6.0);
                                     egui::Frame::none()
-                                        .fill(Palette::BG_INSET)
+                                        .fill(Palette::BG_INSET())
                                         .rounding(egui::Rounding::same(Radius::BUTTON))
                                         .inner_margin(egui::Margin {
                                             left: 12.0,
@@ -288,7 +288,7 @@ pub fn render_command_block(
                                                     RichText::new(fix_cmd)
                                                         .monospace()
                                                         .size(13.0)
-                                                        .color(Palette::TEXT_PRIMARY),
+                                                        .color(Palette::TEXT_PRIMARY()),
                                                 );
                                                 ui.with_layout(
                                                     egui::Layout::right_to_left(egui::Align::Center),
@@ -326,13 +326,13 @@ pub fn render_compact_block(ui: &mut Ui, block: &CommandBlock) -> Option<BlockAc
         ui.spacing_mut().item_spacing.x = 6.0;
         match block.exit_code {
             Some(0) => {
-                ui.label(RichText::new("✔").size(12.0).color(Palette::ACCENT_GREEN));
+                ui.label(RichText::new("✔").size(12.0).color(Palette::ACCENT_GREEN()));
             }
             Some(_) => {
-                ui.label(RichText::new("✖").size(12.0).color(Palette::ACCENT_RED));
+                ui.label(RichText::new("✖").size(12.0).color(Palette::ACCENT_RED()));
             }
             None => {
-                ui.add(egui::Spinner::new().size(12.0).color(Palette::ACCENT));
+                ui.add(egui::Spinner::new().size(12.0).color(Palette::ACCENT()));
             }
         }
         ui.add(
@@ -340,7 +340,7 @@ pub fn render_compact_block(ui: &mut Ui, block: &CommandBlock) -> Option<BlockAc
                 RichText::new(&block.command)
                     .monospace()
                     .size(12.5)
-                    .color(Palette::TEXT_PRIMARY),
+                    .color(Palette::TEXT_PRIMARY()),
             )
             .truncate(),
         )
@@ -369,7 +369,7 @@ pub fn render_compact_block(ui: &mut Ui, block: &CommandBlock) -> Option<BlockAc
         ui.label(
             RichText::new(format!("📋 {pending} clipboard request(s) — open the block outside Mosaic to review"))
                 .size(11.0)
-                .color(Palette::ACCENT_TEXT),
+                .color(Palette::ACCENT_TEXT()),
         );
     }
     if let Some(code) = block.exit_code.filter(|c| *c != 0) {
@@ -385,7 +385,7 @@ pub fn render_compact_block(ui: &mut Ui, block: &CommandBlock) -> Option<BlockAc
                         egui::Button::new(
                             RichText::new("✨ Diagnose")
                                 .size(11.5)
-                                .color(Palette::ACCENT_TEXT),
+                                .color(Palette::ACCENT_TEXT()),
                         )
                         .frame(false),
                     )
@@ -399,7 +399,7 @@ pub fn render_compact_block(ui: &mut Ui, block: &CommandBlock) -> Option<BlockAc
         ui.label(
             RichText::new(format!("✨ {explanation}"))
                 .size(12.0)
-                .color(Palette::ACCENT_TEXT),
+                .color(Palette::ACCENT_TEXT()),
         );
         if let Some(fix) = &block.ai_suggested_fix {
             if ui
@@ -408,9 +408,9 @@ pub fn render_compact_block(ui: &mut Ui, block: &CommandBlock) -> Option<BlockAc
                         RichText::new(format!("Run  {fix}"))
                             .monospace()
                             .size(11.5)
-                            .color(Palette::TEXT_PRIMARY),
+                            .color(Palette::TEXT_PRIMARY()),
                     )
-                    .fill(Palette::BG_INSET),
+                    .fill(Palette::BG_INSET()),
                 )
                 .clicked()
             {
@@ -512,14 +512,14 @@ fn render_ansi_spans(ui: &mut Ui, block: &CommandBlock) -> Option<BlockAction> {
                         format_bytes(block.truncated_bytes)
                     ))
                     .size(11.5)
-                    .color(Palette::TEXT_MUTED),
+                    .color(Palette::TEXT_MUTED()),
                 );
             }
             if prefix > 0 {
                 ui.label(
                     RichText::new(format!("Showing the last {shown} lines; {} above.", format_bytes(prefix as u64)))
                         .size(11.5)
-                        .color(Palette::TEXT_MUTED),
+                        .color(Palette::TEXT_MUTED()),
                 );
                 if ui.add(ghost_button(&format!("Show {RENDERED_LINES_STEP} more"))).clicked() {
                     ui.ctx().data_mut(|d| d.insert_temp(shown_id, shown + RENDERED_LINES_STEP));
@@ -541,7 +541,7 @@ fn render_ansi_spans(ui: &mut Ui, block: &CommandBlock) -> Option<BlockAction> {
         ui.label(
             RichText::new("(no output)")
                 .italics()
-                .color(Palette::TEXT_MUTED),
+                .color(Palette::TEXT_MUTED()),
         );
         return None;
     }
@@ -725,8 +725,8 @@ fn render_clipboard_prompt(ui: &mut Ui, block: &mut CommandBlock) {
     let mut deny_all = false;
     ui.add_space(8.0);
     egui::Frame::none()
-        .fill(Palette::BG_INSET)
-        .stroke(egui::Stroke::new(1.0_f32, Palette::ACCENT))
+        .fill(Palette::BG_INSET())
+        .stroke(egui::Stroke::new(1.0_f32, Palette::ACCENT()))
         .rounding(egui::Rounding::same(Radius::BUTTON))
         .inner_margin(egui::Margin::symmetric(12.0, 8.0))
         .show(ui, |ui| {
@@ -737,9 +737,9 @@ fn render_clipboard_prompt(ui: &mut Ui, block: &mut CommandBlock) {
                     if chars == 1 { "" } else { "s" }
                 ))
                 .size(12.5)
-                .color(Palette::TEXT_PRIMARY),
+                .color(Palette::TEXT_PRIMARY()),
             );
-            ui.label(RichText::new(preview).monospace().size(12.0).color(Palette::TEXT_BODY));
+            ui.label(RichText::new(preview).monospace().size(12.0).color(Palette::TEXT_BODY()));
             ui.horizontal(|ui| {
                 if ui.add(primary_button("Allow")).on_hover_text("Write this text to the clipboard").clicked() {
                     decision = Some(ClipboardDecision::Approved);
@@ -751,7 +751,7 @@ fn render_clipboard_prompt(ui: &mut Ui, block: &mut CommandBlock) {
                     ui.label(
                         RichText::new(format!("+{} more", pending.len() - 1))
                             .size(11.5)
-                            .color(Palette::TEXT_MUTED),
+                            .color(Palette::TEXT_MUTED()),
                     );
                     if ui.add(ghost_button("Deny all")).clicked() {
                         deny_all = true;
@@ -780,7 +780,7 @@ fn render_json_tree(ui: &mut Ui, key: &str, value: &Value, default_open: bool) {
             egui::CollapsingHeader::new(
                 RichText::new(header)
                     .monospace()
-                    .color(Palette::ACCENT_TEXT),
+                    .color(Palette::ACCENT_TEXT()),
             )
             .default_open(default_open)
             .show(ui, |ui| {
@@ -808,7 +808,7 @@ fn render_json_tree(ui: &mut Ui, key: &str, value: &Value, default_open: bool) {
                 ui.label(
                     RichText::new(format!("{key}:"))
                         .monospace()
-                        .color(Palette::TEXT_MUTED),
+                        .color(Palette::TEXT_MUTED()),
                 );
                 ui.label(
                     RichText::new(format!("\"{s}\""))
@@ -822,7 +822,7 @@ fn render_json_tree(ui: &mut Ui, key: &str, value: &Value, default_open: bool) {
                 ui.label(
                     RichText::new(format!("{key}:"))
                         .monospace()
-                        .color(Palette::TEXT_MUTED),
+                        .color(Palette::TEXT_MUTED()),
                 );
                 ui.label(
                     RichText::new(n.to_string())
@@ -836,7 +836,7 @@ fn render_json_tree(ui: &mut Ui, key: &str, value: &Value, default_open: bool) {
                 ui.label(
                     RichText::new(format!("{key}:"))
                         .monospace()
-                        .color(Palette::TEXT_MUTED),
+                        .color(Palette::TEXT_MUTED()),
                 );
                 ui.label(
                     RichText::new(b.to_string())
@@ -919,7 +919,7 @@ fn render_structured_table(
                         let link = ui
                             .add(
                                 egui::Label::new(
-                                    RichText::new(cell).monospace().underline().color(Palette::ACCENT_TEXT),
+                                    RichText::new(cell).monospace().underline().color(Palette::ACCENT_TEXT()),
                                 )
                                 .sense(egui::Sense::click()),
                             )
@@ -1058,7 +1058,7 @@ pub fn render_comparison(ui: &mut Ui, previous: &CommandBlock, current: &Command
 
         match report.kind {
             StructuredDiffKind::Identical { summary } => {
-                ui.label(RichText::new(summary).color(Palette::ACCENT_GREEN));
+                ui.label(RichText::new(summary).color(Palette::ACCENT_GREEN()));
             }
             StructuredDiffKind::Json {
                 added_paths,
@@ -1071,21 +1071,21 @@ pub fn render_comparison(ui: &mut Ui, previous: &CommandBlock, current: &Command
                         ui.label(
                             RichText::new(format!("+{} added keys", added_paths.len()))
                                 .size(11.5)
-                                .color(Palette::ACCENT_GREEN),
+                                .color(Palette::ACCENT_GREEN()),
                         );
                     }
                     if !removed_paths.is_empty() {
                         ui.label(
                             RichText::new(format!("-{} removed keys", removed_paths.len()))
                                 .size(11.5)
-                                .color(Palette::ACCENT_RED),
+                                .color(Palette::ACCENT_RED()),
                         );
                     }
                     if !modified_paths.is_empty() {
                         ui.label(
                             RichText::new(format!("~{} changed values", modified_paths.len()))
                                 .size(11.5)
-                                .color(Palette::ACCENT_BLUE),
+                                .color(Palette::ACCENT_BLUE()),
                         );
                     }
                 });
@@ -1113,20 +1113,20 @@ pub fn render_comparison(ui: &mut Ui, previous: &CommandBlock, current: &Command
                     ))
                     .size(11.5)
                     .italics()
-                    .color(Palette::TEXT_SECONDARY),
+                    .color(Palette::TEXT_SECONDARY()),
                 );
                 for added in added_listeners {
                     ui.label(
                         RichText::new(format!("+ {added}"))
                             .monospace()
-                            .color(Palette::ACCENT_GREEN),
+                            .color(Palette::ACCENT_GREEN()),
                     );
                 }
                 for removed in removed_listeners {
                     ui.label(
                         RichText::new(format!("- {removed}"))
                             .monospace()
-                            .color(Palette::ACCENT_RED),
+                            .color(Palette::ACCENT_RED()),
                     );
                 }
             }
@@ -1140,13 +1140,13 @@ pub fn render_comparison(ui: &mut Ui, previous: &CommandBlock, current: &Command
                     RichText::new(format!("Process Snapshot Delta · {unchanged_count} unchanged"))
                         .size(11.5)
                         .italics()
-                        .color(Palette::TEXT_SECONDARY),
+                        .color(Palette::TEXT_SECONDARY()),
                 );
                 for line in started {
-                    ui.label(RichText::new(format!("+ started  {line}")).monospace().color(Palette::ACCENT_GREEN));
+                    ui.label(RichText::new(format!("+ started  {line}")).monospace().color(Palette::ACCENT_GREEN()));
                 }
                 for line in exited {
-                    ui.label(RichText::new(format!("- exited   {line}")).monospace().color(Palette::ACCENT_RED));
+                    ui.label(RichText::new(format!("- exited   {line}")).monospace().color(Palette::ACCENT_RED()));
                 }
                 for line in memory_grown {
                     ui.label(

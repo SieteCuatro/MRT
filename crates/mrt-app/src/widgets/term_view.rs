@@ -13,9 +13,15 @@ use egui::{Color32, FontId, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2};
 use mrt_core::{xterm_palette, AnsiColor, TermCell, TermColor, TermCursorShape, TermSnapshot};
 
 /// Default foreground of the terminal grid.
-pub const TERM_FG: Color32 = Palette::TEXT_BODY;
+#[allow(non_snake_case)]
+pub fn TERM_FG() -> Color32 {
+    Palette::TEXT_BODY()
+}
 /// Default background of the terminal grid.
-pub const TERM_BG: Color32 = Palette::BG_INSET;
+#[allow(non_snake_case)]
+pub fn TERM_BG() -> Color32 {
+    Palette::BG_INSET()
+}
 
 /// Size of one cell for `font`: the advance of `M` as egui actually lays out text, and
 /// the font's row height.
@@ -54,7 +60,7 @@ pub fn paint_terminal(ui: &mut Ui, id: egui::Id, snapshot: &TermSnapshot, font: 
         return response;
     }
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, TERM_BG);
+    painter.rect_filled(rect, 0.0, TERM_BG());
 
     for (row_index, row) in snapshot.cells.iter().enumerate() {
         let top = rect.top() + row_index as f32 * cell.y;
@@ -68,7 +74,7 @@ pub fn paint_terminal(ui: &mut Ui, id: egui::Id, snapshot: &TermSnapshot, font: 
         let width = if cell_at.is_some_and(|c| c.wide) { 2.0 } else { 1.0 };
         let min = Pos2::new(rect.left() + cursor.col as f32 * cell.x, rect.top() + cursor.row as f32 * cell.y);
         let cursor_rect = Rect::from_min_size(min, Vec2::new(cell.x * width, cell.y));
-        let color = Palette::ACCENT_TEXT;
+        let color = Palette::ACCENT_TEXT();
         if !focused {
             painter.rect_stroke(cursor_rect.shrink(0.5), 0.0, Stroke::new(1.0_f32, color));
         } else {
@@ -77,7 +83,7 @@ pub fn paint_terminal(ui: &mut Ui, id: egui::Id, snapshot: &TermSnapshot, font: 
                     painter.rect_filled(cursor_rect, 0.0, color);
                     if let Some(c) = cell_at.filter(|c| c.ch != ' ' && !c.wide_spacer) {
                         let text: String = std::iter::once(c.ch).chain(c.zero_width.iter().copied()).collect();
-                        painter.text(min, egui::Align2::LEFT_TOP, text, font.clone(), TERM_BG);
+                        painter.text(min, egui::Align2::LEFT_TOP, text, font.clone(), TERM_BG());
                     }
                 }
                 TermCursorShape::Underline => {
@@ -151,7 +157,7 @@ pub fn selection_text(snapshot: &TermSnapshot, selection: &Selection) -> String 
 /// Shades the selected cells of a grid drawn at `rect` with cells of `cell` size.
 pub fn paint_selection(ui: &Ui, rect: Rect, cell: Vec2, cols: u16, rows: u16, selection: &Selection) {
     let painter = ui.painter_at(rect);
-    let shade = Palette::ACCENT.gamma_multiply(0.35);
+    let shade = Palette::ACCENT().gamma_multiply(0.35);
     for row in 0..rows {
         if let Some((from, to)) = selection.columns_on(row, cols) {
             let min = Pos2::new(rect.left() + from as f32 * cell.x, rect.top() + row as f32 * cell.y);
@@ -186,9 +192,9 @@ fn resolve(color: TermColor, default: Color32, bold: bool) -> Color32 {
 }
 
 fn cell_style(cell: &TermCell) -> CellStyle {
-    let fg_default = if cell.bold { Palette::TEXT_PRIMARY } else { TERM_FG };
+    let fg_default = if cell.bold { Palette::TEXT_PRIMARY() } else { TERM_FG() };
     let mut fg = resolve(cell.fg, fg_default, cell.bold);
-    let mut bg = resolve(cell.bg, TERM_BG, false);
+    let mut bg = resolve(cell.bg, TERM_BG(), false);
     if cell.inverse {
         std::mem::swap(&mut fg, &mut bg);
     }
@@ -218,7 +224,7 @@ fn paint_row_backgrounds(painter: &egui::Painter, row: &[TermCell], left: f32, t
     };
     for (col, c) in row.iter().enumerate() {
         let bg = cell_style(c).bg;
-        if bg == TERM_BG {
+        if bg == TERM_BG() {
             flush(run.take());
             continue;
         }
@@ -314,7 +320,7 @@ mod tests {
         };
         let s = cell_style(&cell);
         assert_eq!(s.bg, to_color32(xterm_palette(1)));
-        assert_eq!(s.fg, TERM_BG);
+        assert_eq!(s.fg, TERM_BG());
 
         let bold = TermCell {
             fg: TermColor::Indexed(2),

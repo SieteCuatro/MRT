@@ -8,6 +8,7 @@ pub mod pty;
 pub mod safety;
 pub mod shell_integration;
 pub mod term;
+pub mod theme_file;
 pub mod shell_session;
 pub mod vt;
 
@@ -42,6 +43,7 @@ pub use shell_session::{
     ShellSessionOptions,
 };
 pub use links::{classify_uri, detect_links, is_openable_uri, DetectedLink, LinkTarget};
+pub use theme_file::{load_theme_file, parse_hex_color, parse_theme, set_ansi_palette, ThemeSpec};
 pub use images::{decode_image_file, ImageSize, InlineImage};
 pub use vt::{
     parse_ansi_rich, parse_ansi_text, parse_osc7_uri, AnsiColor, AnsiSpan, ParsedAnsi, VtEvent,

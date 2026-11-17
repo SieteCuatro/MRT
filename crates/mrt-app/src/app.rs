@@ -390,6 +390,13 @@ impl ActiveTuiSession {
                 cell,
                 focused && window_focused,
             );
+        // Screen readers (AccessKit) get the visible screen as text; the closure only
+        // runs when accessibility is active.
+        let term = &self.term;
+        let title = self.command.clone();
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Other, true, format!("Terminal: {title}\n{}", term.screen_text()))
+        });
         if focused {
             // Keep keyboard focus on the terminal so the command input does not also
             // receive the keys, and so Tab, arrows and Esc stay with the program
@@ -1480,7 +1487,7 @@ impl MrtGuiApp {
         let mut add_terminal = false;
         ui.horizontal_wrapped(|ui| {
             egui::Frame::none()
-                .fill(Palette::BG_INSET)
+                .fill(Palette::BG_INSET())
                 .rounding(egui::Rounding::same(Radius::BUTTON))
                 .inner_margin(egui::Margin::same(3.0))
                 .show(ui, |ui| {
@@ -1489,12 +1496,12 @@ impl MrtGuiApp {
                         let selected = self.mosaic_layout == layout;
                         let button = egui::Button::new(
                             RichText::new(layout.label()).size(13.0).color(if selected {
-                                Palette::TEXT_PRIMARY
+                                Palette::TEXT_PRIMARY()
                             } else {
-                                Palette::TEXT_SECONDARY
+                                Palette::TEXT_SECONDARY()
                             }),
                         )
-                        .fill(if selected { Palette::BORDER_SUBTLE } else { Color32::TRANSPARENT })
+                        .fill(if selected { Palette::BORDER_SUBTLE() } else { Color32::TRANSPARENT })
                         .stroke(egui::Stroke::NONE)
                         .rounding(egui::Rounding::same(8.0))
                         .min_size(egui::vec2(0.0, 28.0));
@@ -1505,7 +1512,7 @@ impl MrtGuiApp {
                 });
             if self.mosaic_layout == MosaicLayout::Grid {
                 ui.add_space(6.0);
-                ui.label(RichText::new("Per row").size(13.0).color(Palette::TEXT_MUTED));
+                ui.label(RichText::new("Per row").size(13.0).color(Palette::TEXT_MUTED()));
                 if ui
                     .add_enabled(self.mosaic_columns > 1, secondary_button("−").min_size(egui::vec2(30.0, 30.0)))
                     .on_hover_text("Fewer columns")
@@ -1517,7 +1524,7 @@ impl MrtGuiApp {
                     RichText::new(self.mosaic_columns.to_string())
                         .monospace()
                         .size(14.0)
-                        .color(Palette::TEXT_PRIMARY),
+                        .color(Palette::TEXT_PRIMARY()),
                 );
                 if ui
                     .add_enabled(self.mosaic_columns < 6, secondary_button("+").min_size(egui::vec2(30.0, 30.0)))
@@ -1538,7 +1545,7 @@ impl MrtGuiApp {
                     _ => "Drag a terminal's header onto another to move it there",
                 })
                 .size(12.0)
-                .color(Palette::TEXT_MUTED),
+                .color(Palette::TEXT_MUTED()),
             );
         });
         if add_terminal {
@@ -1606,10 +1613,10 @@ impl MrtGuiApp {
                     ui.allocate_new_ui(egui::UiBuilder::new().max_rect(*rect).id_salt(("mosaic_tile", id)), |ui| {
                         ui.set_clip_rect(rect.expand(2.0).intersect(ui.clip_rect()));
                         let frame = egui::Frame::none()
-                            .fill(Palette::BG_SURFACE)
+                            .fill(Palette::BG_SURFACE())
                             .stroke(egui::Stroke::new(
                                 if is_active { 1.5_f32 } else { 1.0_f32 },
-                                if is_active { Palette::ACCENT } else { Palette::BORDER_FAINT },
+                                if is_active { Palette::ACCENT() } else { Palette::BORDER_FAINT() },
                             ))
                             .rounding(egui::Rounding::same(Radius::BLOCK))
                             .inner_margin(egui::Margin::symmetric(12.0, 10.0));
@@ -1639,7 +1646,7 @@ impl MrtGuiApp {
                                         egui::ComboBox::from_id_salt(("mosaic_shell", id))
                                             .width(96.0)
                                             .selected_text(
-                                                RichText::new(shell_label).monospace().size(11.5).color(Palette::TEXT_SECONDARY),
+                                                RichText::new(shell_label).monospace().size(11.5).color(Palette::TEXT_SECONDARY()),
                                             )
                                             .show_ui(ui, |ui| {
                                                 for (shell_index, shell) in shells.iter().enumerate() {
@@ -1656,7 +1663,7 @@ impl MrtGuiApp {
                                                         RichText::new(format!("{}  {folder}", index + 1))
                                                             .size(13.5)
                                                             .strong()
-                                                            .color(if is_active { Palette::TEXT_PRIMARY } else { Palette::TEXT_BODY }),
+                                                            .color(if is_active { Palette::TEXT_PRIMARY() } else { Palette::TEXT_BODY() }),
                                                     )
                                                     .truncate()
                                                     .sense(egui::Sense::click()),
@@ -1696,7 +1703,7 @@ impl MrtGuiApp {
                                             RichText::new(tab.cwd.display().to_string())
                                                 .monospace()
                                                 .size(11.5)
-                                                .color(Palette::TEXT_MUTED),
+                                                .color(Palette::TEXT_MUTED()),
                                         );
                                     }
                                     for block in &tab.blocks {
@@ -1710,7 +1717,7 @@ impl MrtGuiApp {
                             // Input
                             ui.add_space(6.0);
                             egui::Frame::none()
-                                .fill(Palette::BG_INSET)
+                                .fill(Palette::BG_INSET())
                                 .rounding(egui::Rounding::same(Radius::BUTTON))
                                 .inner_margin(egui::Margin::symmetric(10.0, 4.0))
                                 .show(ui, |ui| {
@@ -1719,7 +1726,7 @@ impl MrtGuiApp {
                                             RichText::new("›")
                                                 .monospace()
                                                 .size(14.0)
-                                                .color(if is_active { Palette::ACCENT } else { Palette::TEXT_MUTED }),
+                                                .color(if is_active { Palette::ACCENT() } else { Palette::TEXT_MUTED() }),
                                         );
                                         let response = ui.add(
                                             egui::TextEdit::singleline(&mut tab.input_line)
@@ -1744,7 +1751,7 @@ impl MrtGuiApp {
                             ui.painter().rect_stroke(
                                 rect.shrink(0.75),
                                 egui::Rounding::same(Radius::BLOCK),
-                                egui::Stroke::new(1.5_f32, Palette::ACCENT),
+                                egui::Stroke::new(1.5_f32, Palette::ACCENT()),
                             );
                         }
                         if panel.response.clicked() {
@@ -1794,12 +1801,12 @@ impl MrtGuiApp {
     fn render_explorer(&mut self, ctx: &egui::Context) {
         if self.tabs[self.active_tab].remote.is_some() {
             egui::SidePanel::left("folder_explorer").frame(panel_frame()).default_width(240.0).show(ctx, |ui| {
-                ui.label(RichText::new("Explorer").size(15.0).strong().color(Palette::TEXT_PRIMARY));
+                ui.label(RichText::new("Explorer").size(15.0).strong().color(Palette::TEXT_PRIMARY()));
                 ui.add_space(8.0);
                 ui.label(
                     RichText::new("This is a remote (SSH) tab. The Explorer shows folders on this computer only.")
                         .size(12.5)
-                        .color(Palette::TEXT_MUTED),
+                        .color(Palette::TEXT_MUTED()),
                 );
             });
             return;
@@ -1815,7 +1822,7 @@ impl MrtGuiApp {
             .resizable(true)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Explorer").size(15.0).strong().color(Palette::TEXT_PRIMARY));
+                    ui.label(RichText::new("Explorer").size(15.0).strong().color(Palette::TEXT_PRIMARY()));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if icon_button(ui, "🔄", "Refresh").clicked() {
                             refresh = true;
@@ -1827,7 +1834,7 @@ impl MrtGuiApp {
                         RichText::new(path.display().to_string())
                             .monospace()
                             .size(12.0)
-                            .color(Palette::TEXT_MUTED),
+                            .color(Palette::TEXT_MUTED()),
                     )
                     .truncate(),
                 )
@@ -1841,7 +1848,7 @@ impl MrtGuiApp {
                 }
                 match &self.explorer_entries {
                     Err(error) => {
-                        ui.colored_label(Palette::ACCENT_RED, error);
+                        ui.colored_label(Palette::ACCENT_RED(), error);
                     }
                     Ok(entries) => {
                         egui::ScrollArea::vertical()
@@ -1865,7 +1872,7 @@ impl MrtGuiApp {
                                             egui::Align2::LEFT_CENTER,
                                             name.as_ref(),
                                             egui::FontId::proportional(13.5),
-                                            Palette::TEXT_SECONDARY,
+                                            Palette::TEXT_SECONDARY(),
                                         );
                                     }
                                 }
@@ -3301,13 +3308,13 @@ impl MrtGuiApp {
         let mut step = None;
         let mut close = false;
         egui::Frame::none()
-            .fill(Palette::BG_ELEVATED)
-            .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_STRONG))
+            .fill(Palette::BG_ELEVATED())
+            .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_STRONG()))
             .rounding(egui::Rounding::same(Radius::BUTTON))
             .inner_margin(egui::Margin::symmetric(10.0, 6.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("🔍").color(Palette::TEXT_MUTED));
+                    ui.label(RichText::new("🔍").color(Palette::TEXT_MUTED()));
                     let edit = ui.add(
                         egui::TextEdit::singleline(&mut self.find.query)
                             .hint_text("Find in output")
@@ -3336,7 +3343,7 @@ impl MrtGuiApp {
                     } else {
                         format!("{} of {total}", self.find.current + 1)
                     };
-                    ui.label(RichText::new(count).size(12.5).color(Palette::TEXT_MUTED));
+                    ui.label(RichText::new(count).size(12.5).color(Palette::TEXT_MUTED()));
                     if ui.add_enabled(total > 0, egui::Button::new("▲").small()).on_hover_text("Previous match (Shift+Enter)").clicked() {
                         step = Some(false);
                     }
@@ -3424,7 +3431,7 @@ impl MrtGuiApp {
                             ui.label(
                                 RichText::new(format!("{} × {}", session.term.cols(), session.term.rows()))
                                     .monospace()
-                                    .color(Palette::TEXT_MUTED),
+                                    .color(Palette::TEXT_MUTED()),
                             );
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 let label = if exit_keys.is_empty() {
@@ -3432,7 +3439,7 @@ impl MrtGuiApp {
                                 } else {
                                     format!("Exit Session ({exit_keys})")
                                 };
-                                if ui.button(RichText::new(label).color(Palette::ACCENT_RED)).clicked() {
+                                if ui.button(RichText::new(label).color(Palette::ACCENT_RED())).clicked() {
                                     exit_clicked = true;
                                 }
                             });
@@ -3475,14 +3482,14 @@ fn draw_pane_tui(
                 .title()
                 .filter(|t| !t.trim().is_empty())
                 .unwrap_or_else(|| session.command.clone());
-            ui.label(RichText::new(format!("📺 {}", shorten(&title, 60))).monospace().color(Palette::TEXT_SECONDARY));
+            ui.label(RichText::new(format!("📺 {}", shorten(&title, 60))).monospace().color(Palette::TEXT_SECONDARY()));
             if broadcast {
-                ui.label(RichText::new("⇉ broadcast").strong().color(Palette::ACCENT_AMBER))
+                ui.label(RichText::new("⇉ broadcast").strong().color(Palette::ACCENT_AMBER()))
                     .on_hover_text("Keys typed here also go to the other pane (:broadcast off to stop)");
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let label = if exit_keys.is_empty() { "Exit".to_string() } else { format!("Exit ({exit_keys})") };
-                if ui.small_button(RichText::new(label).color(Palette::ACCENT_RED)).clicked() {
+                if ui.small_button(RichText::new(label).color(Palette::ACCENT_RED())).clicked() {
                     let _ = session.pty.kill();
                 }
             });
@@ -4037,12 +4044,12 @@ impl MrtGuiApp {
             .interactable(false)
             .show(ctx, |ui| {
                 egui::Frame::none()
-                    .fill(Palette::BG_ELEVATED)
-                    .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_FAINT))
+                    .fill(Palette::BG_ELEVATED())
+                    .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_FAINT()))
                     .rounding(egui::Rounding::same(8.0))
                     .inner_margin(egui::Margin::symmetric(10.0, 6.0))
                     .show(ui, |ui| {
-                        ui.label(RichText::new(format!("⌨ {label}")).monospace().size(12.0).color(Palette::TEXT_BODY));
+                        ui.label(RichText::new(format!("⌨ {label}")).monospace().size(12.0).color(Palette::TEXT_BODY()));
                     });
             });
     }
@@ -4062,7 +4069,7 @@ impl MrtGuiApp {
             .exact_width(if compact { 60.0 } else { 264.0 })
             .frame(
                 egui::Frame::none()
-                    .fill(Palette::BG_SIDEBAR)
+                    .fill(Palette::BG_SIDEBAR())
                     .inner_margin(egui::Margin::symmetric(if compact { 8.0 } else { 10.0 }, 14.0)),
             )
             .show(ctx, |ui| {
@@ -4084,7 +4091,7 @@ impl MrtGuiApp {
                             RichText::new("MRT")
                                 .size(15.0)
                                 .strong()
-                                .color(Palette::TEXT_PRIMARY),
+                                .color(Palette::TEXT_PRIMARY()),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if icon_button(ui, "«", "Collapse sidebar").clicked() {
@@ -4103,10 +4110,10 @@ impl MrtGuiApp {
                         egui::Button::new(
                             RichText::new("+   New tab")
                                 .size(14.0)
-                                .color(Palette::TEXT_PRIMARY),
+                                .color(Palette::TEXT_PRIMARY()),
                         )
                         .fill(Color32::from_rgb(26, 26, 30))
-                        .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_SUBTLE))
+                        .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_SUBTLE()))
                         .rounding(egui::Rounding::same(Radius::BUTTON))
                         .min_size(egui::vec2(ui.available_width(), 40.0)),
                     );
@@ -4240,7 +4247,7 @@ impl MrtGuiApp {
                     }
                     egui::Frame::none()
                         .fill(Color32::from_rgb(26, 26, 30))
-                        .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_FAINT))
+                        .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_FAINT()))
                         .rounding(egui::Rounding::same(12.0))
                         .inner_margin(egui::Margin::symmetric(12.0, 10.0))
                         .show(ui, |ui| {
@@ -4248,16 +4255,16 @@ impl MrtGuiApp {
                             ui.spacing_mut().item_spacing.y = 4.0;
                             let gate_on = self.config_state.config.safety.enabled;
                             ui.horizontal(|ui| {
-                                let dot = if gate_on { Palette::ACCENT_GREEN } else { Palette::ACCENT_AMBER };
+                                let dot = if gate_on { Palette::ACCENT_GREEN() } else { Palette::ACCENT_AMBER() };
                                 let label = if gate_on { "Safety Gate on" } else { "Safety Gate off (config)" };
                                 ui.label(RichText::new("●").size(10.0).color(dot));
-                                ui.label(RichText::new(label).size(13.0).color(Palette::TEXT_PRIMARY));
+                                ui.label(RichText::new(label).size(13.0).color(Palette::TEXT_PRIMARY()));
                             });
                             let bridge = match self.bridge_port {
                                 Some(port) => format!("MCP bridge · port {port}"),
                                 None => "MCP bridge offline".to_string(),
                             };
-                            ui.label(RichText::new(bridge).size(12.0).color(Palette::TEXT_MUTED));
+                            ui.label(RichText::new(bridge).size(12.0).color(Palette::TEXT_MUTED()));
                         });
                 }
             });
@@ -4291,7 +4298,7 @@ impl MrtGuiApp {
         egui::TopBottomPanel::top("mrt_header")
             .frame(
                 egui::Frame::none()
-                    .fill(Palette::BG_BASE)
+                    .fill(Palette::BG_BASE())
                     .inner_margin(egui::Margin::symmetric(20.0, 10.0)),
             )
             .show(ctx, |ui| {
@@ -4305,15 +4312,15 @@ impl MrtGuiApp {
                             .unwrap_or_else(|| full.clone());
                         let parent = full.strip_suffix(&leaf).unwrap_or("").to_string();
                         ui.spacing_mut().item_spacing.x = 0.0;
-                        ui.label(RichText::new(parent).monospace().size(13.0).color(Palette::TEXT_SECONDARY))
+                        ui.label(RichText::new(parent).monospace().size(13.0).color(Palette::TEXT_SECONDARY()))
                             .on_hover_text(&full);
-                        ui.label(RichText::new(leaf).monospace().size(13.0).color(Palette::TEXT_PRIMARY))
+                        ui.label(RichText::new(leaf).monospace().size(13.0).color(Palette::TEXT_PRIMARY()))
                             .on_hover_text(&full);
                         ui.spacing_mut().item_spacing.x = 8.0;
                     }
                     if self.mosaic {
                         ui.add_space(10.0);
-                        chip(ui, "Mosaic", Palette::BG_OVERLAY, Palette::TEXT_BODY);
+                        chip(ui, "Mosaic", Palette::BG_OVERLAY(), Palette::TEXT_BODY());
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -4563,7 +4570,7 @@ impl eframe::App for MrtGuiApp {
         // Floating composer: AI suggestion card + command input card
         egui::TopBottomPanel::bottom("mrt_bottom_prompt")
             .show_separator_line(false)
-            .frame(egui::Frame::none().fill(Palette::BG_BASE).inner_margin(egui::Margin {
+            .frame(egui::Frame::none().fill(Palette::BG_BASE()).inner_margin(egui::Margin {
                 left: 20.0,
                 right: 20.0,
                 top: 6.0,
@@ -4573,7 +4580,7 @@ impl eframe::App for MrtGuiApp {
                 centered_column(ui, |ui| {
                     if !self.show_history {
                         if let Some(error) = &self.history_error {
-                            ui.colored_label(Palette::ACCENT_RED, error);
+                            ui.colored_label(Palette::ACCENT_RED(), error);
                         }
                     }
 
@@ -4582,36 +4589,36 @@ impl eframe::App for MrtGuiApp {
                     let mut dismiss_ai = false;
                     if let Some(proposal) = &self.tabs[self.active_tab].ai_proposal {
                         egui::Frame::none()
-                            .fill(Palette::AI_FILL)
-                            .stroke(egui::Stroke::new(1.0_f32, Palette::AI_BORDER))
+                            .fill(Palette::AI_FILL())
+                            .stroke(egui::Stroke::new(1.0_f32, Palette::AI_BORDER()))
                             .rounding(egui::Rounding::same(14.0))
                             .inner_margin(egui::Margin::symmetric(16.0, 12.0))
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
                                 ui.horizontal(|ui| {
-                                    ui.label(RichText::new("✨").size(14.0).color(Palette::ACCENT));
+                                    ui.label(RichText::new("✨").size(14.0).color(Palette::ACCENT()));
                                     ui.label(
                                         RichText::new("Suggested command")
                                             .size(13.0)
                                             .strong()
-                                            .color(Palette::ACCENT_TEXT),
+                                            .color(Palette::ACCENT_TEXT()),
                                     );
                                     ui.label(
                                         RichText::new(&proposal.provider_used)
                                             .size(12.0)
-                                            .color(Palette::TEXT_SECONDARY),
+                                            .color(Palette::TEXT_SECONDARY()),
                                     );
                                 });
                                 if !proposal.explanation.trim().is_empty() {
                                     ui.label(
                                         RichText::new(&proposal.explanation)
                                             .size(13.5)
-                                            .color(Palette::TEXT_BODY),
+                                            .color(Palette::TEXT_BODY()),
                                     );
                                 }
                                 ui.add_space(4.0);
                                 egui::Frame::none()
-                                    .fill(Palette::BG_INSET)
+                                    .fill(Palette::BG_INSET())
                                     .rounding(egui::Rounding::same(Radius::BUTTON))
                                     .inner_margin(egui::Margin { left: 12.0, right: 8.0, top: 6.0, bottom: 6.0 })
                                     .show(ui, |ui| {
@@ -4621,7 +4628,7 @@ impl eframe::App for MrtGuiApp {
                                                 RichText::new(&proposal.proposed_command)
                                                     .monospace()
                                                     .size(13.0)
-                                                    .color(Palette::TEXT_PRIMARY),
+                                                    .color(Palette::TEXT_PRIMARY()),
                                             );
                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                 if ui.add(primary_button("Run")).clicked() {
@@ -4655,8 +4662,8 @@ impl eframe::App for MrtGuiApp {
                     let shells = &self.shells;
                     if let Some(tab) = self.tabs.get_mut(active_idx).filter(|_| !mosaic) {
                         egui::Frame::none()
-                            .fill(Palette::BG_ELEVATED)
-                            .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_STRONG))
+                            .fill(Palette::BG_ELEVATED())
+                            .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_STRONG()))
                             .rounding(egui::Rounding::same(Radius::COMPOSER))
                             .inner_margin(egui::Margin { left: 16.0, right: 12.0, top: 12.0, bottom: 10.0 })
                             .shadow(egui::epaint::Shadow {
@@ -4723,7 +4730,7 @@ impl eframe::App for MrtGuiApp {
                                             RichText::new(format!("›_  {current_shell_name}"))
                                                 .monospace()
                                                 .size(12.0)
-                                                .color(Palette::TEXT_BODY),
+                                                .color(Palette::TEXT_BODY()),
                                         )
                                         .show_ui(ui, |ui| {
                                             for (idx, s) in shells.iter().enumerate() {
@@ -4744,8 +4751,8 @@ impl eframe::App for MrtGuiApp {
                                             }
                                         });
                                     ui.add_space(6.0);
-                                    ui.label(RichText::new("🛡").size(12.0).color(Palette::ACCENT_GREEN));
-                                    ui.label(RichText::new("Safety Gate on").size(12.0).color(Palette::TEXT_MUTED));
+                                    ui.label(RichText::new("🛡").size(12.0).color(Palette::ACCENT_GREEN()));
+                                    ui.label(RichText::new("Safety Gate on").size(12.0).color(Palette::TEXT_MUTED()));
 
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                         let has_input = !tab.input_line.trim().is_empty();
@@ -4753,9 +4760,9 @@ impl eframe::App for MrtGuiApp {
                                             RichText::new("→")
                                                 .size(17.0)
                                                 .strong()
-                                                .color(if has_input { Palette::ON_ACCENT } else { Palette::TEXT_MUTED }),
+                                                .color(if has_input { Palette::ON_ACCENT() } else { Palette::TEXT_MUTED() }),
                                         )
-                                        .fill(if has_input { Palette::ACCENT } else { Palette::BG_OVERLAY })
+                                        .fill(if has_input { Palette::ACCENT() } else { Palette::BG_OVERLAY() })
                                         .stroke(egui::Stroke::NONE)
                                         .rounding(egui::Rounding::same(17.0))
                                         .min_size(egui::vec2(34.0, 34.0));
@@ -4778,7 +4785,7 @@ impl eframe::App for MrtGuiApp {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::none()
-                    .fill(Palette::BG_BASE)
+                    .fill(Palette::BG_BASE())
                     .inner_margin(egui::Margin { left: 20.0, right: 20.0, top: 12.0, bottom: 4.0 }),
             )
             .show(ctx, |ui| {
@@ -4811,7 +4818,7 @@ impl eframe::App for MrtGuiApp {
                         cols[0].group(|ui| {
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new("Pane 1 (Primary)").strong().color(
-                                    if tab.active_pane_idx == 0 { Palette::ACCENT_BLUE } else { Palette::TEXT_MUTED }
+                                    if tab.active_pane_idx == 0 { Palette::ACCENT_BLUE() } else { Palette::TEXT_MUTED() }
                                 ));
                                 if tab.active_pane_idx != 0 && ui.small_button("Focus").clicked() {
                                     tab.active_pane_idx = 0;
@@ -4846,7 +4853,7 @@ impl eframe::App for MrtGuiApp {
                             let sec = tab.secondary_pane.as_mut().unwrap();
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new("Pane 2 (Split)").strong().color(
-                                    if tab.active_pane_idx == 1 { Palette::ACCENT_GREEN } else { Palette::TEXT_MUTED }
+                                    if tab.active_pane_idx == 1 { Palette::ACCENT_GREEN() } else { Palette::TEXT_MUTED() }
                                 ));
                                 if tab.active_pane_idx != 1 && ui.small_button("Focus").clicked() {
                                     tab.active_pane_idx = 1;
@@ -4863,7 +4870,7 @@ impl eframe::App for MrtGuiApp {
                                 .stick_to_bottom(stick_to_end)
                                 .show(ui, |ui| {
                                     if sec.blocks.is_empty() {
-                                        ui.label(RichText::new("Secondary pane active. Commands run here when focused.").italics().color(Palette::TEXT_MUTED));
+                                        ui.label(RichText::new("Secondary pane active. Commands run here when focused.").italics().color(Palette::TEXT_MUTED()));
                                     }
                                     let mut previous_runs = HashMap::new();
                                     for block in &mut sec.blocks {
@@ -4884,7 +4891,7 @@ impl eframe::App for MrtGuiApp {
                     ui.group(|ui| {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("Pane 1 (Top)").strong().color(
-                                if tab.active_pane_idx == 0 { Palette::ACCENT_BLUE } else { Palette::TEXT_MUTED }
+                                if tab.active_pane_idx == 0 { Palette::ACCENT_BLUE() } else { Palette::TEXT_MUTED() }
                             ));
                             if tab.active_pane_idx != 0 && ui.small_button("Focus").clicked() {
                                 tab.active_pane_idx = 0;
@@ -4920,7 +4927,7 @@ impl eframe::App for MrtGuiApp {
                         let sec = tab.secondary_pane.as_mut().unwrap();
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("Pane 2 (Bottom)").strong().color(
-                                if tab.active_pane_idx == 1 { Palette::ACCENT_GREEN } else { Palette::TEXT_MUTED }
+                                if tab.active_pane_idx == 1 { Palette::ACCENT_GREEN() } else { Palette::TEXT_MUTED() }
                             ));
                             if tab.active_pane_idx != 1 && ui.small_button("Focus").clicked() {
                                 tab.active_pane_idx = 1;
@@ -4937,7 +4944,7 @@ impl eframe::App for MrtGuiApp {
                             .stick_to_bottom(stick_to_end)
                             .show(ui, |ui| {
                                 if sec.blocks.is_empty() {
-                                    ui.label(RichText::new("Secondary pane active. Commands run here when focused.").italics().color(Palette::TEXT_MUTED));
+                                    ui.label(RichText::new("Secondary pane active. Commands run here when focused.").italics().color(Palette::TEXT_MUTED()));
                                 }
                                 let mut previous_runs = HashMap::new();
                                 for block in &mut sec.blocks {
@@ -4963,9 +4970,9 @@ impl eframe::App for MrtGuiApp {
                                 ui.vertical_centered(|ui| {
                                     brand_mark(ui, 40.0);
                                     ui.add_space(14.0);
-                                    ui.label(RichText::new("Ready when you are").size(22.0).strong().color(Palette::TEXT_PRIMARY));
+                                    ui.label(RichText::new("Ready when you are").size(22.0).strong().color(Palette::TEXT_PRIMARY()));
                                     ui.add_space(4.0);
-                                    ui.label(RichText::new("Run any command below. Output lands here as blocks you can search, diff and diagnose.").size(14.0).color(Palette::TEXT_SECONDARY));
+                                    ui.label(RichText::new("Run any command below. Output lands here as blocks you can search, diff and diagnose.").size(14.0).color(Palette::TEXT_SECONDARY()));
                                     ui.add_space(18.0);
                                     for (keys, hint) in [
                                         ("#", "Describe what you want and AI writes the command"),
@@ -4976,8 +4983,8 @@ impl eframe::App for MrtGuiApp {
                                         ui.horizontal(|ui| {
                                             let total = 420.0_f32.min(ui.available_width());
                                             ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
-                                            chip(ui, keys, Palette::BG_OVERLAY, Palette::TEXT_BODY);
-                                            ui.label(RichText::new(hint).size(13.0).color(Palette::TEXT_MUTED));
+                                            chip(ui, keys, Palette::BG_OVERLAY(), Palette::TEXT_BODY());
+                                            ui.label(RichText::new(hint).size(13.0).color(Palette::TEXT_MUTED()));
                                         });
                                     }
                                 });
@@ -5038,8 +5045,8 @@ impl eframe::App for MrtGuiApp {
                     .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -150.0])
                     .frame(
                         egui::Frame::window(&ctx.style())
-                            .fill(Palette::DANGER_FILL)
-                            .stroke(egui::Stroke::new(1.0_f32, Palette::DANGER_BORDER))
+                            .fill(Palette::DANGER_FILL())
+                            .stroke(egui::Stroke::new(1.0_f32, Palette::DANGER_BORDER()))
                             .rounding(egui::Rounding::same(Radius::COMPOSER))
                             .inner_margin(egui::Margin::symmetric(22.0, 20.0)),
                     )
@@ -5064,7 +5071,7 @@ impl eframe::App for MrtGuiApp {
                                         })
                                         .size(16.0)
                                         .strong()
-                                        .color(Palette::TEXT_PRIMARY),
+                                        .color(Palette::TEXT_PRIMARY()),
                                     );
                                     let (fill, fg) = if critical {
                                         (Color32::from_rgb(74, 31, 31), Color32::from_rgb(252, 165, 165))
@@ -5082,7 +5089,7 @@ impl eframe::App for MrtGuiApp {
                         });
                         ui.add_space(12.0);
                         egui::Frame::none()
-                            .fill(Palette::BG_INSET)
+                            .fill(Palette::BG_INSET())
                             .rounding(egui::Rounding::same(12.0))
                             .inner_margin(egui::Margin::symmetric(14.0, 12.0))
                             .show(ui, |ui| {
@@ -5091,7 +5098,7 @@ impl eframe::App for MrtGuiApp {
                                     RichText::new(&pending.assessment.command)
                                         .monospace()
                                         .size(13.5)
-                                        .color(Palette::TEXT_PRIMARY),
+                                        .color(Palette::TEXT_PRIMARY()),
                                 );
                             });
                         ui.add_space(6.0);
@@ -5119,7 +5126,7 @@ impl eframe::App for MrtGuiApp {
                                         .strong()
                                         .color(Color32::from_rgb(31, 10, 10)),
                                 )
-                                .fill(Palette::ACCENT_RED)
+                                .fill(Palette::ACCENT_RED())
                                 .stroke(egui::Stroke::NONE)
                                 .rounding(egui::Rounding::same(Radius::BUTTON))
                                 .min_size(egui::vec2(0.0, 36.0));
@@ -5185,7 +5192,7 @@ impl eframe::App for MrtGuiApp {
                 .anchor(egui::Align2::CENTER_TOP, [0.0, 96.0])
                 .frame(
                     egui::Frame::window(&ctx.style())
-                        .fill(Palette::BG_ELEVATED)
+                        .fill(Palette::BG_ELEVATED())
                         .rounding(egui::Rounding::same(Radius::COMPOSER))
                         .inner_margin(egui::Margin::same(0.0)),
                 )
@@ -5197,7 +5204,7 @@ impl eframe::App for MrtGuiApp {
                         .inner_margin(egui::Margin::symmetric(18.0, 14.0))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("🔍").size(15.0).color(Palette::TEXT_SECONDARY));
+                                ui.label(RichText::new("🔍").size(15.0).color(Palette::TEXT_SECONDARY()));
                                 let search = ui.add(
                                     egui::TextEdit::singleline(&mut self.palette_query)
                                         .font(egui::FontId::proportional(16.0))
@@ -5209,13 +5216,13 @@ impl eframe::App for MrtGuiApp {
                                     search.request_focus();
                                 }
                                 enter_pressed = search.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                                chip(ui, "Esc", Palette::BG_OVERLAY, Palette::TEXT_SECONDARY);
+                                chip(ui, "Esc", Palette::BG_OVERLAY(), Palette::TEXT_SECONDARY());
                             });
                         });
                     ui.painter().hline(
                         ui.min_rect().x_range(),
                         ui.min_rect().bottom(),
-                        egui::Stroke::new(1.0_f32, Palette::BORDER_FAINT),
+                        egui::Stroke::new(1.0_f32, Palette::BORDER_FAINT()),
                     );
 
                     let q = self.palette_query.trim().to_lowercase();
@@ -5237,7 +5244,7 @@ impl eframe::App for MrtGuiApp {
                                     for issue in &self.keymap_issues {
                                         ui.horizontal_wrapped(|ui| {
                                             ui.add_space(12.0);
-                                            ui.label(RichText::new(format!("⚠ {issue}")).size(12.0).color(Palette::ACCENT_AMBER));
+                                            ui.label(RichText::new(format!("⚠ {issue}")).size(12.0).color(Palette::ACCENT_AMBER()));
                                         });
                                     }
                                     ui.add_space(6.0);
@@ -5344,7 +5351,7 @@ impl eframe::App for MrtGuiApp {
                                 if results == 0 {
                                     ui.add_space(18.0);
                                     ui.vertical_centered(|ui| {
-                                        ui.label(RichText::new("No matches. Press Enter to run it as a command.").size(13.0).color(Palette::TEXT_MUTED));
+                                        ui.label(RichText::new("No matches. Press Enter to run it as a command.").size(13.0).color(Palette::TEXT_MUTED()));
                                     });
                                     ui.add_space(18.0);
                                 }
@@ -5370,7 +5377,7 @@ impl eframe::App for MrtGuiApp {
                     ui.painter().hline(
                         ui.min_rect().x_range(),
                         top,
-                        egui::Stroke::new(1.0_f32, Palette::BORDER_FAINT),
+                        egui::Stroke::new(1.0_f32, Palette::BORDER_FAINT()),
                     );
                     egui::Frame::none()
                         .inner_margin(egui::Margin::symmetric(18.0, 10.0))
@@ -5378,13 +5385,13 @@ impl eframe::App for MrtGuiApp {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 18.0;
                                 for hint in ["Enter  Run first match", "Click  Run", "Esc  Close"] {
-                                    ui.label(RichText::new(hint).size(12.0).color(Palette::TEXT_MUTED));
+                                    ui.label(RichText::new(hint).size(12.0).color(Palette::TEXT_MUTED()));
                                 }
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     ui.label(
                                         RichText::new(format!("{results} results"))
                                             .size(12.0)
-                                            .color(Palette::TEXT_MUTED),
+                                            .color(Palette::TEXT_MUTED()),
                                     );
                                 });
                             });

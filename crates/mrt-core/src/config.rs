@@ -27,7 +27,7 @@ pub const FONT_SIZE_RANGE: (f32, f32) = (8.0, 40.0);
 /// Terminal font size used when the config does not set one.
 pub const DEFAULT_FONT_SIZE: f32 = 13.0;
 /// Theme names MRT ships. `dark` and `default` are aliases of `graphite-calm`.
-pub const KNOWN_THEMES: &[&str] = &["graphite-calm", "dark", "default"];
+pub const KNOWN_THEMES: &[&str] = &["graphite-calm", "dark", "default", "high-contrast"];
 /// AI provider names accepted by `ai.provider`.
 pub const KNOWN_AI_PROVIDERS: &[&str] = &[
     "auto",
@@ -344,13 +344,8 @@ impl MrtConfig {
                 self.terminal.effective_font_size()
             ));
         }
-        if let Some(theme) = &self.terminal.theme {
-            if !KNOWN_THEMES.iter().any(|t| t.eq_ignore_ascii_case(theme.trim())) {
-                warnings.push(format!(
-                    "terminal.theme \"{theme}\" is unknown; using graphite-calm."
-                ));
-            }
-        }
+        // `terminal.theme` may also name a theme file, which only the GUI can resolve;
+        // it reports themes it cannot load.
         if self.terminal.max_block_output_mb > 4096 {
             warnings.push(format!(
                 "terminal.max_block_output_mb {} is above 4096; using 4096.",
@@ -770,7 +765,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.terminal.effective_font_size(), FONT_SIZE_RANGE.1);
-        assert_eq!(cfg.warnings().len(), 4);
+        assert_eq!(cfg.warnings().len(), 3);
         assert_eq!(cfg.startup_mcp_servers().count(), 0);
     }
 

@@ -460,7 +460,7 @@ pub struct MrtGuiApp {
     running_output: HashMap<Uuid, (Uuid, std::sync::Arc<std::sync::Mutex<String>>)>,
     /// Parser state of each streaming block, so a chunk is parsed once (O(n) in total).
     vt_streams: HashMap<Uuid, mrt_core::VtStream>,
-    mosaic: bool,
+    pub(crate) mosaic: bool,
     mosaic_columns: usize,
     mosaic_layout: MosaicLayout,
     show_explorer: bool,
@@ -488,6 +488,11 @@ pub struct MrtGuiApp {
     pub(crate) notifier: crate::notifications::CommandNotifier,
     /// Find in output (Ctrl+F).
     pub(crate) find: crate::find::FindState,
+    /// Where the layout is saved (`None` in tests or with `terminal.restore_layout = false`).
+    pub(crate) layout_file: Option<PathBuf>,
+    /// The layout last written, so unchanged layouts are not written again.
+    pub(crate) layout_saved: Option<crate::layout::SavedLayout>,
+    pub(crate) layout_next_check: Instant,
 }
 
 /// The egui context, set once the window exists, so background threads can wake
@@ -657,8 +662,19 @@ impl MrtGuiApp {
             notifier: crate::notifications::CommandNotifier::new(),
             find: crate::find::FindState::default(),
             config_state,
+            layout_file: None,
+            layout_saved: None,
+            layout_next_check: Instant::now(),
         };
         app.apply_config_side_effects();
+        if !cfg!(test) && app.config_state.config.terminal.restore_layout {
+            app.layout_file = crate::layout::layout_path();
+            if let Some(layout) = app.layout_file.as_deref().and_then(crate::layout::load) {
+                let fallback = app.tabs[0].cwd.clone();
+                app.restore_layout(&layout, &fallback);
+                app.layout_saved = Some(layout);
+            }
+        }
         app
     }
 
@@ -3995,7 +4011,12 @@ impl MrtGuiApp {
 }
 
 impl eframe::App for MrtGuiApp {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.persist_layout(true);
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.persist_layout(false);
         let first_frame = !self.focused_on_start;
         let mut focus_prompt = first_frame;
         let palette_was_open = self.show_command_palette;

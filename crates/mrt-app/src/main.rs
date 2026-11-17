@@ -2,11 +2,13 @@
 
 mod agent_setup;
 mod app;
+mod cli;
 mod config_runtime;
 mod find;
 mod fonts;
 mod history;
 mod keymap;
+mod layout;
 mod notifications;
 mod shell_pool;
 mod term_input;
@@ -26,6 +28,11 @@ fn main() -> Result<()> {
     if args.get(1).map(String::as_str) == Some("agent") {
         attach_parent_console_if_cli();
         return agent_setup::run_cli(&args[2..]);
+    }
+
+    if args.get(1).is_some_and(|sub| cli::SUBCOMMANDS.contains(&sub.as_str())) {
+        attach_parent_console_if_cli();
+        std::process::exit(cli::run(&args[1..]));
     }
 
     if args.iter().any(|a| a == "--mcp-server") {
@@ -53,6 +60,8 @@ fn main() -> Result<()> {
         println!("                      [--agent claude|codex|gemini|all] [--user|--project] [--dry-run]");
         println!("  mrt agent show      Print the MCP command line and agent instructions for other agents");
         println!("  mrt agent remove    Undo `mrt agent setup` (same flags)");
+        println!();
+        println!("{}", cli::USAGE);
         return Ok(());
     }
 

@@ -48,9 +48,9 @@ These items make MRT usable as a person's main terminal.
 Inspired by tmux and Rex. This also builds the base for the remote-connection plan below.
 
 - **Session server.** Move PTYs, shells, and running blocks into a background `mrt --server` process. The GUI becomes a client that attaches over the existing token-authenticated local bridge (`mrt-mcp::bridge`). *Done when:* closing the window mid-build and reopening it shows the same tabs, finished blocks, and live output.
-- **Layout restore.** Save tabs, splits, shells, and working directories, and restore them after the server itself restarts (fresh shells, same layout).
+- **Layout restore.** *(implemented for the GUI: `layout.json`, `terminal.restore_layout`; restoring after a session-server restart waits for the session server)* Save tabs, splits, shells, and working directories, and restore them after the server itself restarts (fresh shells, same layout).
 - **Survive upgrades.** Hand running sessions from the old server to the new one when MRT updates, or keep the old server running until its sessions end.
-- **Command-line control.** An `mrt` CLI that talks to the server with tmux-style targets: `mrt send`, `mrt capture`, `mrt split`, `mrt list`, all with `--json` and documented exit codes. These are thin wrappers around the existing MCP tools.
+- **Command-line control.** *(implemented against the running window: `mrt list|send|capture|split` with `--json` and documented exit codes)* An `mrt` CLI that talks to the server with tmux-style targets: `mrt send`, `mrt capture`, `mrt split`, `mrt list`, all with `--json` and documented exit codes. These are thin wrappers around the existing MCP tools.
 
 ### Remote connections between MRT instances
 

@@ -575,6 +575,22 @@ mod tests {
     }
 
     #[test]
+    fn large_iterm_images_are_not_cut_by_the_osc_parser() {
+        // A noisy 64x64 PNG is several KiB of base64, far over vte's old 1 KiB OSC buffer.
+        let pixels: Vec<u8> = (0..64 * 64 * 4u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        let mut png = Vec::new();
+        image::RgbaImage::from_raw(64, 64, pixels).unwrap().write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let b64 = crate::shell_integration::base64_encode(&png);
+        assert!(b64.len() > 4096, "{}", b64.len());
+        let parsed = crate::vt::parse_ansi_rich(&format!("a\x1b]1337;File=inline=1:{b64}\x07b"));
+        assert_eq!(parsed.images.len(), 1, "{}", parsed.plain_text);
+        assert_eq!((parsed.images[0].width, parsed.images[0].height), (64, 64));
+        let clip = crate::shell_integration::base64_encode(&vec![b'x'; 3000]);
+        let parsed = crate::vt::parse_ansi_rich(&format!("\x1b]52;c;{clip}\x07"));
+        assert!(matches!(&parsed.events[0], crate::vt::VtEvent::ClipboardWrite { text, .. } if text.len() == 3000));
+    }
+
+    #[test]
     fn kitty_chunks_store_and_place() {
         let mut kitty = KittyGraphics::default();
         let rgb = crate::shell_integration::base64_encode(&[1, 2, 3, 4, 5, 6]);

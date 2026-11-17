@@ -46,6 +46,7 @@ The Cargo workspace contains 5 modular crates:
 - **`crates/mrt-app`**:
   - `main.rs`: Entrypoint (`#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]`), CLI flag handler (`--mcp-server`, `--version`, `--help`, and the `mrt agent setup|show|remove` subcommand in `agent_setup.rs`), and `eframe` native GPU launcher.
   - `copy_mode.rs` & `hooks.rs`: Keyboard copy mode over a tab's blocks, and `[[hooks]]` event commands run in the background (`CREATE_NO_WINDOW`, `MRT_*` environment). Named `[[actions]]` (`run:<name>`) and pane broadcast (`:broadcast`) live in `app.rs`.
+  - `server.rs`: `mrt server`, a headless session server on the bridge (design for GUI attach, upgrades and remote sessions: `docs/SESSION_SERVER.md`).
   - `cli.rs` & `layout.rs`: `mrt list|send|capture|split` over the MCP bridge (thin wrappers around MCP tools, documented exit codes), and saving / restoring the window layout (`layout.json`, `terminal.restore_layout`).
   - `config_runtime.rs`: Loads the config file at startup, polls it for changes, and applies it to the GUI (font size, default shell, AI preferences, startup MCP servers, keymap, notification settings) with an in-window notice for errors.
   - `fonts.rs`: Font loading from `terminal.font_family` / `terminal.font_fallback` (family names resolved in the system font folders, or font file paths) plus platform symbol fallbacks.

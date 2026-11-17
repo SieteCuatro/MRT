@@ -58,6 +58,7 @@ These subcommands talk to the open MRT window through the same token-authenticat
 | `mrt send [-t TAB] [--shell S] [--cwd DIR] [--] COMMAND...` | Runs `COMMAND` in the tab under the agent safety rule (Critical commands are refused), records a block there, prints its output and exits with the command's exit code. Everything after the first word of the command belongs to the command; use `--` when the command starts with `-`. |
 | `mrt capture [-t TAB] [-n LINES] [-b BLOCKS]` | Prints the tab's last block (or the last `BLOCKS` blocks, each after a `$ command` line); `-n` keeps only the last lines of each. |
 | `mrt split [-t TAB] h\|v\|off` | Splits the tab side by side (`h`), stacked (`v`), or removes the split. |
+| `mrt server` | Runs a headless **session server**: it keeps tabs, command blocks and interactive PTYs (`mrt_pty_*`) alive between CLI and agent calls, without a window, until Ctrl+C. It does not start while a window is open; the window does not attach to it yet ([design](SESSION_SERVER.md)). |
 | `mrt quick [show\|hide\|toggle]` | Brings the window to the front or minimizes it (see [Quick terminal](#quick-terminal)). |
 
 Exit codes: `0` success, the command's own code for `send`, `2` wrong arguments, `69` no MRT window is running, `70` MRT reported an error (for example an unknown tab).

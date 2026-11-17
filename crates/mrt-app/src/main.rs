@@ -12,6 +12,7 @@ mod hooks;
 mod keymap;
 mod layout;
 mod notifications;
+mod server;
 mod shell_pool;
 mod term_input;
 mod theme;
@@ -30,6 +31,12 @@ fn main() -> Result<()> {
     if args.get(1).map(String::as_str) == Some("agent") {
         attach_parent_console_if_cli();
         return agent_setup::run_cli(&args[2..]);
+    }
+
+    if args.get(1).map(String::as_str) == Some("server") {
+        attach_parent_console_if_cli();
+        let rt = tokio::runtime::Runtime::new()?;
+        return rt.block_on(server::run());
     }
 
     if args.get(1).is_some_and(|sub| cli::SUBCOMMANDS.contains(&sub.as_str())) {
@@ -64,6 +71,8 @@ fn main() -> Result<()> {
         println!("  mrt agent remove    Undo `mrt agent setup` (same flags)");
         println!();
         println!("{}", cli::USAGE);
+        println!();
+        println!("  mrt server          Run a headless session server (tabs, blocks, PTYs) for the CLI and agents");
         return Ok(());
     }
 

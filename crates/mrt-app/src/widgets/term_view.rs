@@ -82,6 +82,73 @@ pub fn paint_terminal(ui: &mut Ui, snapshot: &TermSnapshot, font: &FontId, cell:
     response
 }
 
+/// A text selection on the visible grid, from where the drag started (`anchor`) to
+/// where the pointer is (`head`), both `(col, row)`. Like other terminals it runs in
+/// reading order: from the earlier cell to the end of its row, whole rows between,
+/// and the start of the last row up to the later cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selection {
+    pub anchor: (u16, u16),
+    pub head: (u16, u16),
+}
+
+impl Selection {
+    /// Start and end cells in reading order (both inclusive).
+    pub fn ordered(&self) -> ((u16, u16), (u16, u16)) {
+        let key = |(c, r): (u16, u16)| (r, c);
+        if key(self.anchor) <= key(self.head) {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        }
+    }
+
+    /// The column range selected on `row` (inclusive), if any, for a grid `cols` wide.
+    pub fn columns_on(&self, row: u16, cols: u16) -> Option<(u16, u16)> {
+        let ((sc, sr), (ec, er)) = self.ordered();
+        if row < sr || row > er || cols == 0 {
+            return None;
+        }
+        let from = if row == sr { sc } else { 0 };
+        let to = if row == er { ec } else { cols - 1 };
+        Some((from, to.min(cols - 1)))
+    }
+}
+
+/// The selected text: each row's selected cells with trailing spaces removed,
+/// rows joined with `\n`. Right halves of wide characters are skipped.
+pub fn selection_text(snapshot: &TermSnapshot, selection: &Selection) -> String {
+    let mut lines = Vec::new();
+    for (row_index, row) in snapshot.cells.iter().enumerate() {
+        let Some((from, to)) = selection.columns_on(row_index as u16, snapshot.cols) else {
+            continue;
+        };
+        let mut line = String::new();
+        for cell in row.iter().skip(from as usize).take((to - from) as usize + 1) {
+            if cell.wide_spacer {
+                continue;
+            }
+            line.push(cell.ch);
+            line.extend(cell.zero_width.iter());
+        }
+        lines.push(line.trim_end().to_string());
+    }
+    lines.join("\n")
+}
+
+/// Shades the selected cells of a grid drawn at `rect` with cells of `cell` size.
+pub fn paint_selection(ui: &Ui, rect: Rect, cell: Vec2, cols: u16, rows: u16, selection: &Selection) {
+    let painter = ui.painter_at(rect);
+    let shade = Palette::ACCENT.gamma_multiply(0.35);
+    for row in 0..rows {
+        if let Some((from, to)) = selection.columns_on(row, cols) {
+            let min = Pos2::new(rect.left() + from as f32 * cell.x, rect.top() + row as f32 * cell.y);
+            let size = Vec2::new((to - from + 1) as f32 * cell.x, cell.y);
+            painter.rect_filled(Rect::from_min_size(min, size), 0.0, shade);
+        }
+    }
+}
+
 /// Resolved colors and text attributes of one cell.
 #[derive(Clone, Copy, PartialEq)]
 struct CellStyle {
@@ -243,6 +310,38 @@ mod tests {
             ..TermCell::default()
         };
         assert_eq!(cell_style(&bold).fg, to_color32(xterm_palette(10)));
+    }
+
+    fn snapshot_of(lines: &[&str], cols: u16) -> TermSnapshot {
+        let mut term = mrt_core::TerminalEmulator::new(cols, lines.len() as u16, 0);
+        term.feed(lines.join("\r\n").as_bytes());
+        term.snapshot()
+    }
+
+    #[test]
+    fn selection_runs_in_reading_order_and_trims_rows() {
+        let snap = snapshot_of(&["hello world", "second line", "third"], 12);
+        // Dragging backwards selects the same text as dragging forwards.
+        let forward = Selection { anchor: (6, 0), head: (5, 1) };
+        let backward = Selection { anchor: (5, 1), head: (6, 0) };
+        assert_eq!(selection_text(&snap, &forward), "world\nsecond");
+        assert_eq!(selection_text(&snap, &backward), "world\nsecond");
+        // Whole middle rows are included, trailing blanks dropped.
+        let three = Selection { anchor: (0, 0), head: (2, 2) };
+        assert_eq!(selection_text(&snap, &three), "hello world\nsecond line\nthi");
+        // A selection inside one row.
+        let word = Selection { anchor: (0, 1), head: (5, 1) };
+        assert_eq!(selection_text(&snap, &word), "second");
+    }
+
+    #[test]
+    fn selection_columns_per_row() {
+        let sel = Selection { anchor: (4, 1), head: (2, 3) };
+        assert_eq!(sel.columns_on(0, 10), None);
+        assert_eq!(sel.columns_on(1, 10), Some((4, 9)));
+        assert_eq!(sel.columns_on(2, 10), Some((0, 9)));
+        assert_eq!(sel.columns_on(3, 10), Some((0, 2)));
+        assert_eq!(sel.columns_on(4, 10), None);
     }
 
     #[test]

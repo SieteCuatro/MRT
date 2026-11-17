@@ -43,6 +43,11 @@ pub fn encode_event(event: &Event, modes: &TermModes) -> Option<Vec<u8>> {
     match event {
         Event::Text(text) if !text.is_empty() => Some(text.as_bytes().to_vec()),
         Event::Paste(text) if !text.is_empty() => Some(encode_paste(text, modes)),
+        // egui-winit reports Ctrl+C and Ctrl+X only as Copy/Cut, never as key events.
+        // Outside macOS (where they come from Cmd+C/X) they are the terminal's ^C and ^X;
+        // the overlay handles Copy itself when it copies a selection.
+        Event::Copy if !cfg!(target_os = "macos") => Some(vec![0x03]),
+        Event::Cut if !cfg!(target_os = "macos") => Some(vec![0x18]),
         Event::Key {
             key,
             pressed: true,
@@ -451,6 +456,15 @@ mod tests {
             ..alt_scroll
         };
         assert!(wheel_as_arrows(false, &with_mouse).is_none());
+    }
+
+    #[test]
+    fn copy_and_cut_events_are_ctrl_c_and_ctrl_x_outside_macos() {
+        let m = TermModes::default();
+        let expected_c: Option<Vec<u8>> = (!cfg!(target_os = "macos")).then(|| vec![0x03]);
+        let expected_x: Option<Vec<u8>> = (!cfg!(target_os = "macos")).then(|| vec![0x18]);
+        assert_eq!(encode_event(&Event::Copy, &m), expected_c);
+        assert_eq!(encode_event(&Event::Cut, &m), expected_x);
     }
 
     #[test]

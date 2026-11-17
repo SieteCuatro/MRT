@@ -263,10 +263,13 @@ enum EditorStyle {
 }
 
 fn editor_style(program: &str) -> (EditorStyle, bool) {
-    let stem = Path::new(program)
+    // Split on both separators: a Windows path (`C:\Tools\subl.exe`) in $EDITOR must be
+    // recognised on any OS, and `Path` only splits on `\` on Windows.
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let stem = Path::new(name)
         .file_stem()
         .and_then(|s| s.to_str())
-        .unwrap_or(program)
+        .unwrap_or(name)
         .to_ascii_lowercase();
     match stem.as_str() {
         "code" | "code-insiders" | "codium" | "vscodium" | "cursor" | "windsurf" => {

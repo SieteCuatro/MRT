@@ -127,7 +127,7 @@ MRT supports the **OSC 133 semantic prompt specification**, which lets the termi
 | Shell | Hooks | Exit code |
 | :--- | :--- | :--- |
 | **Bash / Git Bash** | `PROMPT_COMMAND` (chains the user's own) and `PS1` markers | `$?` in the prompt hook |
-| **Zsh** | `precmd_functions` and `PS1` markers | `$?` in `precmd` |
+| **Zsh** | `precmd_functions` and `PS1` markers; `PROMPT_SP` is turned off, since zsh prints its `%` partial-line mark before the hooks and it would end up in the command's output | `$?` in `precmd` |
 | **Fish** | `fish_postexec` event and a wrapped `fish_prompt` | `$status` |
 | **POSIX `sh`** | `PS1` markers only; the command wrapper prints `D` (`__mrt_c; . <file>; __mrt_d $?`) | `$?` |
 | **PowerShell** (5.1 and 7+) | Custom `prompt` (keeps the user's prompt text) | `$?`, then `$LASTEXITCODE` for native commands |

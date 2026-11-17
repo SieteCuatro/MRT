@@ -211,6 +211,10 @@ __mrt_prompt_markers() {
 }
 typeset -ga precmd_functions
 precmd_functions=(__mrt_precmd $precmd_functions __mrt_prompt_markers)
+# PROMPT_SP prints a "%" and a line of spaces before the prompt to flag output that
+# did not end in a newline. zsh writes it before the precmd hooks, so it would land
+# inside the command's output; MRT already shows each command as its own block.
+unsetopt PROMPT_SP
 fi
 "#;
 

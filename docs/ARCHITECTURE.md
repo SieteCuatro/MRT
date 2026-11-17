@@ -67,5 +67,6 @@ flowchart LR
 ## Build, CI & Release
 
 - **CI (`.github/workflows/ci.yml`)**: On every push to `main` and every pull request, runs `cargo test --workspace --locked` with `RUSTFLAGS=-D warnings` on Ubuntu, Windows, and macOS (Cargo cache via `Swatinem/rust-cache`, saved only from `main`).
+- **Benchmarks (`.github/workflows/bench.yml`)**: On manual dispatch only, runs the `criterion` throughput suite in `crates/mrt-core/benches/throughput.rs` (VT parsing, output classification, the GUI's streaming re-parse, and end-to-end command streaming) on Ubuntu, Windows, and macOS and uploads the results as an artifact. Numbers and known hot spots are in [PERFORMANCE.md](PERFORMANCE.md).
 - **Release (`.github/workflows/release.yml`)**: On `v*` tags (or manual dispatch), builds `cargo build --release --locked` for `x86_64-pc-windows-msvc` (ZIP), `x86_64-unknown-linux-gnu`, `x86_64-apple-darwin`, and `aarch64-apple-darwin` (tar.gz) and attaches the archives to the GitHub Release.
 - **Packaging metadata**: `packaging/linux/mrt.desktop` (desktop entry) and `packaging/macos/Info.plist` (app bundle metadata). They are not used by the release workflow yet; the archives contain only the `mrt` binary.

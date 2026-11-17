@@ -36,4 +36,5 @@ RUSTFLAGS="-D warnings" cargo test --workspace --locked
 | Shells, the PTY engine, block classification, or Safety Gate rules | [docs/CORE_AND_SHELLS.md](docs/CORE_AND_SHELLS.md) |
 | AI providers, models, or environment variables | [docs/AI_PROVIDERS_AND_AGENTS.md](docs/AI_PROVIDERS_AND_AGENTS.md) and the table in [README.md](README.md) |
 | GUI panels, widgets, or the theme | [docs/GUI_AND_WIDGETS.md](docs/GUI_AND_WIDGETS.md) |
+| The output pipeline (streaming, VT parsing, classification, block rendering) in a way that changes speed or memory | Re-run `cargo bench -p mrt-core` and update [docs/PERFORMANCE.md](docs/PERFORMANCE.md) |
 | A roadmap item | Mark it in [ROADMAP.md](ROADMAP.md) |

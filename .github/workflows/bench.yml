@@ -1,0 +1,51 @@
+name: Throughput Benchmarks
+# The criterion suite takes several minutes per OS, so it only runs on demand
+# (Actions → Throughput Benchmarks → Run workflow); it has no push or schedule trigger.
+# The main way to run it is locally: see docs/PERFORMANCE.md. Results are uploaded as an artifact.
+on:
+  workflow_dispatch:
+    inputs:
+      filter:
+        description: "Optional criterion filter, e.g. vt_parse or streaming"
+        required: false
+        default: ""
+permissions:
+  contents: read
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      RUSTFLAGS: -D warnings
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Benchmarks build in the release profile, so keep their cache apart from the test job's.
+          key: bench
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Run benchmarks
+        shell: bash
+        env:
+          # Passed through the environment, not interpolated into the script.
+          FILTER: ${{ github.event.inputs.filter }}
+        run: |
+          cargo bench -p mrt-core --bench throughput --locked -- $FILTER 2>&1 | tee bench-output.txt
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ matrix.os }}-${{ github.sha }}
+          path: |
+            bench-output.txt
+            target/criterion
+          retention-days: 90

@@ -247,6 +247,10 @@ pub struct ActiveTuiSession {
     pub mouse_held: Option<crate::term_input::MouseButton>,
     pub mouse_cell: Option<(u16, u16)>,
     pub wheel_accum: f32,
+    /// Text selected by dragging (when the program does not take the mouse, or with
+    /// Shift), and whether a selection drag is in progress.
+    pub selection: Option<crate::widgets::term_view::Selection>,
+    pub selecting: bool,
 }
 
 /// Lines of history the TUI overlay's emulator keeps.
@@ -2178,6 +2182,8 @@ impl MrtGuiApp {
                         mouse_held: None,
                         mouse_cell: None,
                         wheel_accum: 0.0,
+                        selection: None,
+                        selecting: false,
                     });
                 }
                 Err(e) => {
@@ -2776,7 +2782,7 @@ impl MrtGuiApp {
             let _ = session.pty.send_bytes(&replies);
         }
         let modes = session.term.modes();
-        let Some(ref session) = self.active_tui else {
+        let Some(session) = self.active_tui.as_mut() else {
             return;
         };
 
@@ -2789,8 +2795,29 @@ impl MrtGuiApp {
         // Keys bound to actions (e.g. `exit_tui`, Ctrl+Q by default) were already
         // removed from the input by `handle_keybindings`; forward the rest to the PTY.
         let kill_requested = std::mem::take(&mut self.tui_exit_requested);
-        let bytes = ctx.input(|i| crate::term_input::encode_events(&i.events, &modes));
+        // egui-winit turns Ctrl+C (Cmd+C on macOS) into `Event::Copy` with no key event.
+        // It copies the selection when there is one, with Ctrl+Shift+C, and on macOS,
+        // as in Windows Terminal; otherwise it reaches the program as ^C (`encode_event`).
+        let has_selection = session.selection.is_some();
+        let (events, copy) = ctx.input(|i| {
+            let shift = i.modifiers.shift;
+            let is_copy = |e: &egui::Event| {
+                matches!(e, egui::Event::Copy) && (cfg!(target_os = "macos") || shift || has_selection)
+            };
+            let copy = i.events.iter().any(is_copy);
+            let events: Vec<egui::Event> = i.events.iter().filter(|e| !is_copy(e)).cloned().collect();
+            (events, copy)
+        });
+        if copy {
+            if let Some(selection) = session.selection.take() {
+                let text = crate::widgets::term_view::selection_text(&session.term.snapshot(), &selection);
+                ctx.copy_text(text);
+            }
+        }
+        let bytes = crate::term_input::encode_events(&events, &modes);
         if !bytes.is_empty() {
+            // Typing replaces the selection, as in other terminals.
+            session.selection = None;
             let _ = session.pty.send_bytes(&bytes);
         }
 
@@ -2933,6 +2960,9 @@ impl MrtGuiApp {
                             )
                         });
                         forward_tui_mouse(ctx, session, response.rect, cell, &snapshot.modes);
+                        if let Some(selection) = &session.selection {
+                            crate::widgets::term_view::paint_selection(ui, response.rect, cell, snapshot.cols, snapshot.rows, selection);
+                        }
                     });
             });
         if exit_clicked {
@@ -2958,6 +2988,23 @@ fn forward_tui_mouse(ctx: &egui::Context, session: &mut ActiveTuiSession, rect: 
         match event {
             egui::Event::PointerButton { pos, button, pressed, modifiers } => {
                 let Some(button) = MouseButton::from_egui(button) else { continue };
+                // Selection: a left drag when the program does not take the mouse, or
+                // with Shift held, as in xterm.
+                let selects = modes.mouse == mrt_core::MouseMode::None || modifiers.shift;
+                if button == MouseButton::Left && pressed && rect.contains(pos) && selects {
+                    let at = to_cell(pos);
+                    session.selection = Some(crate::widgets::term_view::Selection { anchor: at, head: at });
+                    session.selecting = true;
+                    continue;
+                }
+                if button == MouseButton::Left && !pressed && session.selecting {
+                    session.selecting = false;
+                    // A click without a drag selects nothing.
+                    if session.selection.is_some_and(|s| s.anchor == s.head) {
+                        session.selection = None;
+                    }
+                    continue;
+                }
                 if pressed && !rect.contains(pos) {
                     continue;
                 }
@@ -2971,6 +3018,12 @@ fn forward_tui_mouse(ctx: &egui::Context, session: &mut ActiveTuiSession, rect: 
                 out.extend(encode_mouse(action, col, row, modifiers, modes).unwrap_or_default());
             }
             egui::Event::PointerMoved(pos) => {
+                if session.selecting {
+                    if let Some(selection) = session.selection.as_mut() {
+                        selection.head = to_cell(pos);
+                    }
+                    continue;
+                }
                 if !rect.contains(pos) && session.mouse_held.is_none() {
                     continue;
                 }

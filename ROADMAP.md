@@ -14,13 +14,13 @@ These comparisons shaped the order of the milestones.
 
 ## Milestone 1 — A real terminal core
 
-The TUI overlay now draws from a real screen emulator and follows the window size. Keys, Alt+letter and the mouse reach the program, and text can be selected and copied. What is left is inline interactive panes and screen-accurate MCP reads.
+The TUI overlay now draws from a real screen emulator and follows the window size. Keys, Alt+letter and the mouse reach the program, and text can be selected and copied. Interactive programs also run inside split panes. What is left is screen-accurate MCP reads.
 
 - **Terminal grid emulator.** *(implemented, #9; the TUI overlay uses it)* Wrap `alacritty_terminal` (it uses the same `vte` parser MRT already depends on) or `libghostty-vt` behind a `mrt-core::term` module that exposes a cell grid, cursor, scrollback, modes, and title. Keep `vt::parse_ansi_text` for finished command blocks. *Done when:* `vim`, `htop`, `less`, `lazygit`, and `top` display and redraw correctly, and a unit test feeds recorded escape-sequence fixtures and checks the resulting grid.
 - **Grid renderer widget.** *(implemented in the TUI overlay: `widgets/term_view.rs`, with drag selection and copy; the MCP PTY tools do not use it)* An egui widget that paints the grid cell by cell: colors, bold, italic, underline, inverse, wide CJK characters and emoji, the cursor, and selection. Use it in the TUI overlay and in the MCP PTY tools.
 - **Resize.** *(implemented for the TUI overlay)* Compute columns and rows from the widget size and font metrics, and call `InteractivePty::resize` when the window or pane changes size. *Done when:* resizing the window while `htop` runs reflows it.
 - **Complete keyboard and mouse input.** *(implemented in `term_input.rs`: xterm keys including Alt+letter, bracketed paste, and mouse reports in SGR 1006 or X10 for clicks, drags, motion and the wheel; the kitty keyboard protocol is not done)* Function keys, Alt/Meta, Home/End/PgUp/PgDn, and application cursor mode. Mouse reporting (SGR 1006) for TUIs that ask for it. Bracketed paste. Later, the kitty keyboard protocol.
-- **Inline interactive panes.** Show a running PTY directly inside a split pane instead of a modal overlay, so `htop` can run next to a shell.
+- **Inline interactive panes.** *(implemented: in a split tab, `:tui` and full-screen programs run inside the active pane; one session per pane; Mosaic tiles do not show them)* Show a running PTY directly inside a split pane instead of a modal overlay, so `htop` can run next to a shell.
 - **Screen-accurate MCP reads.** `mrt_pty_read` can return the visible screen as text, the cursor position, and the scrollback, not only the raw byte transcript, so agents can drive TUIs reliably.
 
 ## Milestone 2 — Everyday terminal use

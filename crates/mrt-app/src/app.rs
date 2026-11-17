@@ -251,6 +251,17 @@ pub struct ActiveTuiSession {
     /// Shift), and whether a selection drag is in progress.
     pub selection: Option<crate::widgets::term_view::Selection>,
     pub selecting: bool,
+    /// `None` for the full-screen overlay; `Some(0)` / `Some(1)` for a session drawn
+    /// inside the primary / secondary pane of a split tab.
+    pub pane: Option<usize>,
+}
+
+/// Which TUI session receives the keyboard this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusedTui {
+    Overlay,
+    /// Index into `MrtGuiApp::pane_tuis`.
+    Pane(usize),
 }
 
 /// Lines of history the TUI overlay's emulator keeps.
@@ -259,6 +270,138 @@ const TUI_SCROLLBACK_LINES: usize = 5_000;
 const TUI_INITIAL_SIZE: (u16, u16) = (120, 35);
 
 impl ActiveTuiSession {
+    fn new(pty: InteractivePty, tab_id: Uuid, command: String, pane: Option<usize>, cols: u16, rows: u16) -> Self {
+        Self {
+            pty: std::sync::Arc::new(pty),
+            tab_id,
+            command,
+            start_time: std::time::Instant::now(),
+            term: TerminalEmulator::new(cols, rows, TUI_SCROLLBACK_LINES),
+            saved_history: Vec::new(),
+            mouse_held: None,
+            mouse_cell: None,
+            wheel_accum: 0.0,
+            selection: None,
+            selecting: false,
+            pane,
+        }
+    }
+
+    /// Feeds new PTY output into the emulator, flushes an expired synchronized update
+    /// and answers the program's queries. Returns the new output (for the activity
+    /// tracker).
+    fn pump_output(&mut self) -> String {
+        let fresh = self.pty.drain_output();
+        if !fresh.is_empty() {
+            self.term.feed(fresh.as_bytes());
+        }
+        if self.term.sync_deadline().is_some_and(|deadline| Instant::now() >= deadline) {
+            self.term.flush_sync();
+        }
+        // Answers to the program's queries (device attributes, cursor position, size).
+        let replies = self.term.take_replies();
+        if !replies.is_empty() {
+            let _ = self.pty.send_bytes(&replies);
+        }
+        fresh
+    }
+
+    /// Sends this frame's keyboard input to the program. Keys bound to MRT actions
+    /// (e.g. `exit_tui`) were already removed by `handle_keybindings`.
+    fn forward_keys(&mut self, ctx: &egui::Context) {
+        let modes = self.term.modes();
+        // egui-winit turns Ctrl+C (Cmd+C on macOS) into `Event::Copy` with no key event.
+        // It copies the selection when there is one, with Ctrl+Shift+C, and on macOS,
+        // as in Windows Terminal; otherwise it reaches the program as ^C (`encode_event`).
+        let has_selection = self.selection.is_some();
+        let (events, copy) = ctx.input(|i| {
+            let shift = i.modifiers.shift;
+            let is_copy = |e: &egui::Event| {
+                matches!(e, egui::Event::Copy) && (cfg!(target_os = "macos") || shift || has_selection)
+            };
+            let copy = i.events.iter().any(is_copy);
+            let events: Vec<egui::Event> = i.events.iter().filter(|e| !is_copy(e)).cloned().collect();
+            (events, copy)
+        });
+        if copy {
+            if let Some(selection) = self.selection.take() {
+                let text = crate::widgets::term_view::selection_text(&self.term.snapshot(), &selection);
+                ctx.copy_text(text);
+            }
+        }
+        let bytes = crate::term_input::encode_events(&events, &modes);
+        if !bytes.is_empty() {
+            // Typing replaces the selection, as in other terminals.
+            self.selection = None;
+            let _ = self.pty.send_bytes(&bytes);
+        }
+    }
+
+    /// Draws the terminal into the space `ui` has left, resizing the emulator and the
+    /// PTY to the whole cells that fit. A `focused` surface takes keyboard focus and the
+    /// mouse; an unfocused one only shows the program.
+    fn draw_surface(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, focused: bool, window_focused: bool) -> egui::Response {
+        let font = egui::TextStyle::Monospace.resolve(ui.style());
+        let cell = crate::widgets::term_view::cell_size(ui, &font);
+        // Only the visible part counts: inside a pane group the available width can run
+        // past the clip rect, which would cut off the last column.
+        let clip = ui.clip_rect();
+        let origin = ui.cursor().min;
+        let visible = egui::vec2(
+            ui.available_width().min(clip.right() - origin.x),
+            ui.available_height().min(clip.bottom() - origin.y),
+        );
+        let (cols, rows) = crate::widgets::term_view::grid_dims(visible, cell);
+        if (cols, rows) != (self.term.cols(), self.term.rows()) {
+            // portable-pty opens ConPTY with PSEUDOCONSOLE_RESIZE_QUIRK: ConPTY
+            // does not repaint after a resize and expects the terminal to resize
+            // its copy the way conhost does, adding blank rows at the bottom.
+            // alacritty instead pulls lines back from history when the screen
+            // grows, which shifts the screen and leaves stale rows. Move the
+            // history out first (it is kept for the command block).
+            if cfg!(windows) && self.term.scrollback_len() > 0 {
+                let history = self.term.scrollback_with_colors();
+                self.saved_history.extend(history);
+                self.term.clear_scrollback();
+            }
+            self.term.resize(cols, rows);
+            self.term.set_cell_size_px(cell.x.round() as u16, cell.y.round() as u16);
+            let _ = self.pty.resize(cols, rows);
+        }
+        let snapshot = self.term.snapshot();
+        let response =
+            crate::widgets::term_view::paint_terminal(
+                ui,
+                egui::Id::new(("tui_surface", self.tab_id, self.pane)),
+                &snapshot,
+                &font,
+                cell,
+                focused && window_focused,
+            );
+        if focused {
+            // Keep keyboard focus on the terminal so the command input does not also
+            // receive the keys, and so Tab, arrows and Esc stay with the program
+            // instead of moving egui's focus.
+            response.request_focus();
+            ui.memory_mut(|m| {
+                m.set_focus_lock_filter(
+                    response.id,
+                    egui::EventFilter {
+                        tab: true,
+                        horizontal_arrows: true,
+                        vertical_arrows: true,
+                        escape: true,
+                    },
+                )
+            });
+            forward_tui_mouse(ctx, self, response.rect, cell, &snapshot.modes);
+        }
+        if let Some(selection) = &self.selection {
+            crate::widgets::term_view::paint_selection(ui, response.rect, cell, snapshot.cols, snapshot.rows, selection);
+        }
+        response
+    }
+
     /// Text to store in the command block when the session ends: what the terminal
     /// shows (history plus the main screen) with its colors. The raw transcript is
     /// mostly cursor movement (full-screen programs, and ConPTY on Windows), which
@@ -294,6 +437,8 @@ pub struct MrtGuiApp {
     pub busy_count: usize,
     pub focused_on_start: bool,
     pub active_tui: Option<ActiveTuiSession>,
+    /// TUI sessions running inside split panes (`ActiveTuiSession::pane` is `Some`).
+    pub pane_tuis: Vec<ActiveTuiSession>,
     /// Resolves key presses into actions (configurable keybindings).
     pub(crate) key_resolver: KeyResolver,
     /// Problems found while loading keybinding overrides, shown in the palette.
@@ -418,6 +563,7 @@ impl MrtGuiApp {
             busy_count: 0,
             focused_on_start: false,
             active_tui: None,
+            pane_tuis: Vec::new(),
             key_resolver,
             keymap_issues,
             tui_exit_requested: false,
@@ -625,7 +771,7 @@ impl MrtGuiApp {
                 );
             }
         }
-        if let Some(tui) = &self.active_tui {
+        for tui in self.active_tui.iter().chain(self.pane_tuis.iter()) {
             if let Some(pid) = tui.pty.process_id() {
                 map.insert(
                     pid,
@@ -2167,24 +2313,24 @@ impl MrtGuiApp {
 
         if let Some(tui_cmd) = is_tui_command {
             let (cols, rows) = TUI_INITIAL_SIZE;
+            // In a split tab the program runs inside the active pane (unless that pane
+            // already has one); otherwise it gets the full-screen overlay.
+            let pane = tab
+                .secondary_pane
+                .is_some()
+                .then_some(tab.active_pane_idx)
+                .filter(|p| !self.pane_tuis.iter().any(|s| s.tab_id == tab_id && s.pane == Some(*p)));
             match InteractivePty::spawn_with_command(&shell, &cwd, cols, rows, Some(&tui_cmd)) {
                 Ok(pty) => {
                     if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
                         tab.activity.command_started(&tui_cmd, Instant::now());
                     }
-                    self.active_tui = Some(ActiveTuiSession {
-                        pty: std::sync::Arc::new(pty),
-                        tab_id,
-                        command: tui_cmd,
-                        start_time: std::time::Instant::now(),
-                        term: TerminalEmulator::new(cols, rows, TUI_SCROLLBACK_LINES),
-                        saved_history: Vec::new(),
-                        mouse_held: None,
-                        mouse_cell: None,
-                        wheel_accum: 0.0,
-                        selection: None,
-                        selecting: false,
-                    });
+                    let session = ActiveTuiSession::new(pty, tab_id, tui_cmd, pane, cols, rows);
+                    if pane.is_some() {
+                        self.pane_tuis.push(session);
+                    } else {
+                        self.active_tui = Some(session);
+                    }
                 }
                 Err(e) => {
                     let err_block = CommandBlock::new_completed(
@@ -2749,112 +2895,123 @@ impl MrtGuiApp {
         }
     }
 
-    fn process_tui_session(&mut self, ctx: &egui::Context) {
-        let Some(ref session) = self.active_tui else {
-            return;
-        };
+    /// The TUI session that receives the keyboard: the overlay when it is open,
+    /// otherwise the session in the active pane of the active tab. None while the
+    /// command palette or the Safety Gate is open, or in Mosaic.
+    fn focused_tui(&self) -> Option<FocusedTui> {
+        if self.active_tui.is_some() {
+            return Some(FocusedTui::Overlay);
+        }
+        if self.mosaic || self.show_command_palette || self.pending_safety.is_some() {
+            return None;
+        }
+        let tab = self.tabs.get(self.active_tab)?;
+        let pane = if tab.secondary_pane.is_some() { tab.active_pane_idx } else { 0 };
+        self.pane_tuis
+            .iter()
+            .position(|s| s.tab_id == tab.id && s.pane == Some(pane))
+            .map(FocusedTui::Pane)
+    }
 
+    /// Runs every TUI session for one frame: output, exit detection, and keyboard input
+    /// for the focused one. Finished sessions become command blocks in their pane.
+    fn process_tui_session(&mut self, ctx: &egui::Context) {
+        // Pane sessions whose pane is gone (tab closed, split removed) end without a block.
+        let tabs = &self.tabs;
+        self.pane_tuis.retain(|s| {
+            let alive = tabs.iter().any(|t| t.id == s.tab_id && (s.pane != Some(1) || t.secondary_pane.is_some()));
+            if !alive {
+                let _ = s.pty.kill();
+            }
+            alive
+        });
+        if self.active_tui.is_none() && self.pane_tuis.is_empty() {
+            return;
+        }
         ctx.request_repaint_after(std::time::Duration::from_millis(30));
 
-        let mut close_session = false;
-        let mut exit_code = 0;
-
-        // Feed new PTY output to the screen emulator and the tab's activity tracker.
-        let fresh = session.pty.drain_output();
-        if !fresh.is_empty() {
-            let tab_id = session.tab_id;
-            if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
-                tab.activity.feed_output(&fresh, Instant::now());
-            }
-        }
-        let Some(session) = self.active_tui.as_mut() else {
-            return;
-        };
-        if !fresh.is_empty() {
-            session.term.feed(fresh.as_bytes());
-        }
-        if session.term.sync_deadline().is_some_and(|deadline| Instant::now() >= deadline) {
-            session.term.flush_sync();
-        }
-        // Answers to the program's queries (device attributes, cursor position, size).
-        let replies = session.term.take_replies();
-        if !replies.is_empty() {
-            let _ = session.pty.send_bytes(&replies);
-        }
-        let modes = session.term.modes();
-        let Some(session) = self.active_tui.as_mut() else {
-            return;
-        };
-
-        // Check if the process exited on its own
-        if let Ok(Some(code)) = session.pty.try_wait_exit() {
-            close_session = true;
-            exit_code = code as i32;
-        }
-
-        // Keys bound to actions (e.g. `exit_tui`, Ctrl+Q by default) were already
-        // removed from the input by `handle_keybindings`; forward the rest to the PTY.
+        let focused = self.focused_tui();
         let kill_requested = std::mem::take(&mut self.tui_exit_requested);
-        // egui-winit turns Ctrl+C (Cmd+C on macOS) into `Event::Copy` with no key event.
-        // It copies the selection when there is one, with Ctrl+Shift+C, and on macOS,
-        // as in Windows Terminal; otherwise it reaches the program as ^C (`encode_event`).
-        let has_selection = session.selection.is_some();
-        let (events, copy) = ctx.input(|i| {
-            let shift = i.modifiers.shift;
-            let is_copy = |e: &egui::Event| {
-                matches!(e, egui::Event::Copy) && (cfg!(target_os = "macos") || shift || has_selection)
-            };
-            let copy = i.events.iter().any(is_copy);
-            let events: Vec<egui::Event> = i.events.iter().filter(|e| !is_copy(e)).cloned().collect();
-            (events, copy)
-        });
-        if copy {
-            if let Some(selection) = session.selection.take() {
-                let text = crate::widgets::term_view::selection_text(&session.term.snapshot(), &selection);
-                ctx.copy_text(text);
-            }
-        }
-        let bytes = crate::term_input::encode_events(&events, &modes);
-        if !bytes.is_empty() {
-            // Typing replaces the selection, as in other terminals.
-            session.selection = None;
-            let _ = session.pty.send_bytes(&bytes);
-        }
+        let now = Instant::now();
 
-        if kill_requested {
-            let _ = session.pty.kill();
-            close_session = true;
-            exit_code = 130;
-        }
-
-        if close_session {
-            if let Some(mut session) = self.active_tui.take() {
-                // Pick up output that arrived after this frame's drain.
-                let rest = session.pty.drain_output();
-                if !rest.is_empty() {
-                    session.term.feed(rest.as_bytes());
-                }
-                let output = session.final_output();
-                let duration_ms = session.start_time.elapsed().as_millis() as u64;
-
-                if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == session.tab_id) {
-                    tab.activity.command_finished(exit_code, Instant::now());
-                    let shell_name = self
-                        .shells
-                        .get(tab.active_shell_idx)
-                        .map(|s| s.name.clone())
-                        .unwrap_or_else(|| "default".into());
-                    let block = CommandBlock::new_completed(
-                        session.command,
-                        shell_name,
-                        tab.cwd.display().to_string(),
-                        output,
-                        exit_code,
-                        duration_ms,
-                    );
-                    tab.blocks.push(block);
+        let mut overlay_exit = None;
+        if let Some(session) = self.active_tui.as_mut() {
+            let fresh = session.pump_output();
+            if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == session.tab_id) {
+                if !fresh.is_empty() {
+                    tab.activity.feed_output(&fresh, now);
                 }
             }
+            overlay_exit = session.pty.try_wait_exit().ok().flatten().map(|c| c as i32);
+            if focused == Some(FocusedTui::Overlay) {
+                session.forward_keys(ctx);
+                if kill_requested {
+                    let _ = session.pty.kill();
+                    overlay_exit = Some(130);
+                }
+            }
+        }
+        if let Some(code) = overlay_exit {
+            if let Some(session) = self.active_tui.take() {
+                self.finish_tui(session, code);
+            }
+        }
+
+        let mut index = 0;
+        while index < self.pane_tuis.len() {
+            let session = &mut self.pane_tuis[index];
+            let fresh = session.pump_output();
+            if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == session.tab_id) {
+                if !fresh.is_empty() {
+                    tab.activity.feed_output(&fresh, now);
+                }
+            }
+            let mut exit = session.pty.try_wait_exit().ok().flatten().map(|c| c as i32);
+            if focused == Some(FocusedTui::Pane(index)) {
+                session.forward_keys(ctx);
+                if kill_requested {
+                    let _ = session.pty.kill();
+                    exit = Some(130);
+                }
+            }
+            if let Some(code) = exit {
+                let session = self.pane_tuis.remove(index);
+                self.finish_tui(session, code);
+                continue;
+            }
+            index += 1;
+        }
+    }
+
+    /// Stores a finished TUI session as a command block in the pane it ran in.
+    fn finish_tui(&mut self, mut session: ActiveTuiSession, exit_code: i32) {
+        // Pick up output that arrived after this frame's drain.
+        let rest = session.pty.drain_output();
+        if !rest.is_empty() {
+            session.term.feed(rest.as_bytes());
+        }
+        let output = session.final_output();
+        let duration_ms = session.start_time.elapsed().as_millis() as u64;
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == session.tab_id) else {
+            return;
+        };
+        tab.activity.command_finished(exit_code, Instant::now());
+        let shell_name = self
+            .shells
+            .get(tab.active_shell_idx)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| "default".into());
+        let block = CommandBlock::new_completed(
+            session.command,
+            shell_name,
+            tab.cwd.display().to_string(),
+            output,
+            exit_code,
+            duration_ms,
+        );
+        match (session.pane, tab.secondary_pane.as_mut()) {
+            (Some(1), Some(secondary)) => secondary.blocks.push(block),
+            _ => tab.blocks.push(block),
         }
     }
 
@@ -2921,54 +3078,61 @@ impl MrtGuiApp {
                         });
                         ui.separator();
 
-                        // Size the PTY to the space the overlay has, in whole cells.
-                        let font = egui::TextStyle::Monospace.resolve(ui.style());
-                        let cell = crate::widgets::term_view::cell_size(ui, &font);
-                        let (cols, rows) = crate::widgets::term_view::grid_dims(ui.available_size(), cell);
-                        if (cols, rows) != (session.term.cols(), session.term.rows()) {
-                            // portable-pty opens ConPTY with PSEUDOCONSOLE_RESIZE_QUIRK: ConPTY
-                            // does not repaint after a resize and expects the terminal to resize
-                            // its copy the way conhost does, adding blank rows at the bottom.
-                            // alacritty instead pulls lines back from history when the screen
-                            // grows, which shifts the screen and leaves stale rows. Move the
-                            // history out first (it is kept for the command block).
-                            if cfg!(windows) && session.term.scrollback_len() > 0 {
-                                let history = session.term.scrollback_with_colors();
-                                session.saved_history.extend(history);
-                                session.term.clear_scrollback();
-                            }
-                            session.term.resize(cols, rows);
-                            session.term.set_cell_size_px(cell.x.round() as u16, cell.y.round() as u16);
-                            let _ = session.pty.resize(cols, rows);
-                        }
-                        let snapshot = session.term.snapshot();
-                        let response =
-                            crate::widgets::term_view::paint_terminal(ui, &snapshot, &font, cell, window_focused);
-                        // Keep keyboard focus on the terminal so the command input underneath
-                        // does not also receive the keys, and so Tab, arrows and Esc stay with
-                        // the program instead of moving egui's focus.
-                        response.request_focus();
-                        ui.memory_mut(|m| {
-                            m.set_focus_lock_filter(
-                                response.id,
-                                egui::EventFilter {
-                                    tab: true,
-                                    horizontal_arrows: true,
-                                    vertical_arrows: true,
-                                    escape: true,
-                                },
-                            )
-                        });
-                        forward_tui_mouse(ctx, session, response.rect, cell, &snapshot.modes);
-                        if let Some(selection) = &session.selection {
-                            crate::widgets::term_view::paint_selection(ui, response.rect, cell, snapshot.cols, snapshot.rows, selection);
-                        }
+                        session.draw_surface(ctx, ui, true, window_focused);
                     });
             });
         if exit_clicked {
             let _ = session.pty.kill();
         }
     }
+}
+
+/// Draws the inline TUI session of `tab_id`'s pane `pane`, if it has one: a header
+/// with the program's title and an exit button, then the terminal, `height` tall
+/// (or all the space left). Returns `None` when the pane has no session, otherwise
+/// whether the user clicked the terminal (to focus that pane).
+#[allow(clippy::too_many_arguments)]
+fn draw_pane_tui(
+    ctx: &egui::Context,
+    ui: &mut egui::Ui,
+    sessions: &mut [ActiveTuiSession],
+    tab_id: Uuid,
+    pane: usize,
+    height: Option<f32>,
+    focused: bool,
+    window_focused: bool,
+    exit_keys: &str,
+) -> Option<bool> {
+    let session = sessions.iter_mut().find(|s| s.tab_id == tab_id && s.pane == Some(pane))?;
+    let mut clicked = false;
+    let size = egui::vec2(ui.available_width(), height.unwrap_or_else(|| ui.available_height()));
+    ui.allocate_ui(size, |ui| {
+        ui.horizontal(|ui| {
+            let title = session
+                .term
+                .title()
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or_else(|| session.command.clone());
+            ui.label(RichText::new(format!("📺 {}", shorten(&title, 60))).monospace().color(Palette::TEXT_SECONDARY));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let label = if exit_keys.is_empty() { "Exit".to_string() } else { format!("Exit ({exit_keys})") };
+                if ui.small_button(RichText::new(label).color(Palette::ACCENT_RED)).clicked() {
+                    let _ = session.pty.kill();
+                }
+            });
+        });
+        let response = session.draw_surface(ctx, ui, focused, window_focused);
+        // A press anywhere on the terminal focuses its pane. Read from this frame's
+        // events: when press and release arrive in the same frame, egui has already
+        // cleared `press_origin` and `response.clicked()` does not fire.
+        let pressed_inside = ui.input(|i| {
+            i.events.iter().any(|e| {
+                matches!(e, egui::Event::PointerButton { pos, pressed: true, .. } if response.rect.contains(*pos))
+            })
+        });
+        clicked = response.clicked() || response.drag_started() || pressed_inside;
+    });
+    Some(clicked)
 }
 
 /// Sends this frame's mouse input over the TUI grid (`rect`, cells of `cell` size) to
@@ -3110,8 +3274,10 @@ impl MrtGuiApp {
                 }
             }
         }
-        if let Some(pid) = self.active_tui.as_ref().and_then(|s| s.pty.process_id().map(|p| (s.tab_id, p))) {
-            roots.push(pid);
+        for session in self.active_tui.iter().chain(self.pane_tuis.iter()) {
+            if let Some(pid) = session.pty.process_id() {
+                roots.push((session.tab_id, pid));
+            }
         }
         for (tab_id, pid) in roots {
             let names: Vec<&str> = snapshot
@@ -3147,7 +3313,7 @@ impl MrtGuiApp {
     /// TUI PTY see them; unbound keys pass through untouched.
     fn handle_keybindings(&mut self, ctx: &egui::Context) {
         let now = std::time::Instant::now();
-        let context = KeyContext { tui_active: self.active_tui.is_some() };
+        let context = KeyContext { tui_active: self.focused_tui().is_some() };
         self.key_resolver.tick(now);
         let mut actions = Vec::new();
         let resolver = &mut self.key_resolver;
@@ -3869,8 +4035,8 @@ impl eframe::App for MrtGuiApp {
                     let may_focus = focus_prompt
                         && !self.show_command_palette
                         && self.pending_safety.is_none()
-                        && self.active_tui.is_none();
-                    let tui_active = self.active_tui.is_some();
+                        && self.focused_tui().is_none();
+                    let tui_active = self.focused_tui().is_some();
                     let shells = &self.shells;
                     if let Some(tab) = self.tabs.get_mut(active_idx).filter(|_| !mosaic) {
                         egui::Frame::none()
@@ -4006,6 +4172,18 @@ impl eframe::App for MrtGuiApp {
                 return;
             }
             let mut pending_block_action = None;
+            // Inline TUI sessions in split panes take the keyboard only when no overlay or
+            // modal is open.
+            let pane_focus_allowed =
+                self.active_tui.is_none() && !self.show_command_palette && self.pending_safety.is_none();
+            let window_focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+            let exit_keys = self
+                .key_resolver
+                .keymap()
+                .bindings_for(&Action::ExitTui)
+                .into_iter()
+                .next()
+                .unwrap_or_default();
 
             if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                 if tab.split_direction == SplitDirection::Horizontal && tab.secondary_pane.is_some() {
@@ -4020,6 +4198,11 @@ impl eframe::App for MrtGuiApp {
                                     tab.active_pane_idx = 0;
                                 }
                             });
+                            if let Some(clicked) = draw_pane_tui(ctx, ui, &mut self.pane_tuis, tab.id, 0, None, pane_focus_allowed && tab.active_pane_idx == 0, window_focused, &exit_keys) {
+                                if clicked {
+                                    tab.active_pane_idx = 0;
+                                }
+                            } else {
                             egui::ScrollArea::vertical()
                                 .id_salt("split_pane_primary")
                                 .auto_shrink([false, false])
@@ -4036,6 +4219,7 @@ impl eframe::App for MrtGuiApp {
                                         ui.add_space(8.0);
                                     }
                                 });
+                            }
                         });
 
                         // Right column: Secondary pane
@@ -4049,6 +4233,11 @@ impl eframe::App for MrtGuiApp {
                                     tab.active_pane_idx = 1;
                                 }
                             });
+                            if let Some(clicked) = draw_pane_tui(ctx, ui, &mut self.pane_tuis, tab.id, 1, None, pane_focus_allowed && tab.active_pane_idx == 1, window_focused, &exit_keys) {
+                                if clicked {
+                                    tab.active_pane_idx = 1;
+                                }
+                            } else {
                             egui::ScrollArea::vertical()
                                 .id_salt("split_pane_secondary")
                                 .auto_shrink([false, false])
@@ -4068,6 +4257,7 @@ impl eframe::App for MrtGuiApp {
                                         ui.add_space(8.0);
                                     }
                                 });
+                            }
                         });
                     });
                 } else if tab.split_direction == SplitDirection::Vertical && tab.secondary_pane.is_some() {
@@ -4081,7 +4271,12 @@ impl eframe::App for MrtGuiApp {
                                 tab.active_pane_idx = 0;
                             }
                         });
-                        egui::ScrollArea::vertical()
+                        if let Some(clicked) = draw_pane_tui(ctx, ui, &mut self.pane_tuis, tab.id, 0, Some(half_h), pane_focus_allowed && tab.active_pane_idx == 0, window_focused, &exit_keys) {
+                                if clicked {
+                                    tab.active_pane_idx = 0;
+                                }
+                            } else {
+                            egui::ScrollArea::vertical()
                             .id_salt("split_v_primary")
                             .max_height(half_h)
                             .stick_to_bottom(true)
@@ -4097,6 +4292,7 @@ impl eframe::App for MrtGuiApp {
                                     ui.add_space(6.0);
                                 }
                             });
+                            }
                     });
 
                     ui.separator();
@@ -4111,7 +4307,12 @@ impl eframe::App for MrtGuiApp {
                                 tab.active_pane_idx = 1;
                             }
                         });
-                        egui::ScrollArea::vertical()
+                        if let Some(clicked) = draw_pane_tui(ctx, ui, &mut self.pane_tuis, tab.id, 1, Some(half_h), pane_focus_allowed && tab.active_pane_idx == 1, window_focused, &exit_keys) {
+                                if clicked {
+                                    tab.active_pane_idx = 1;
+                                }
+                            } else {
+                            egui::ScrollArea::vertical()
                             .id_salt("split_v_secondary")
                             .max_height(half_h)
                             .stick_to_bottom(true)
@@ -4130,6 +4331,7 @@ impl eframe::App for MrtGuiApp {
                                     ui.add_space(6.0);
                                 }
                             });
+                            }
                     });
                 } else {
                     egui::ScrollArea::vertical()
@@ -5129,6 +5331,50 @@ mod tests {
         assert!(!app.tabs[0].blocks.is_empty());
         let last_blk = app.tabs[0].blocks.last().unwrap();
         assert!(last_blk.command.contains("interactive_tui_test"));
+    }
+
+    #[test]
+    fn tui_in_a_split_tab_runs_inside_the_active_pane() {
+        let mut app = MrtGuiApp::new();
+        app.submit_input(Some(":split".to_string()), false);
+        assert!(app.tabs[0].secondary_pane.is_some());
+        app.tabs[0].active_pane_idx = 1;
+
+        app.submit_input(Some(":tui echo pane_tui_test".to_string()), false);
+        assert!(app.active_tui.is_none(), "a split tab must not open the overlay");
+        assert_eq!(app.pane_tuis.len(), 1);
+        assert_eq!(app.pane_tuis[0].pane, Some(1));
+        assert_eq!(app.focused_tui(), Some(FocusedTui::Pane(0)));
+
+        let ctx = egui::Context::default();
+        let start = Instant::now();
+        while !app.pane_tuis.is_empty() && start.elapsed() < Duration::from_secs(10) {
+            app.process_tui_session(&ctx);
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        assert!(app.pane_tuis.is_empty(), "the session did not end");
+        // The block lands in the pane the program ran in.
+        let secondary = app.tabs[0].secondary_pane.as_ref().unwrap();
+        assert!(secondary.blocks.iter().any(|b| b.command.contains("pane_tui_test")));
+        assert!(!app.tabs[0].blocks.iter().any(|b| b.command.contains("pane_tui_test")));
+    }
+
+    #[test]
+    fn closing_the_split_ends_its_pane_session() {
+        let mut app = MrtGuiApp::new();
+        app.submit_input(Some(":split".to_string()), false);
+        app.tabs[0].active_pane_idx = 1;
+        let long = if cfg!(windows) { ":tui ping -n 30 127.0.0.1" } else { ":tui sleep 30" };
+        app.submit_input(Some(long.to_string()), false);
+        assert_eq!(app.pane_tuis.len(), 1);
+        // The other pane is focused, so the session does not get the keyboard.
+        app.tabs[0].active_pane_idx = 0;
+        assert_eq!(app.focused_tui(), None);
+
+        app.submit_input(Some(":unsplit".to_string()), false);
+        let ctx = egui::Context::default();
+        app.process_tui_session(&ctx);
+        assert!(app.pane_tuis.is_empty(), "removing the split must end its session");
     }
 
     /// Waits for the next worker event and feeds it back through the GUI event loop.

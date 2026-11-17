@@ -48,7 +48,7 @@ The Cargo workspace contains 5 modular crates:
   - `assist.rs`: Multi-step `:assist` investigations over MRT's read-only MCP tools (model-driven JSON tool calls, or a built-in offline plan); suggestions are never executed directly.
   - `lib.rs`: Multi-provider AI client supporting **Google Gemini**, **Anthropic Claude**, **OpenAI**, **xAI Grok**, **DeepSeek**, **OpenRouter**, **Local Ollama**, and a deterministic **Offline Polyglot Heuristic Engine**, with streaming token delivery (`diagnose_command_error_streaming`).
 - **`crates/mrt-app`**:
-  - `main.rs`: Entrypoint (`#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]`), CLI flag handler (`--mcp-server`, `--version`, `--help`, and the `mrt agent setup|show|remove` subcommand in `agent_setup.rs`), and `eframe` native GPU launcher.
+  - `main.rs`: Entrypoint (`#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]`), CLI dispatch (`--mcp-server`, `--version`, `--help`, `mrt agent setup|show|remove` in `agent_setup.rs`, `list|send|capture|split|quick|quit` in `cli.rs`, `share|pair|attach` in `remote_cli.rs`, `server` in `server.rs`, `session-host` in `session_host.rs`), the single-instance handoff, and the `eframe` launcher.
   - `copy_mode.rs` & `hooks.rs`: Keyboard copy mode over a tab's blocks, and `[[hooks]]` event commands run in the background (`CREATE_NO_WINDOW`, `MRT_*` environment). Named `[[actions]]` (`run:<name>`) and pane broadcast (`:broadcast`) live in `app.rs`.
   - `session_host.rs`: `mrt session-host`, the separate process that owns the tabs' shells and running commands (`terminal.session_server`); the window runs commands through it and reattaches after closing or crashing.
   - `remote_cli.rs`: `mrt share`, `mrt pair`, `mrt attach` and `--host`.

@@ -1,82 +1,94 @@
 # MRT Architecture & Technical Guide
 
-**Modern Rust Terminal (MRT)** is designed around a modular 5-crate Rust workspace so that the terminal core, network and process tools, MCP engine, and multi-provider AI runtime can be tested independently and used in both GUI mode (`mrt`) and headless MCP Server mode (`mrt --mcp-server`).
+**Modern Rust Terminal (MRT)** is a 5-crate Rust workspace: the terminal core, the network and process tools, the MCP engine, the multi-provider AI runtime, and the GUI application can be tested on their own and used in several processes (the window, the session host, the headless MCP server, the CLI, the remote relay).
 
 ---
 
-## High-Level Data Flow
+## Processes
 
 ```mermaid
 flowchart LR
-    User["User / External AI Agent"] --> Input["Smart Input Bar / MCP Server + GUI Bridge"]
-    Input -->|Shell Command| Safety["Safety Gate Classifier\n(mrt-core::safety)"]
-    Safety -->|Safe or Approved| ShellExec["Polyglot Shell & PTY Engine\n(pwsh / cmd / bash / wsl / zsh)"]
-    Input -->|':http' / ':web' / ':ports' / ':ps' / ':kill'| NetTools["Built-in Toolbox: Network Tools & Task Manager\n(mrt-tools)"]
-    NetTools -->|':kill' plans| Safety
-    Input -->|'# ' or '? ' Prompt| AI["Multi-Provider AI Engine\n(Gemini / Claude / OpenAI / Grok / DeepSeek / Ollama)"]
-    Input -->|':mcp' or Side Panel| MCP["MCP Host, Server & Live GUI Bridge\n(mrt-mcp)"]
-    ShellExec --> Classifier["Structured Output Detector\n(JSON / Table / Markdown / ANSI)"]
-    NetTools --> Classifier
-    MCP --> Classifier
-    Classifier --> BlockUI["GPU Block Viewport\n(mrt-app / egui + wgpu)"]
+    subgraph Desktop
+        Window["mrt (window)\negui GUI, MCP bridge"]
+        Host["mrt session-host\ntab shells, commands,\nTUI and agent PTYs"]
+        CLI["mrt list / send / capture /\nsplit / quick / quit"]
+        Agent["Coding agent\n(mrt --mcp-server)"]
+        Share["mrt share\nNoise relay + HTTPS companion"]
+    end
+    Guest["mrt pair / attach / --host\n(another computer)"]
+    Phone["Phone browser\n(companion web app)"]
+    Window -- "run / job_stream / pty_stream" --> Host
+    CLI -- "MCP tools/call over the bridge" --> Window
+    Agent -- "MCP over the bridge" --> Window
+    Share -- "MCP over the bridge" --> Window
+    Guest -- "SPAKE2 pairing, Noise_XX" --> Share
+    Phone -- "HTTPS + token" --> Share
+```
+
+- **The window** (`mrt`) draws the UI and owns the MCP state and the token-authenticated localhost **bridge** (`mcp-bridge.json`). A second `mrt` hands off to the running window (`cli::handoff_to_running_instance`); a newer version replaces an idle older window and leaves a busy one running.
+- **The session host** (`mrt session-host`, `terminal.session_server`) owns the tabs' persistent shells, running commands, full-screen programs and agents' PTYs. The window follows them over event streams, and a new window reattaches after a close or crash. See [SESSION_SERVER.md](SESSION_SERVER.md).
+- **`mrt server`** serves the MCP tools headless (CLI and agents without a window).
+- **`mrt share`** is an encrypted relay in front of the bridge for paired devices, and with `--web` serves the phone companion over HTTPS.
+- All data files live in `platform::data_dir()` (`$MRT_DATA_DIR` or the platform's local data folder).
+
+## Data flow inside the window
+
+```mermaid
+flowchart LR
+    User["User / AI agent / CLI / paired device"] --> Input["Prompt, Command Palette, keymap,\nMCP bridge"]
+    Input -->|Shell command| Safety["Safety Gate\n(mrt-core::safety)"]
+    Safety -->|Safe or approved| Host["Session host or in-window ShellPool\n(persistent shells, OSC 133)"]
+    Input -->|":http :web :ports :dns :ws :ps :kill :services ..."| Tools["Toolbox: network tools,\nTask Manager (mrt-tools)"]
+    Input -->|"# ? :assist"| AI["AI translation, triage,\nmulti-step assistance (mrt-ai)"]
+    Input -->|":tui vim htop ..."| PTY["InteractivePty (local or hosted)\n+ TerminalEmulator grid"]
+    Host --> Stream["VtStream: incremental parse,\nimages, OSC events"]
+    Tools --> Blocks
+    AI --> Blocks
+    Stream --> Blocks["Command blocks\n(structured output, tail rendering)"]
+    PTY --> Grid["TUI overlay / panes\n(term_view, grid images)"]
 ```
 
 ---
 
 ## Crate-by-Crate Breakdown
 
-### 1. `mrt-core` — Polyglot Shell, Interactive PTYs, VT Parser, Blocks, Shell Integration & Safety Gate
-- **Multi-Shell Discovery (`discover_shells`)**: Automatically probes the OS and `PATH` for PowerShell 7 (`pwsh`), Windows PowerShell (`powershell`), Command Prompt / Batch (`cmd.exe`), Git Bash (`bash.exe`), WSL (`wsl.exe`), Bash, Zsh, Fish, Nushell (`nu`), and POSIX `sh`.
-- **Interactive PTY Engine (`InteractivePty`)**: Wraps `portable-pty` for persistent interactive sessions with raw/line input (`\r\n` on Windows, `\n` on Unix), unread buffer draining, full transcript reading, dynamic resizing, exit polling, and process termination.
-- **Shell Integration (`shell_integration.rs`)**: Parses OSC 133 semantic prompt escape markers (`133;A` prompt start, `133;B` prompt end, `133;C` executed, `133;D` finished with exit code) and generates integration scripts for Bash, Zsh, Fish, PowerShell, and CMD. `shell_session.rs` injects them into each tab's persistent shell.
-- **Terminal Grid Emulator (`term.rs`)**: `TerminalEmulator` wraps `alacritty_terminal` to keep a real screen of cells (cursor, scroll regions, alternate screen, wide characters, scrollback, input modes) for full-screen programs, and returns the replies the PTY expects. The GUI's TUI overlay draws from it.
-- **ANSI / VT100 Parser (`vt.rs`)**: Uses `vte` to parse SGR colors (16-color and 24-bit RGB truecolor), bold, italic, and underline attributes into `Vec<AnsiSpan>` while simultaneously producing clean plain text for structured output classification.
-- **Persistent Shell Sessions (`shell_session.rs`)**: `ShellSession` keeps one long-lived PTY shell with the integration script injected and uses OSC 133 markers to split its output into commands with exact exit codes, duration, and the OSC 7 working directory. It reports when integration fails so callers can fall back to one process per command. The GUI runs tab commands through it (`mrt-app/src/shell_pool.rs`).
-- **OSC Events & Links (`vt.rs`, `links.rs`)**: `parse_ansi_rich` returns OSC 7 working-directory, OSC 8 hyperlink, and OSC 52 clipboard events alongside the styled spans; `detect_links` finds plain-text URLs and `path:line[:col]` locations for the block renderer.
-- **Tab Activity (`activity.rs`)**: `ActivityTracker` combines block lifecycle events, `OSC 9;4` progress, MRT's `OSC 678` status sequence, and conservative "waiting for input" heuristics (including agent CLIs) into one state per tab, shown in the GUI and in MCP tab output.
-- **Structured Output Classifier (`block.rs`)**: Inspects completed command outputs and classifies them into:
-  - `StructuredOutput::Json(Value)` — Rendered as an interactive collapsible tree.
-  - `StructuredOutput::Table { headers, rows }` — Rendered as a striped, filterable grid.
-  - `StructuredOutput::Markdown(String)` — Rendered with styled headings and bullet lists.
-  - `StructuredOutput::HttpResult(HttpExchangeSummary)` — Rendered with status badge, latency, headers, and body tree.
-  - `StructuredOutput::RawText` — Rendered with full ANSI styling.
-- **Safety Approval Gate (`safety.rs`)**: Classifies commands into `Safe`, `Moderate`, or `Critical` across Unix, PowerShell, Windows Batch, Git, SQL, Kubernetes, and process control (`kill`, `pkill`, `taskkill`, `Stop-Process`; OS-critical targets are Critical). Critical commands require explicit user confirmation in the GUI and are blocked when invoked unapproved via MCP.
-- **Configuration file (`config.rs`)**: Serde schema for `config.toml` / `.mrt.toml` with defaults for every field, layered merge (user file, then project file), and a metadata-polling `ConfigWatcher` that debounces changes. `mrt-app/src/config_runtime.rs` applies it to the GUI (first-tab shell, font size, Safety Gate options, AI preferences, startup MCP servers) and shows parse errors in a banner while keeping the last good config.
-- **PID tracking (`execute_command_streaming_with_pid`, `InteractivePty::process_id`)**: Reports the OS PID of each spawned shell and PTY so the Task Manager can mark MRT-owned processes and the block **Stop** button can stop a command's process tree.
+### 1. `mrt-core` — shells, PTYs, terminal emulation, blocks, safety
+- **Shell discovery and execution (`pty.rs`)**: finds PowerShell 7, Windows PowerShell, CMD, Git Bash, WSL, Bash, Zsh, Fish, Nushell and `sh`; runs one-off commands with 64 KiB streaming reads (`execute_command_streaming_with_pid`); `InteractivePty` has a local and a **hosted** backend (`pty_host.rs`) with the same API.
+- **Persistent shells (`shell_session.rs`, `shell_integration.rs`)**: one PTY shell per tab with the OSC 133 / OSC 7 integration injected (or typed in over SSH, `spawn_remote`); the `Normalizer` turns ConPTY repaints back into text and passes OSC 8 / 52 / 1337, kitty APC and Sixel DCS through.
+- **VT parsing (`vt.rs`, `images.rs`, `theme_file.rs`)**: `VtStream` parses streamed output chunk by chunk into styled spans, plain text, OSC events and inline images (iTerm2, kitty, Sixel); the ANSI palette can come from a theme file.
+- **Terminal grid (`term.rs`, `grid_images.rs`)**: `TerminalEmulator` wraps `alacritty_terminal` for full-screen programs and places image sequences (taken out by `GraphicsSplitter`) in the grid.
+- **Blocks (`block.rs`)**: `CommandBlock` with incremental `append_output`, a per-block output limit, inline images, and structured classification (JSON, CSV/TSV tables, Markdown, HTTP).
+- **Safety Gate (`safety.rs`)**: Safe / Moderate / Critical across shells, Git, SQL, Kubernetes, process control and service control.
+- **Activity (`activity.rs`), links (`links.rs`), configuration (`config.rs`), platform helpers (`platform.rs`)**: tab status from OSC 9;4 / OSC 678 / heuristics; URL and `path:line` detection; layered `config.toml` + `.mrt.toml` with a watcher (`[[actions]]`, `[[hooks]]`, keybindings, theme, fonts, limits); login-shell `PATH`, console attach and the data folder.
 
-### 2. `mrt-tools` — Built-in Network Tools & Task Manager
-- **`http_inspector.rs`**: Executes REST/HTTP calls (`GET`, `POST`, `PUT`, `DELETE`, `PATCH`), measuring round-trip latency and auto-formatting JSON responses.
-- **`web_fetch.rs`**: Fetches live web pages and converts HTML into clean Markdown (stripping `<script>`, `<style>`, `<svg>`).
-- **`net_inspector.rs`**: Queries local listening sockets (`netstat -ano` on Windows, `/usr/sbin/lsof` on macOS, `ss -tulnp` on Linux/Unix) and returns a structured table of Protocol, Local Address, Port, State, and PID.
-- **`dns_inspector.rs`**: Resolves IPv4 and IPv6 records, measures DNS lookup time, and concurrently benchmarks TCP handshake latency across all endpoints.
-- **`ws_inspector.rs`**: Connects to `ws://` / `wss://` endpoints, records handshake latency, logs frames with relative timestamps, and sends test probes.
-- **`bug_reporter.rs`**: Automatically redacts sensitive tokens (GitHub PATs, API keys, AWS credentials, Bearer tokens, private keys) and formats Markdown bug reports for GitHub issues.
-- **`process_inspector.rs`**: Cross-platform process snapshots via `sysinfo` (`SharedProcessSampler`), `:ps` / `:top` queries and tables, `:proc` details (child tree, ancestors, listening ports), `:kill` planning and Safety Gate classification (`plan_kill`), graceful/forced tree termination, `:watch-proc` threshold/exit watches, MRT-ownership labels, and process snapshot diffs.
-- **`structured_diff.rs`**: Computes canonical JSON diffs (key order agnostic), port snapshot delta analyses, and process snapshot deltas (started, exited, memory growth).
+### 2. `mrt-tools` — network tools and Task Manager
+- `http_inspector.rs`, `web_fetch.rs`, `net_inspector.rs`, `dns_inspector.rs`, `ws_inspector.rs`, `bug_reporter.rs`, `structured_diff.rs`: `:http`, `:web`, `:ports`, `:dns`, `:ws`, `:report`, `:diff`.
+- `process_inspector.rs`: snapshots (`sysinfo`), `:ps`, `:top`, `:proc`, `:kill` planning and termination, `:watch-proc`.
+- `process_control.rs`: `:suspend`, `:resume`, `:priority` (NtSuspendProcess / SetPriorityClass, SIGSTOP / setpriority).
+- `service_inspector.rs`: `:services` and `:service start|stop|restart` through the Safety Gate.
 
-### 3. `mrt-mcp` — Dual-Mode Model Context Protocol & Live GUI Bridge
-- **Live GUI Bridge (`bridge.rs`)**: Runs a token-authenticated localhost TCP JSON-RPC listener inside the MRT GUI (`mcp-bridge.json`), allowing external `mrt --mcp-server` processes to transparently control the live GUI window (and falling back to standalone headless mode when no GUI is running).
-- **MCP Server (`server.rs`)**: Speaks JSON-RPC 2.0 over `stdio` (`mrt --mcp-server`), TCP bridge, or in-memory loopback. Exposes 31 tools covering session & multi-tab management (`mrt_get_session_state`, `mrt_list_tabs`, `mrt_create_tab`, `mrt_switch_tab`, `mrt_close_tab`, `mrt_configure_tab`), command execution & block inspection/diffing/AI triage (`mrt_run_command`, `mrt_list_blocks`, `mrt_get_block`, `mrt_search_blocks`, `mrt_compare_blocks`, `mrt_diagnose_block`, `mrt_clear_blocks`), interactive PTY sessions (`mrt_pty_spawn`, `mrt_pty_write`, `mrt_pty_read`, `mrt_pty_resize`, `mrt_pty_list`, `mrt_pty_kill`), live GUI control (`mrt_control_gui`), AI translation (`mrt_ai_translate`), and internet/diagnostic tools (`mrt_http_request`, `mrt_web_fetch`, `mrt_inspect_ports`, `mrt_inspect_dns`, `mrt_generate_bug_report`, `mrt_inspect_ws`), and the Task Manager (`mrt_list_processes`, `mrt_inspect_process`, `mrt_kill_process`, `mrt_compare_process_snapshots`), plus 5 MCP resources (`mrt://session/state`, `mrt://session/tabs`, `mrt://session/blocks`, `mrt://session/ptys`, `mrt://processes`).
-- **MCP Host (`client.rs`)**: Connects to external MCP servers over `stdio` or Streamable HTTP (`transport.rs`: JSON or SSE responses, `Mcp-Session-Id`, optional GET event stream, custom headers) and keeps a live session per server (`initialize` -> `tools/list` -> `tools/call`) with one-click presets for common servers (Filesystem, Git, Memory Graph, SQLite, Fetch) and surfaces their tools inside the GUI's **MCP Hub**.
+### 3. `mrt-mcp` — MCP server and host, bridge, remote access
+- `server.rs`: 31 tools and 5 resources (tabs, commands and blocks, PTYs, GUI control including window and Safety Gate answers, AI translation, network tools, Task Manager), sandbox tabs.
+- `bridge.rs`: the token-authenticated localhost bridge to the running window.
+- `client.rs`, `transport.rs`: MCP host for external servers over stdio and Streamable HTTP.
+- `remote.rs`: `mrt share` relay (SPAKE2 pairing, Noise_XX, paired keys, revocation); `companion.rs`: HTTPS phone companion.
 
-### 4. `mrt-ai` — Multi-Provider AI & Error Triage
-- Supports **Google Gemini**, **Anthropic Claude**, **OpenAI**, **xAI Grok**, **DeepSeek**, **OpenRouter**, and **Local Ollama**, plus a built-in **Offline Polyglot Engine** that adapts commands to the active tab's shell (`cmd.exe` vs `pwsh` vs `bash`).
-- Includes `diagnose_command_error` and `diagnose_command_error_streaming` to stream AI explanations token-by-token into failed command blocks with one-click shell-appropriate fixes.
+### 4. `mrt-ai` — AI providers and assistance
+- `lib.rs`: Gemini, Anthropic, OpenAI, xAI, DeepSeek, OpenRouter, Ollama and the offline engine; translation and streamed error diagnosis.
+- `assist.rs`: `:assist` multi-step investigations over MRT's read-only MCP tools (model-driven, or a built-in offline plan).
 
-### 5. `mrt-app` — Native GPU GUI (`eframe` / `egui` 0.29)
-- Renders multi-shell tabs, **Split Panes** within any tab (`:split-h`, `:split-v`, `:unsplit`), full-screen **Interactive TUI Mode** overlay (`:tui <cmd>`, `vim`, `nano`, `htop`, `lazygit`), **Mosaic** multi-terminal grid mode, **Folder Explorer**, persistent SQLite **Command History** and **Saved Runbooks** (with offline sequence editing, preview, Safety Gate enforcement, and stop-on-first-failure replay), the **Command Block** stream (with structured diff comparison), the **MCP Hub** (with Live GUI Bridge indicator) and **Toolbox** side panels (**Network** and **Task Manager** tabs), live `:top` blocks and `:watch-proc` alerts, the **Safety Approval Gate** modal, and the **Universal Command Palette** (`Ctrl+K` / `Ctrl+P`).
-- Routes every key press through `keymap.rs`: a `KeyResolver` turns chords, `ctrl+a > c` chains, and named key tables into `Action`s before egui widgets or the TUI PTY see the keys; unbound keys pass through. Defaults reproduce the historical shortcuts; overrides come from a `binding -> action` map (the config file's `[keybindings]` table).
-- Applies the configuration file through `config_runtime.rs` (loaded at startup, re-applied when the files change) and sends desktop notifications for long background commands through `notifications.rs`.
-- Runs each tab's commands in a persistent shell through `shell_pool.rs` (one `ShellSession` per tab and shell, with fallback to one process per command), and draws the TUI overlay from a `TerminalEmulator` with `widgets/term_view.rs`, encoding keys with `term_input.rs`.
-- Draws clickable links and the OSC 52 clipboard prompt in command blocks (`widgets/links.rs`) and each tab's activity indicator (`widgets/activity.rs`).
-- Handles `mrt agent setup | show | remove` (`agent_setup.rs`) before the GUI starts, registering the MCP server and an instructions skill with Claude Code, Codex CLI, and Gemini CLI.
-- Persists history and runbooks to `history.sqlite` in the per-user MRT data directory (see the [User Guide](USER_GUIDE.md#5-data-files-and-locations)).
+### 5. `mrt-app` — the GUI and the command-line entry points
+- `main.rs` dispatches `mrt` subcommands (`agent`, `list|send|capture|split|quick|quit`, `share|pair|attach`, `server`, `session-host`, `--mcp-server`) before starting the window.
+- `app.rs`: tabs, panes, Mosaic, blocks, TUI overlay and pane programs, Safety Gate modal, Command Palette, remote and sandbox tabs, `:assist`, background mode and reattach.
+- `session_host.rs` (the host process and its client), `shell_pool.rs` (in-window persistent shells and SSH sessions), `layout.rs`, `cli.rs`, `remote_cli.rs`, `server.rs`.
+- `keymap.rs`, `copy_mode.rs`, `hooks.rs`, `find.rs`, `fonts.rs`, `theme.rs`, `config_runtime.rs`, `notifications.rs`, `history.rs`, `term_input.rs`, and `widgets/` (block view with tail rendering and images, term view with grid images, links, activity, toolbox, task manager, side panels).
 
 ---
 
-## Build, CI & Release
+## Build, Tests, CI & Release
 
-- **CI (`.github/workflows/ci.yml`)**: On every push to `main` and every pull request, runs `cargo test --workspace --locked` with `RUSTFLAGS=-D warnings` on Ubuntu, Windows, and macOS (Cargo cache via `Swatinem/rust-cache`, saved only from `main`).
-- **Benchmarks (`.github/workflows/bench.yml`)**: On manual dispatch only, runs the `criterion` throughput suite in `crates/mrt-core/benches/throughput.rs` (VT parsing, output classification, the GUI's streaming re-parse, and end-to-end command streaming) on Ubuntu, Windows, and macOS and uploads the results as an artifact. Numbers and known hot spots are in [PERFORMANCE.md](PERFORMANCE.md).
-- **Release (`.github/workflows/release.yml`)**: On `v*` tags (or manual dispatch), builds `cargo build --release --locked` for `x86_64-pc-windows-msvc` (ZIP), `x86_64-unknown-linux-gnu`, `x86_64-apple-darwin`, and `aarch64-apple-darwin` (tar.gz) and attaches the archives to the GitHub Release.
-- **Packaging metadata**: `packaging/linux/mrt.desktop` (desktop entry) and `packaging/macos/Info.plist` (app bundle metadata). They are not used by the release workflow yet; the archives contain only the `mrt` binary.
+- **Tests**: `RUSTFLAGS="-D warnings" cargo test --workspace --locked` runs unit tests in every crate and `crates/mrt-app/tests/e2e_processes.rs`, which starts real `mrt` processes (`server`, `share`, `pair`, `--host`, `session-host`) with separate `MRT_DATA_DIR`s. `scripts/e2e/` drives the real window on an offscreen X server (crash and reattach, feature tour).
+- **CI (`.github/workflows/ci.yml`)**: the same test command on Ubuntu, Windows and macOS for pushes to `main` and pull requests.
+- **Benchmarks (`.github/workflows/bench.yml`)**: manual `criterion` throughput suite; see [PERFORMANCE.md](PERFORMANCE.md).
+- **Release (`.github/workflows/release.yml`)**: on `v*` tags, release builds for Windows (ZIP), Linux and macOS Intel / Apple Silicon (tar.gz) attached to the GitHub Release.
+- **Packaging metadata**: `packaging/linux/mrt.desktop` and `packaging/macos/Info.plist` (not used by the release workflow yet).

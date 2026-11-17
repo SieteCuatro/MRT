@@ -2435,6 +2435,18 @@ impl MrtGuiApp {
             }
         }
 
+        if raw_input == ":assist" || raw_input.starts_with(":assist ") {
+            let question = raw_input.trim_start_matches(":assist").trim();
+            let question = if question.is_empty() {
+                "Why did the last failed command fail, and what changed since it last worked?".to_string()
+            } else {
+                question.to_string()
+            };
+            let shell_label = shell.kind.short_label().to_string();
+            self.spawn_assist(tab_id, cwd, shell_label, raw_input, question);
+            return;
+        }
+
         if raw_input == ":sandbox" || raw_input.starts_with(":sandbox ") {
             let arg = raw_input.trim_start_matches(":sandbox").trim();
             let root = if arg.is_empty() { cwd.clone() } else { cwd.join(arg) };
@@ -3744,6 +3756,76 @@ impl MrtGuiApp {
         }
         crate::copy_mode::render(ctx, &mode, &tab.blocks);
         self.copy_mode = Some(mode);
+    }
+
+    /// `:assist`: a multi-step investigation with MRT's read-only MCP tools (see
+    /// `mrt_ai::assist`). Each tool call streams into the block; the answer and any
+    /// suggested command land in the block's AI panel, whose "Apply fix" goes through
+    /// the Safety Gate like typed input.
+    fn spawn_assist(&mut self, tab_id: Uuid, cwd: PathBuf, shell_label: String, raw_input: String, question: String) {
+        // The tools read the MCP mirror, so bring it up to date first.
+        self.sync_mcp_from_gui();
+        let state = self.mcp_host.local_server_state.clone();
+        let mut running = CommandBlock::new_completed(&raw_input, "mrt-ai", cwd.display().to_string(), "", 0, 0);
+        running.exit_code = None;
+        let block_id = running.id;
+        let timestamp = running.timestamp;
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+            tab.blocks.push(running);
+        }
+        let output = std::sync::Arc::new(std::sync::Mutex::new(format!("Question: {question}\n")));
+        self.running_output.insert(block_id, (tab_id, output.clone()));
+        let tx = self.tx.clone();
+        self.busy_count += 1;
+        self.runtime.spawn(async move {
+            let started = Instant::now();
+            let mut trace = format!("Question: {question}\n");
+            let outcome = mrt_ai::run_assist(
+                &question,
+                &shell_label,
+                &cwd.display().to_string(),
+                |tool, arguments| {
+                    let state = state.clone();
+                    async move {
+                        let request = mrt_mcp::JsonRpcRequest {
+                            jsonrpc: "2.0".into(),
+                            id: Some(serde_json::json!(1)),
+                            method: "tools/call".into(),
+                            params: Some(serde_json::json!({ "name": tool, "arguments": arguments })),
+                        };
+                        match mrt_mcp::handle_mcp_jsonrpc(&state, request).await.and_then(|r| r.result) {
+                            Some(result) => result["content"]
+                                .as_array()
+                                .map(|items| items.iter().filter_map(|i| i["text"].as_str()).collect::<Vec<_>>().join("\n"))
+                                .unwrap_or_default(),
+                            None => "The tool returned no result.".to_string(),
+                        }
+                    }
+                },
+                |step| {
+                    let line = format!("→ {} {}\n", step.tool, step.arguments);
+                    trace.push_str(&line);
+                    if let Ok(mut pending) = output.lock() {
+                        pending.push_str(&line);
+                    }
+                },
+            )
+            .await;
+            trace.push_str(&format!("\nAnswered by {} after {} tool call(s).\n", outcome.provider, outcome.steps.len()));
+            let mut block = CommandBlock::new_completed(
+                &raw_input,
+                "mrt-ai",
+                cwd.display().to_string(),
+                trace,
+                0,
+                started.elapsed().as_millis() as u64,
+            );
+            block.id = block_id;
+            block.timestamp = timestamp;
+            block.ai_explanation = Some(outcome.answer);
+            block.ai_suggested_fix = outcome.command;
+            let _ = tx.send(AsyncWorkerEvent::BlockCompleted { tab_id, block, updated_cwd: None });
+        });
     }
 
     /// Opens an agent sandbox tab rooted at `root` (`:sandbox [folder]`).
@@ -5865,6 +5947,31 @@ mod tests {
     /// A remote tab's commands go to the SSH session and never run on this machine: with
     /// an unreachable host the first block reports the connection failure instead of the
     /// local `hostname`.
+    #[test]
+    fn assist_investigates_the_failed_block_with_mcp_tools() {
+        // The built-in plan only; never call a provider from tests.
+        mrt_ai::set_ai_preferences(mrt_ai::AiPreferences { provider: Some("offline".into()), ..Default::default() });
+        let mut app = MrtGuiApp::new();
+        let ok = CommandBlock::new_completed("cargo test", "bash", "/src", "test a ... ok
+", 0, 10);
+        let failed = CommandBlock::new_completed("cargo test", "bash", "/src", "test a ... FAILED
+error: test failed
+", 101, 10);
+        let failed_id = failed.id;
+        app.tabs[0].blocks.push(ok);
+        app.tabs[0].blocks.push(failed);
+        app.submit_input(Some(":assist".into()), false);
+        assert_eq!(app.tabs[0].blocks.last().unwrap().exit_code, None, "running while it investigates");
+        pump_one(&mut app);
+        let block = app.tabs[0].blocks.last().unwrap();
+        assert_eq!(block.shell_name, "mrt-ai");
+        assert!(block.plain_output.contains("→ mrt_compare_blocks"), "{}", block.plain_output);
+        assert!(block.plain_output.contains(&failed_id.to_string()), "uses the ids it found");
+        let answer = block.ai_explanation.as_deref().unwrap_or("");
+        assert!(answer.contains("`cargo test` failed (exit code 101)"), "{answer}");
+        assert!(answer.contains("earlier run"), "{answer}");
+    }
+
     #[test]
     fn sandbox_tabs_pin_their_folder_and_ask_before_anything_not_safe() {
         let mut app = MrtGuiApp::new();

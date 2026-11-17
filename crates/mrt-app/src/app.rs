@@ -161,6 +161,8 @@ pub enum AsyncWorkerEvent {
         entries: Result<Vec<(PathBuf, bool)>, String>,
     },
     ExternalMcpConnected(mrt_mcp::McpServerStatus),
+    /// The session host's jobs, after connecting: blocks to show again (reattach).
+    HostJobs(Vec<crate::session_host::JobInfo>),
     /// Periodic process sample for the Task Manager, live `:top` blocks and watches.
     /// Background events do not count towards `busy_count`.
     ProcessSnapshot(Result<Arc<ProcessSnapshot>, String>),
@@ -201,7 +203,7 @@ fn shorten(text: &str, max: usize) -> String {
 
 impl AsyncWorkerEvent {
     fn is_background(&self) -> bool {
-        matches!(self, AsyncWorkerEvent::ProcessSnapshot(_))
+        matches!(self, AsyncWorkerEvent::ProcessSnapshot(_) | AsyncWorkerEvent::HostJobs(_))
     }
 }
 
@@ -595,6 +597,11 @@ pub struct MrtGuiApp {
     pub(crate) pending_service_command: Option<String>,
     /// `mrt quit` / `:quit`: close even with work running.
     pub(crate) quit_requested: bool,
+    /// The session host that runs tab commands (`None` until connected, in tests, or
+    /// with `terminal.session_server = false`).
+    pub(crate) session_host: Arc<std::sync::Mutex<Option<crate::session_host::HostClient>>>,
+    /// Blocks running in the session host (Stop goes there; closing the window does not stop them).
+    pub(crate) host_blocks: Arc<std::sync::Mutex<std::collections::HashSet<Uuid>>>,
     /// When running blocks were last copied into the MCP mirror.
     mirror_synced_at: std::cell::Cell<Option<Instant>>,
 }
@@ -876,9 +883,14 @@ impl MrtGuiApp {
             pending_window: None,
             pending_service_command: None,
             quit_requested: false,
+            session_host: Arc::new(std::sync::Mutex::new(None)),
+            host_blocks: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             mirror_synced_at: std::cell::Cell::new(None),
         };
         app.apply_config_side_effects();
+        if !cfg!(test) && app.config_state.config.terminal.session_server {
+            app.connect_session_host();
+        }
         if !cfg!(test) && app.config_state.config.terminal.restore_layout {
             app.layout_file = crate::layout::layout_path();
             if let Some(layout) = app.layout_file.as_deref().and_then(crate::layout::load) {
@@ -1408,6 +1420,14 @@ impl MrtGuiApp {
     /// The block "Stop" button: ends a live `:top`, or force-stops the command's process tree.
     /// The command's own block then completes normally with the exit status.
     fn stop_block(&mut self, block_id: Uuid) {
+        if self.host_blocks.lock().is_ok_and(|b| b.contains(&block_id)) {
+            if let Some(host) = self.session_host.lock().ok().and_then(|h| h.clone()) {
+                self.runtime.spawn(async move {
+                    let _ = host.request(&crate::session_host::HostRequest::Stop { block_id }).await;
+                });
+            }
+            return;
+        }
         if self.live_top.as_ref().map(|l| l.block_id) == Some(block_id) {
             self.stop_live_top();
             return;
@@ -1669,6 +1689,11 @@ impl MrtGuiApp {
         let active_id = self.tabs[self.active_tab].id;
         self.tabs.retain(|tab| tab.id != id);
         self.shell_pool.close_tab(id);
+        if let Some(host) = self.session_host.lock().ok().and_then(|h| h.clone()) {
+            self.runtime.spawn(async move {
+                let _ = host.request(&crate::session_host::HostRequest::CloseTab { tab_id: id }).await;
+            });
+        }
         self.active_tab = self
             .tabs
             .iter()
@@ -2542,6 +2567,7 @@ impl MrtGuiApp {
                         self.explorer_entries = entries;
                     }
                 }
+                AsyncWorkerEvent::HostJobs(jobs) => self.reattach_host_jobs(jobs),
                 AsyncWorkerEvent::ExternalMcpConnected(status) => {
                     self.mcp_host
                         .servers
@@ -3053,9 +3079,39 @@ impl MrtGuiApp {
         let tx = self.tx.clone();
         let pool = self.shell_pool.clone();
         let remote = self.tabs.iter().find(|t| t.id == tab_id).and_then(|t| t.remote.clone());
+        let host = if remote.is_none() && self.shell_pool.is_enabled() { self.session_host.lock().ok().and_then(|h| h.clone()) } else { None };
+        let host_blocks = self.host_blocks.clone();
         self.busy_count += 1;
         self.runtime.spawn(async move {
             let cwd_str = cwd.display().to_string();
+
+            // The session host runs it, so it survives this window.
+            if let Some(host) = host {
+                let run = crate::session_host::HostRequest::Run {
+                    tab_id,
+                    block_id,
+                    shell: shell.clone(),
+                    command: raw_input.clone(),
+                    cwd: cwd.clone(),
+                };
+                if host.request(&run).await.is_ok() {
+                    if let Ok(mut blocks) = host_blocks.lock() {
+                        blocks.insert(block_id);
+                    }
+                    let (text, exit_code, duration_ms, updated_cwd) = match host.follow(block_id, &output).await {
+                        Ok((text, done)) => (text, done.exit_code, done.duration_ms, done.cwd),
+                        Err(e) => (format!("Error: {e}"), 1, 0, None),
+                    };
+                    if let Ok(mut blocks) = host_blocks.lock() {
+                        blocks.remove(&block_id);
+                    }
+                    let mut block = CommandBlock::new_completed(&raw_input, shell.kind.short_label(), cwd_str, text, exit_code, duration_ms);
+                    block.id = block_id;
+                    block.timestamp = timestamp;
+                    let _ = tx.send(AsyncWorkerEvent::BlockCompleted { tab_id, block, updated_cwd });
+                    return;
+                }
+            }
 
             // Remote tab: always on the host, never in a local process.
             if let Some(args) = remote {
@@ -4085,7 +4141,9 @@ impl MrtGuiApp {
     /// in the TUI overlay or panes, or PTYs that agents started.
     pub(crate) fn has_running_work(&self) -> usize {
         let ptys = self.mcp_host.local_server_state.ptys.lock().map(|p| p.len()).unwrap_or(0);
-        self.running_output.len() + usize::from(self.active_tui.is_some()) + self.pane_tuis.len() + ptys
+        // Commands in the session host keep running without this window.
+        let in_host = self.host_blocks.lock().map(|b| b.len()).unwrap_or(0);
+        self.running_output.len().saturating_sub(in_host) + usize::from(self.active_tui.is_some()) + self.pane_tuis.len() + ptys
     }
 
     /// Closing the window with work running keeps MRT going in the background
@@ -4253,6 +4311,64 @@ impl MrtGuiApp {
             block.ai_suggested_fix = outcome.command;
             let _ = tx.send(AsyncWorkerEvent::BlockCompleted { tab_id, block, updated_cwd: None });
         });
+    }
+
+    /// Connects to (or starts) the session host, then asks for its jobs to show again.
+    fn connect_session_host(&mut self) {
+        let slot = self.session_host.clone();
+        let tx = self.tx.clone();
+        self.runtime.spawn(async move {
+            match crate::session_host::ensure_host().await {
+                Ok(host) => {
+                    let jobs = host.jobs().await.unwrap_or_default();
+                    if let Ok(mut slot) = slot.lock() {
+                        *slot = Some(host);
+                    }
+                    let _ = tx.send(AsyncWorkerEvent::HostJobs(jobs));
+                }
+                Err(e) => tracing::warn!("session host unavailable, running commands in this window: {e}"),
+            }
+        });
+    }
+
+    /// Shows the session host's jobs again after this window (re)started: each becomes
+    /// a block in its tab (or the active tab when that tab is gone) and is followed to
+    /// the end.
+    pub(crate) fn reattach_host_jobs(&mut self, jobs: Vec<crate::session_host::JobInfo>) {
+        let Some(host) = self.session_host.lock().ok().and_then(|h| h.clone()) else { return };
+        for job in jobs {
+            if self.tabs.iter().any(|t| t.blocks.iter().any(|b| b.id == job.block_id)) {
+                continue;
+            }
+            let tab_index = self.tabs.iter().position(|t| t.id == job.tab_id).unwrap_or(self.active_tab);
+            let tab_id = self.tabs[tab_index].id;
+            let mut running = CommandBlock::new_completed(&job.command, &job.shell_name, job.cwd.display().to_string(), "", 0, 0);
+            running.exit_code = None;
+            running.id = job.block_id;
+            let timestamp = running.timestamp;
+            self.tabs[tab_index].blocks.push(running);
+            self.tabs[tab_index].activity.command_started(&job.command, Instant::now());
+            let output = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+            self.running_output.insert(job.block_id, (tab_id, output.clone()));
+            if let Ok(mut blocks) = self.host_blocks.lock() {
+                blocks.insert(job.block_id);
+            }
+            let (host, tx, host_blocks) = (host.clone(), self.tx.clone(), self.host_blocks.clone());
+            self.busy_count += 1;
+            self.runtime.spawn(async move {
+                let (text, exit_code, duration_ms, updated_cwd) = match host.follow(job.block_id, &output).await {
+                    Ok((text, done)) => (text, done.exit_code, done.duration_ms, done.cwd),
+                    Err(e) => (format!("Error: {e}"), 1, 0, None),
+                };
+                if let Ok(mut blocks) = host_blocks.lock() {
+                    blocks.remove(&job.block_id);
+                }
+                let mut block = CommandBlock::new_completed(&job.command, &job.shell_name, job.cwd.display().to_string(), text, exit_code, duration_ms);
+                block.id = job.block_id;
+                block.timestamp = timestamp;
+                let _ = tx.send(AsyncWorkerEvent::BlockCompleted { tab_id, block, updated_cwd });
+            });
+        }
     }
 
     /// Opens an agent sandbox tab rooted at `root` (`:sandbox [folder]`).
@@ -4757,6 +4873,14 @@ impl MrtGuiApp {
 impl eframe::App for MrtGuiApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.persist_layout(true);
+        // `mrt quit` ends the session host too; a plain close leaves its shells running.
+        if self.quit_requested {
+            if let Some(host) = self.session_host.lock().ok().and_then(|h| h.clone()) {
+                let _ = self.runtime.block_on(async {
+                    tokio::time::timeout(Duration::from_secs(2), host.request(&crate::session_host::HostRequest::Shutdown)).await
+                });
+            }
+        }
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
@@ -6437,6 +6561,46 @@ error: test failed
         let answer = block.ai_explanation.as_deref().unwrap_or("");
         assert!(answer.contains("`cargo test` failed (exit code 101)"), "{answer}");
         assert!(answer.contains("earlier run"), "{answer}");
+    }
+
+    #[test]
+    fn commands_run_in_the_session_host_and_a_new_window_reattaches() {
+        let mut app = MrtGuiApp::new();
+        app.shell_pool.set_enabled(true);
+        let host = app.runtime.block_on(crate::session_host::start_in_process());
+        *app.session_host.lock().unwrap() = Some(host.clone());
+        app.submit_input(Some("echo via-host".into()), false);
+        let block_id = app.tabs[0].blocks.last().unwrap().id;
+        pump_one(&mut app);
+        let block = app.tabs[0].blocks.iter().find(|b| b.id == block_id).unwrap();
+        assert_eq!(block.exit_code, Some(0), "{}", block.plain_output);
+        assert!(block.plain_output.contains("via-host"), "{}", block.plain_output);
+        assert!(app.host_blocks.lock().unwrap().is_empty());
+
+        // A job started by a window that then went away...
+        let tab_id = app.tabs[0].id;
+        let orphan = Uuid::new_v4();
+        let shell = app.shells[0].clone();
+        app.runtime
+            .block_on(host.request(&crate::session_host::HostRequest::Run {
+                tab_id,
+                block_id: orphan,
+                shell,
+                command: "echo left-running".into(),
+                cwd: std::env::temp_dir(),
+            }))
+            .unwrap();
+        // ...is shown by the next window, in the same tab.
+        let jobs = app.runtime.block_on(host.jobs()).unwrap();
+        let mut next = MrtGuiApp::new();
+        next.tabs[0].id = tab_id;
+        *next.session_host.lock().unwrap() = Some(host.clone());
+        next.reattach_host_jobs(jobs);
+        assert!(next.tabs[0].blocks.iter().any(|b| b.id == orphan), "reattached");
+        pump_one(&mut next);
+        let block = next.tabs[0].blocks.iter().find(|b| b.id == orphan).unwrap();
+        assert!(block.plain_output.contains("left-running"), "{}", block.plain_output);
+        assert_eq!(next.has_running_work(), 0);
     }
 
     #[test]

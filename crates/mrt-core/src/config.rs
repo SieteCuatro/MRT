@@ -182,6 +182,9 @@ pub struct TerminalConfig {
     /// Closing the window while commands, programs or PTYs run keeps MRT running in
     /// the background; `mrt` (or `mrt quick`) brings the same window back.
     pub keep_running_on_close: bool,
+    /// Run tab commands in a separate session host process (`mrt session-host`) that
+    /// keeps the shells and running commands alive if the window closes or crashes.
+    pub session_server: bool,
 }
 
 impl Default for TerminalConfig {
@@ -201,6 +204,7 @@ impl Default for TerminalConfig {
             quick_height_percent: 45,
             fast_native_output: false,
             keep_running_on_close: true,
+            session_server: true,
         }
     }
 }

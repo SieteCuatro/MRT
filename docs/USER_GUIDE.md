@@ -54,6 +54,8 @@ The binary is `target/release/mrt` (`mrt.exe` on Windows).
 
 **Closing keeps running work alive.** If you close the window while commands, full-screen programs or agents' PTYs are running, MRT keeps running in the background (on Windows the window is hidden, elsewhere minimized) and a notification says so. Run `mrt` (or `mrt quick`) to get the same window back, with its tabs, finished blocks and live output. `mrt quit`, `:quit`, or closing the window when nothing runs, ends MRT. Turn this off with `terminal.keep_running_on_close = false`.
 
+**The shells live in a separate process.** MRT runs tab commands in a **session host**, `mrt session-host`, which the window starts in the background (no console window) and which keeps each tab's persistent shell. If the window closes or crashes, the host's shells and running commands go on; the next window reattaches and shows those commands, running or finished, with all their output, in the same tabs (the saved layout keeps the tab ids). `cd`, variables and activated environments also carry over to the next window. `mrt quit` stops the host as well; otherwise it exits on its own after 30 minutes with nothing running and no window. Full-screen programs (`vim`, `htop`, `:tui`) still run in the window process. Turn the host off with `terminal.session_server = false`.
+
 **Upgrades never cut running sessions.** When a new MRT version starts while an older one runs, it asks the older one to quit if it is idle (the new one then reopens the saved layout), and otherwise brings the older window to the front and leaves it running until its commands finish.
 
 ### Remote connections (`mrt share`, `mrt pair`, `mrt attach`)
@@ -412,6 +414,7 @@ MRT stores its files in the per-user local data directory:
 | :--- | :--- |
 | `history.sqlite` | Every completed command block (command, output, shell, folder, exit code) and your saved runbooks. **Search history** searches it; queries of 3+ characters use the FTS5 trigram index, shorter ones a plain substring match. Output can contain secrets that commands printed; delete the file to wipe history. |
 | `layout.json` | The window's tabs, splits, shells, folders and remote (SSH) tabs, saved while MRT runs and when it closes, and reopened at the next start with fresh shells (`terminal.restore_layout`). Command blocks are not restored; they are in `history.sqlite`. Delete the file to start with one tab. |
+| `session-host.json` | Port, token and PID of the running session host (`0600` on macOS/Linux); removed when the host exits. |
 | `remote.json` | This device's key pair for remote connections, the devices allowed to attach (`guests`) and the hosts it paired with (`hosts`). Written `0600` on macOS/Linux. Delete it to forget all pairings. |
 | `companion-cert.pem`, `companion-key.pem` | The phone companion's self-signed TLS certificate and key. |
 | `mcp-bridge.json` | Port and per-session token of the running GUI's MCP bridge. Written at startup (`0600` on macOS/Linux) and removed on exit. A stale file left after a crash is ignored when no GUI answers. |
@@ -441,6 +444,7 @@ MRT reads two optional [TOML](https://toml.io) files. Every setting is optional:
 | `terminal.font_size` | `13.0` | Terminal (monospace) font size, clamped to 8–40. Applied live. |
 | `terminal.font_family` | platform default | Monospace font: a family name installed on this computer (`"JetBrains Mono"`, `"CaskaydiaCove Nerd Font"`) or a path to a `.ttf` / `.otf` / `.ttc` file. Family names are matched against the font file names in the system and user font folders, preferring the regular face. A font that is not found is reported in the config banner and the default is used. Applied live. |
 | `terminal.font_fallback` | `[]` | Fonts tried, in order, for characters the main font lacks (Nerd Font icons, symbols, CJK), same syntax as `font_family`. Platform symbol fonts (Segoe UI Symbol, Apple Symbols, Noto Sans Symbols 2 / DejaVu Sans) are tried after them. Ligatures are not drawn. Applied live. |
+| `terminal.session_server` | `true` | Run tab commands in the session host process, so shells and running commands survive the window closing or crashing. |
 | `terminal.keep_running_on_close` | `true` | Closing the window while something runs keeps MRT running in the background; `mrt` brings the window back. |
 | `safety.remote_approvals` | `false` | Let the phone companion answer the Safety Gate prompt. |
 | `terminal.restore_layout` | `true` | Reopen the last session's tabs, splits, shells and folders at startup (fresh shells; nothing is run). Remote tabs reconnect on their first command. A shell that is no longer installed becomes the default shell, and a folder that no longer exists becomes the start folder. |

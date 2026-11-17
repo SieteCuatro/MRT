@@ -23,6 +23,9 @@ pub struct SavedLayout {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SavedTab {
+    /// The tab's id, kept so the session host's jobs find their tab again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<uuid::Uuid>,
     pub title: String,
     /// Shell id (`pwsh`, `bash`, `wsl`...).
     pub shell: String,
@@ -79,6 +82,7 @@ impl MrtGuiApp {
                 .tabs
                 .iter()
                 .map(|tab| SavedTab {
+                    id: Some(tab.id),
                     title: tab.title.clone(),
                     shell: shell_id(tab.active_shell_idx),
                     cwd: tab.cwd.clone(),
@@ -117,6 +121,9 @@ impl MrtGuiApp {
             .map(|saved| {
                 let cwd = if saved.remote.is_some() { std::env::temp_dir() } else { folder(&saved.cwd) };
                 let mut tab = TerminalTab::new(saved.title.clone(), shell_idx(&saved.shell), cwd);
+                if let Some(id) = saved.id {
+                    tab.id = id;
+                }
                 tab.remote = saved.remote.clone().filter(|args| !args.is_empty());
                 // A sandbox whose folder is gone becomes a normal tab, never an unbounded one.
                 if let Some(root) = saved.sandbox.as_ref().filter(|r| r.is_dir()) {
@@ -179,6 +186,7 @@ mod tests {
             mosaic: true,
             tabs: vec![
                 SavedTab {
+                    id: None,
                     title: "build".into(),
                     shell: shell.clone(),
                     cwd: dir.clone(),
@@ -187,6 +195,7 @@ mod tests {
                     split: Some(SavedSplit { direction: "vertical".into(), shell: "no-such-shell".into(), cwd: dir.join("gone") }),
                 },
                 SavedTab {
+                    id: None,
                     title: "ssh box".into(),
                     shell: shell.clone(),
                     cwd: "/home/me".into(),

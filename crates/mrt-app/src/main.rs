@@ -14,6 +14,7 @@ mod layout;
 mod notifications;
 mod remote_cli;
 mod server;
+mod session_host;
 mod shell_pool;
 mod term_input;
 mod theme;
@@ -37,6 +38,10 @@ fn main() -> Result<()> {
     if let Some(sub @ ("share" | "pair" | "attach")) = args.get(1).map(String::as_str) {
         attach_parent_console_if_cli();
         std::process::exit(remote_cli::run(sub, &args[2..]));
+    }
+
+    if args.get(1).map(String::as_str) == Some("session-host") {
+        return session_host::run_host_process();
     }
 
     if args.get(1).map(String::as_str) == Some("server") {

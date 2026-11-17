@@ -1434,6 +1434,19 @@ impl MrtGuiApp {
         let active_index = self.active_tab;
         let layout = self.mosaic_layout;
         let columns = self.mosaic_columns;
+        // Tabs running an interactive program show its screen instead of their output:
+        // the overlay's session, else the session in the tab's active pane, else any pane.
+        let mut tui_screens: HashMap<Uuid, mrt_core::TermSnapshot> = HashMap::new();
+        for session in self.active_tui.iter().chain(self.pane_tuis.iter()) {
+            let preferred = session.pane.is_none()
+                || self
+                    .tabs
+                    .iter()
+                    .any(|t| t.id == session.tab_id && Some(t.active_pane_idx) == session.pane);
+            if preferred || !tui_screens.contains_key(&session.tab_id) {
+                tui_screens.insert(session.tab_id, session.term.snapshot());
+            }
+        }
         let shells = &self.shells;
         let tabs = &mut self.tabs;
 
@@ -1545,6 +1558,9 @@ impl MrtGuiApp {
                             // Output
                             let input_h = 36.0;
                             let output_h = (ui.available_height() - input_h - 6.0).max(24.0);
+                            if let Some(screen) = tui_screens.get(&id) {
+                                draw_mosaic_tui(ui, id, screen, output_h);
+                            } else {
                             egui::ScrollArea::vertical()
                                 .id_salt(("mosaic_output", id))
                                 .auto_shrink([false, false])
@@ -1566,6 +1582,7 @@ impl MrtGuiApp {
                                         }
                                     }
                                 });
+                            }
 
                             // Input
                             ui.add_space(6.0);
@@ -3133,6 +3150,22 @@ fn draw_pane_tui(
         clicked = response.clicked() || response.drag_started() || pressed_inside;
     });
     Some(clicked)
+}
+
+/// Draws a read-only copy of a running program's screen in a Mosaic tile, with a
+/// monospace font small enough for its columns to fit the tile's width. The program's
+/// PTY keeps its size; the screen is clipped to `height`.
+fn draw_mosaic_tui(ui: &mut egui::Ui, tab_id: Uuid, screen: &mrt_core::TermSnapshot, height: f32) {
+    let width = ui.available_width();
+    // A monospace glyph is about 0.6 em wide.
+    let size = (width / (screen.cols.max(1) as f32 * 0.6)).clamp(5.0, 12.0);
+    let font = egui::FontId::monospace(size);
+    let cell = crate::widgets::term_view::cell_size(ui, &font);
+    ui.allocate_ui(egui::vec2(width, height), |ui| {
+        let clip = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(width, height));
+        ui.set_clip_rect(clip.intersect(ui.clip_rect()));
+        crate::widgets::term_view::paint_terminal(ui, egui::Id::new(("mosaic_tui", tab_id)), screen, &font, cell, false);
+    });
 }
 
 /// Sends this frame's mouse input over the TUI grid (`rect`, cells of `cell` size) to

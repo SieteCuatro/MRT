@@ -87,3 +87,9 @@ A phone app is a paired guest from section 4 with a smaller UI: a tab list with 
 4. Keep the old server alive across upgrades.
 5. LAN pairing, encryption and revocation, then the reconnect test.
 6. Internet transport, then the mobile companion.
+
+## 7. Verification
+
+- Unit and app tests: `session_host.rs` (jobs survive their client, hosted PTYs replay on reattach) and `app.rs` (a command runs through the host; a new window reattaches a job and a running full-screen program).
+- `crates/mrt-app/tests/e2e_processes.rs`: real `mrt server`, `mrt share`, `mrt pair`, `--host`, revocation and `mrt session-host` processes with separate `MRT_DATA_DIR`s.
+- `scripts/e2e/gui_crash_reattach.py`: the real window on an offscreen X server (`scripts/e2e/xvfb_offscreen.sh`, no root needed): it types a long command and a full-screen program into a tab, kills the window with SIGKILL, checks that the session host still runs both, starts the window again and checks (over MCP, with screenshots) that the program is back in the same tab with its screen and that both end as blocks there.

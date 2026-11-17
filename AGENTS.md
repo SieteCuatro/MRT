@@ -15,7 +15,8 @@ The Cargo workspace contains 5 modular crates:
   - `vt.rs`: Parses ANSI/VT100 escape sequences via `vte` into colored `AnsiSpan` segments and stripped plain text.
   - `block.rs`: Defines `CommandBlock` and `classify_output` (auto-detecting JSON trees, CSV/TSV tables, Markdown, and HTTP responses).
   - `safety.rs`: Evaluates command risk (`Safe`, `Moderate`, `Critical`) across Bash, PowerShell, CMD/Batch, SQL, Git, Kubernetes, and process control (`kill`, `taskkill`, `Stop-Process`, protected OS process names) for the MRT Safety Approval Gate.
-  - `shell_integration.rs`: OSC 133 semantic prompt markers parser and shell integration generator for Bash, Zsh, Fish, PowerShell, and CMD (library only; not wired into the GUI yet).
+  - `shell_integration.rs`: OSC 133 / OSC 7 parsers and shell integration scripts for Bash, Git Bash, sh, Zsh, Fish, PowerShell, and CMD.
+  - `shell_session.rs`: `ShellSession`, one long-lived PTY shell per tab with the integration script injected, so `cd`, variables, aliases and venvs persist. `run(command)` returns a `CommandHandle` that streams output and resolves with exit code, duration and cwd from OSC 133/OSC 7 markers; `ShellSessionError::should_fall_back()` tells callers to use one process per command instead (library only; not wired into the GUI yet).
   - `platform.rs`: Cross-platform startup helpers (`hydrate_login_environment` for macOS/Linux GUI `$PATH` inheritance and `attach_parent_console_if_cli` for Windows CLI flags).
 - **`crates/mrt-tools`**:
   - `http_inspector.rs`: Built-in `:http` / `:curl` REST API client (`reqwest`).

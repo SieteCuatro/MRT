@@ -98,6 +98,8 @@ pub struct TerminalConfig {
     /// Output kept per command block, in MiB; older output is dropped from the
     /// front. `0` keeps everything.
     pub max_block_output_mb: u64,
+    /// Save the tabs, splits, shells and folders and reopen them at the next start.
+    pub restore_layout: bool,
 }
 
 impl Default for TerminalConfig {
@@ -112,6 +114,7 @@ impl Default for TerminalConfig {
             font_family: None,
             font_fallback: Vec::new(),
             max_block_output_mb: 32,
+            restore_layout: true,
         }
     }
 }

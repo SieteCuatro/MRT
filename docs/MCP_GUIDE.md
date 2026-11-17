@@ -53,6 +53,42 @@ Open the **MCP Hub** side panel inside MRT and click **Copy MCP Config**, or add
 ```
 *(On Linux/macOS, point `"command"` to `/path/to/MRT/target/release/mrt`. The **Copy MCP Config** button fills in the path of the running executable for you.)*
 
+### 2.1 One-command setup for coding agents (`mrt agent setup`)
+
+```bash
+mrt agent setup                    # Claude Code, Codex CLI and Gemini CLI, user-level files
+mrt agent setup --agent codex      # one agent (comma-separated list or "all")
+mrt agent setup --project          # files in the current directory instead
+mrt agent setup --dry-run          # print what would change, write nothing
+mrt agent show                     # MCP command line + instructions, for any other agent
+mrt agent remove                   # undo setup (takes the same flags)
+```
+
+For each agent, `setup` does two things:
+
+1. Adds an MCP server named `mrt` that starts `<path of this mrt binary> --mcp-server`.
+2. Writes an `mrt` skill (`skills/mrt/SKILL.md`) that tells the agent what MRT's tools are for and that commands go through the Safety Approval Gate: when a command is blocked it must not retry it in another form, but ask the user, who can approve it in the MRT window.
+
+| Agent | Scope | MCP server entry | Skill |
+| :--- | :--- | :--- | :--- |
+| Claude Code | `--user` (default) | `~/.claude.json` → `mcpServers.mrt` (`type: "stdio"`) | `~/.claude/skills/mrt/SKILL.md` |
+| Claude Code | `--project` | `.mcp.json` → `mcpServers.mrt` | `.claude/skills/mrt/SKILL.md` |
+| Codex CLI | `--user` | `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`) → `[mcp_servers.mrt]` | `~/.agents/skills/mrt/SKILL.md` |
+| Codex CLI | `--project` | `.codex/config.toml` → `[mcp_servers.mrt]` (Codex reads it in trusted projects only) | `.agents/skills/mrt/SKILL.md` |
+| Gemini CLI | `--user` | `~/.gemini/settings.json` → `mcpServers.mrt` | `~/.gemini/skills/mrt/SKILL.md` |
+| Gemini CLI | `--project` | `.gemini/settings.json` → `mcpServers.mrt` | `.gemini/skills/mrt/SKILL.md` |
+
+Sources: Claude Code [MCP scopes](https://code.claude.com/docs/en/mcp) and [skills](https://code.claude.com/docs/en/skills); Codex [MCP](https://developers.openai.com/codex/mcp) and [skills](https://developers.openai.com/codex/skills); Gemini CLI [MCP servers](https://geminicli.com/docs/tools/mcp-server/) and [skills](https://geminicli.com/docs/cli/skills/).
+
+How it treats your files:
+
+- **Merges, never replaces.** Only the `mrt` entry is added or updated; other servers and settings stay. TOML comments and layout are kept. JSON files are rewritten with two-space indentation and keys in alphabetical order (the content is otherwise the same).
+- **Backs up first.** Before changing an existing config file it copies it to `<file>.mrt-backup-<date>-<time>` in the same folder.
+- **Idempotent.** Running `setup` again changes nothing. If the `mrt` binary moved, it updates the path and keeps any keys you added to the entry (such as `env`).
+- **Leaves other tools' entries alone.** If an `mrt` server that does not start an `mrt` binary with `--mcp-server`, or an `mrt` skill MRT did not write, already exists, it is reported as *skipped* and not touched.
+- **`remove` undoes exactly what `setup` added**: it deletes the `mrt` server entry (and the `mcpServers` / `mcp_servers` table if that leaves it empty, and the file if that leaves it empty), the skill file MRT wrote, and any folders that are left empty.
+- Close the agent before running setup on `~/.claude.json`, which Claude Code also rewrites, then start it again to load the server and skill.
+
 ---
 
 ## 3. Complete MCP Server Tool Reference (31 Tools)

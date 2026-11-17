@@ -18,6 +18,8 @@ Every `v*` tag publishes archives on the [GitHub Releases](https://github.com/Si
 
 Each archive contains only the `mrt` (or `mrt.exe`) binary. Put it somewhere on your `PATH`.
 
+The Linux binary is linked against glibc 2.17, so it runs on any x86_64 distribution with glibc 2.17 or newer: RHEL/CentOS 7 and later, Ubuntu 14.04 and later, Debian 8 and later, and current rolling distributions. The window needs X11 or Wayland and OpenGL (Mesa is enough); `mrt server`, `mrt --mcp-server` and the other command-line modes need neither. Releases up to v0.2.1 had a Linux binary that needed glibc 2.43; build from source or use a newer release on older systems.
+
 ### Build from source
 You need a stable Rust toolchain ([rustup](https://rustup.rs)). On Debian/Ubuntu, install the GUI libraries first:
 
@@ -33,7 +35,7 @@ cd MRT
 cargo build --release -p mrt-app
 ```
 
-The binary is `target/release/mrt` (`mrt.exe` on Windows).
+The binary is `target/release/mrt` (`mrt.exe` on Windows). It needs the glibc version of the machine that built it or newer; to build a Linux binary that runs on older distributions too, use `scripts/release/build-linux.sh` (it links against glibc 2.17 with [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)).
 
 ### Command-line flags
 

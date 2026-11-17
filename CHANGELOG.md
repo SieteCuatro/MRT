@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Linux binary on older distributions**: the Linux archive is now linked against glibc 2.17 (`scripts/release/build-linux.sh`, with cargo-zigbuild), so it runs on RHEL/CentOS 7, Ubuntu 14.04, Debian 8 and every newer distribution. v0.2.0 and v0.2.1 needed glibc 2.43. Tested headless on Ubuntu 14.04 (glibc 2.19) and with the window on Ubuntu 20.04 (glibc 2.31) and 26.04 (glibc 2.43).
+- Leftover `mrt-session-*` folders in the temp directory (from sessions that ended in a crash or a killed process) are removed when they are more than 12 hours old.
+
 ## v0.2.1 — 2026-11-17
 
 ### New

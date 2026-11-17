@@ -111,7 +111,52 @@ Commands that may be destructive open the **Safety Approval Gate** first (see [C
 | `Esc` | Command Palette / Safety Gate | Closes the palette / cancels the pending command. |
 | `Ctrl+Q` | Interactive TUI mode | Ends the session and saves its transcript as a block. |
 
-The Command Palette lists everything you can also reach with the mouse, so it is the quickest way to discover features.
+The Command Palette lists everything you can also reach with the mouse, so it is the quickest way to discover features. Its **Actions** section shows each action's current key binding, or its action name when it has none.
+
+### Custom keybindings
+
+Every shortcut above (except the fixed composer and palette keys) comes from a keymap you can change with `binding = action` pairs in the `[keybindings]` table of the config file (it takes effect once config file loading is available):
+
+```toml
+[keybindings]
+"cmd+t" = "new_tab"            # Cmd+T on macOS, Ctrl+T on Windows/Linux
+"ctrl+shift+w" = "close_tab"
+"ctrl+pgdn" = "next_tab"
+"ctrl+a > c" = "new_tab"       # chain: Ctrl+A, then C
+"ctrl+b" = "enter_table:pane"  # key table (mode)
+"pane/h" = "split_horizontal"
+"pane/v" = "split_vertical"
+"ctrl+p" = "unbind"            # remove a default binding
+```
+
+**Binding syntax**
+
+| Form | Example | Meaning |
+| :--- | :--- | :--- |
+| Chord | `ctrl+shift+t`, `alt+f5`, `ctrl+pgdn` | Modifiers (`ctrl`, `shift`, `alt`/`option`) joined with `+`, key last. |
+| Primary modifier | `cmd+k` | `cmd` (also `super`, `meta`, `win`) is Command on macOS and Ctrl on Windows/Linux. |
+| Chain | `ctrl+a > c` | Press `Ctrl+A`, then `C` within 1.5 seconds. A badge in the bottom-right corner shows the keys typed so far; `Esc` cancels. |
+| Key table | `pane/h` | A binding that only works inside the key table `pane`. |
+
+Key tables are modes, like tmux's prefix tables: bind a key to `enter_table:pane`, then the `pane/…` bindings stay active, so you can press several of them in a row. Keys the table does not bind are ignored, and global bindings still work. `Esc`, the `exit_table` action, or 5 seconds without a key press leaves the table.
+
+Bindings are matched exactly first; a binding with no `shift`/`alt` also fires when those are held (so `Ctrl+Shift+K` still opens the palette), unless a more specific binding exists. Set an action to `unbind` to remove a default binding. A chain cannot start with the keys of another binding (`ctrl+a` and `ctrl+a > c` together); MRT keeps the first, skips the other, and lists the conflict under **Keybinding problems** in the Command Palette, along with unknown keys or actions.
+
+**Actions**
+
+| Action | Default | Does |
+| :--- | :--- | :--- |
+| `toggle_command_palette` | `Ctrl+K`, `Ctrl+P` | Opens or closes the Command Palette. |
+| `exit_tui` | `Ctrl+Q` | Ends the Interactive TUI session (only while it is open). |
+| `new_tab` / `close_tab` | — | Opens a tab with the current shell / closes the active tab. |
+| `next_tab` / `previous_tab` | — | Cycles through tabs. |
+| `split_horizontal` / `split_vertical` / `unsplit` | — | Same as `:split-h`, `:split-v`, `:unsplit`. |
+| `clear_blocks` | — | Same as `:clear`. |
+| `toggle_explorer`, `toggle_history`, `toggle_runbooks`, `toggle_mcp_hub`, `toggle_toolbox`, `toggle_mosaic` | — | Show or hide that panel. |
+| `open_task_manager` | — | Opens the Toolbox on the Task Manager tab. |
+| `enter_table:<name>` / `exit_table` | — | Enters / leaves a key table. |
+
+Keys a binding consumes are not sent to the shell or TUI program; everything else passes through unchanged.
 
 ---
 
@@ -120,7 +165,7 @@ The Command Palette lists everything you can also reach with the mouse, so it is
 Full-screen programs need a real terminal. MRT opens them in a full-screen PTY overlay when the command starts with `vim`, `vi`, `nvim`, `nano`, `htop`, `top`, `lazygit`, `lazydocker`, `less`, `man`, or `fzf`, or when you type `:tui <command>` for anything else (for example `:tui ssh myserver` or `:tui python`).
 
 - Text, `Enter`, `Backspace`, `Tab`, `Esc`, arrows, `Home` / `End`, `PageUp` / `PageDown`, `Delete`, and `Ctrl+A/C/D/E/L/U/W/Z` are sent to the program.
-- The overlay closes when the program exits, or when you press `Ctrl+Q`.
+- The overlay closes when the program exits, or when you press `Ctrl+Q` (the `exit_tui` action; rebindable).
 - The session transcript is saved as a normal command block in the tab.
 
 ---

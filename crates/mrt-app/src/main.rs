@@ -2,6 +2,7 @@
 
 mod app;
 mod history;
+mod keymap;
 mod theme;
 mod widgets;
 

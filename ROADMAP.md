@@ -40,7 +40,7 @@ These items make MRT usable as a person's main terminal.
 - **Throughput benchmark.** *(implemented, #13; the workflow runs only when started by hand while Actions minutes are unavailable. First finding: Windows PowerShell streams output about 20× slower than `cmd`, see [docs/PERFORMANCE.md](docs/PERFORMANCE.md))* Add a benchmark that streams a large file (for example `cat` of 100 MB, and `yes | head -n 5000000`) and records time to finish and frames dropped. Run it in CI to catch regressions.
 - **Large output.** *(implemented: incremental parsing while streaming, a per-block output limit (`terminal.max_block_output_mb`), and blocks that draw their last 2,000 lines with "Show more"; see [docs/PERFORMANCE.md](docs/PERFORMANCE.md))* Store very long block output out of memory or truncate it with "show more", virtualize block rendering, and cap the repaint rate while output is streaming. *Done when:* a 1 GB log does not freeze the UI.
 - **Font handling.** *(implemented: `terminal.font_family` and `terminal.font_fallback` accept family names or font files, with platform symbol fonts after them; ligatures are not drawn because egui does not shape text)* Configurable font, fallback chain for missing glyphs, and optional ligatures. Get cell metrics right for Nerd Font icons.
-- **Images.** *(implemented in command blocks: iTerm2 OSC 1337, the kitty graphics protocol with direct transmission, and Sixel; not yet in the TUI grid)* The kitty graphics protocol, then Sixel. Show images inline in blocks and in the grid.
+- **Images.** *(implemented in command blocks and the TUI grid: iTerm2 OSC 1337, the kitty graphics protocol with direct transmission, and Sixel)* The kitty graphics protocol, then Sixel. Show images inline in blocks and in the grid.
 - **Idle cost.** *(implemented: worker and MCP events wake the UI, so it repaints once a second when idle instead of every 250 ms, and every 50 ms only while commands run)* Repaint only when something changes; today the app requests a repaint every 30 ms while busy. Measure CPU use when idle and set a target.
 
 ## Milestone 4 — Sessions that outlive the window
@@ -74,7 +74,7 @@ MRT already has a 31-tool MCP server. These items make that easy to use and visi
 
 - **Configurable keybindings.** *(implemented, #12; read from the config file's `[keybindings]` table)* All actions bindable from the config file, including chained keys (`ctrl+a > c`) and key tables / modes (Ghostty 1.3, tmux prefix key).
 - **Named actions.** *(implemented: `[[actions]]` with palette entries, `key =` and `run:<name>` bindings)* User-defined actions in the config (a command, a runbook, or a sequence of MRT actions) that appear in the Command Palette and can be bound to keys.
-- **Copy mode.** *(implemented for command blocks: `copy_mode`, Ctrl+Shift+Space; not yet inside the TUI grid)* Move through scrollback with the keyboard, select, and copy, without the mouse.
+- **Copy mode.** *(implemented: `copy_mode`, Ctrl+Shift+Space, over command blocks and, as grid copy mode, inside full-screen programs)* Move through scrollback with the keyboard, select, and copy, without the mouse.
 - **Input to several panes.** *(implemented for programs running in the panes of a split tab: `:broadcast`; the prompt is not duplicated)* Optionally send typed input to every pane in a tab at once, with a clear on-screen indicator and the Safety Gate still checking each pane.
 - **Event hooks.** *(implemented: `[[hooks]]` for command_finished, command_failed, cwd_changed and tab_opened)* Run an action when a command fails, a tab opens, or a long command finishes.
 
@@ -84,7 +84,7 @@ MRT already has a 31-tool MCP server. These items make that easy to use and visi
 - Themes from a file, including importing common theme formats. *(implemented: MRT TOML, Windows Terminal, Alacritty, Ghostty and iTerm2 themes)*
 - Accessibility: screen-reader output for blocks and the grid, and high-contrast themes. *(implemented: AccessKit labels for blocks, screen text for the TUI grid, `high-contrast` theme)*
 - A mobile companion app that attaches to a session server (after Milestone 4). *(waits for the session server)*
-- Suspend/resume, priority changes, and service management in the Task Manager (needs `NtSuspendProcess` on Windows). *(suspend/resume and priority implemented: `:suspend`, `:resume`, `:priority` and Task Manager buttons; service management not yet)*
+- Suspend/resume, priority changes, and service management in the Task Manager (needs `NtSuspendProcess` on Windows). *(implemented: `:suspend`, `:resume`, `:priority`, `:services` and `:service start|stop|restart`, with Task Manager buttons; service control always goes through the Safety Gate)*
 
 ## Shipped
 

@@ -145,7 +145,7 @@ Programs can show images in a command block with any of the three common protoco
 | kitty graphics (`ESC _ G …`) | `chafa -f kitty`, `timg -pk` | Direct transmission only (`t=d`); PNG (`f=100`), RGB and RGBA, zlib (`o=z`), chunked data (`m=1`), and `a=t` + `a=p` placement. MRT never reads files or shared memory a program names, and does not answer `a=q` queries, so tools that require a reply (`kitty +kitten icat`) may wait or fall back. |
 | Sixel (`ESC P … q`) | `img2sixel`, `chafa -f sixels`, `lsix` | Color registers in RGB or HLS, repeats and transparent backgrounds (`P2=1`). |
 
-Images appear where they were printed, scaled down to the block's width and at most 600 points high. Images larger than 8192 pixels on a side, or payloads over 64 MiB, are refused with a short note in the output. Images are not saved in history, and full-screen programs in the TUI overlay (`:tui`) do not show them yet.
+Images appear where they were printed, scaled down to the block's width and at most 600 points high. Images larger than 8192 pixels on a side, or payloads over 64 MiB, are refused with a short note in the output. Images are not saved in history. Full-screen programs (the TUI overlay and pane programs) show them too: an image appears at the cursor, takes the cells its size needs, and scrolls with the text; it is dropped when the program switches between the normal and alternate screen. After the scrollback limit is reached, older images may drift.
 
 ### Remote tabs (SSH)
 
@@ -237,6 +237,8 @@ Bindings are matched exactly first; a binding with no `shift`/`alt` also fires w
 Keys a binding consumes are not sent to the shell or TUI program; everything else passes through unchanged.
 
 ### Copy mode
+
+Inside a full-screen program (`vim`, `htop`, `:tui …`), `Ctrl+Shift+Space` starts **grid copy mode** instead: a cursor over the program's screen that moves with `h` `j` `k` `l` or the arrows, `0` / `$` (line start / end), `g` / `G` and `PgUp` / `PgDn`; `v` starts a selection, `y` or `Enter` copies it (or the cursor's line), `Esc` leaves. While it is on, keys go to MRT, not the program.
 
 `Ctrl+Shift+Space` starts copy mode on the last line of the active tab's last block. A panel at the bottom shows the lines around the cursor and what is selected; the prompt does not receive keys while it is open.
 
@@ -419,6 +421,7 @@ MRT reads two optional [TOML](https://toml.io) files. Every setting is optional:
 | `terminal.restore_layout` | `true` | Reopen the last session's tabs, splits, shells and folders at startup (fresh shells; nothing is run). Remote tabs reconnect on their first command. A shell that is no longer installed becomes the default shell, and a folder that no longer exists becomes the start folder. |
 | `terminal.max_block_output_mb` | `32` | Output kept per command block, in MiB. Older output is dropped from the front and the block says how much; `0` keeps everything (up to 4096). Applies to commands started after the change. |
 | `terminal.theme` | `graphite-calm` | `graphite-calm` (aliases `dark`, `default`), `high-contrast`, or a theme file: a path, or a name looked up next to the config file and in its `themes/` folder (`.toml` optional). See [Themes](#themes). Applied live. |
+| `terminal.fast_native_output` | `false` | Windows only. A plain native program typed in a PowerShell tab (for example `cargo build`, with no pipes, variables or quotes, and not a PowerShell alias like `curl`) runs through `cmd.exe`, which passes large output about 20× faster than Windows PowerShell. Variables and functions defined in the PowerShell session do not apply to those commands. |
 | `terminal.quick_dropdown`, `terminal.quick_height_percent` | `false`, `45` | With `true`, `mrt quick` shows the window as a drop-down across the top of the screen at this height. |
 | `terminal.persistent_shell` | `true` | Run each tab's commands in one long-lived shell so state carries over (see [§2](#2-the-prompt)). `false` runs every command in a new shell process. Applied on reload; turning it off ends the running shells. |
 | `terminal.scrollback_blocks`, `terminal.auto_detect_structured_output` | `500`, `true` | Reserved; parsed but not applied yet. |

@@ -13,5 +13,6 @@ serde_json.workspace = true
 tokio.workspace = true
 portable-pty.workspace = true
 vte.workspace = true
+alacritty_terminal.workspace = true
 chrono.workspace = true
 uuid.workspace = true

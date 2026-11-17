@@ -3,6 +3,7 @@ pub mod platform;
 pub mod pty;
 pub mod safety;
 pub mod shell_integration;
+pub mod term;
 pub mod vt;
 
 pub use block::{
@@ -21,3 +22,7 @@ pub use shell_integration::{
     generate_shell_integration_script, parse_osc133_markers, Osc133Event, Osc133Kind,
 };
 pub use vt::{parse_ansi_text, AnsiColor, AnsiSpan, VtParserState};
+pub use term::{
+    xterm_palette, MouseMode, TermCell, TermColor, TermCursor, TermCursorShape, TermModes,
+    TermSnapshot, TerminalEmulator,
+};

@@ -3,6 +3,7 @@
 mod agent_setup;
 mod app;
 mod config_runtime;
+mod find;
 mod history;
 mod keymap;
 mod notifications;

@@ -125,9 +125,16 @@ Click **🔔 Notifications** in the sidebar to turn desktop notifications off, c
 | `Enter` | Command Palette | Runs the first match, or the typed text as a command when nothing matches. |
 | `Esc` | Command Palette / Safety Gate | Closes the palette / cancels the pending command. |
 | `Ctrl+Q` | Interactive TUI mode | Ends the session and saves its transcript as a block. |
+| `Ctrl+F` | Anywhere except a running program | Opens **Find in output** (the `find` action; rebindable). |
+| `Enter` / `Shift+Enter` | Find bar | Next / previous match. |
+| `Esc` | Find bar | Closes the find bar. |
 | `Ctrl+click` (`Cmd+click` on macOS) | Link in block output | Opens a URL in the browser, or a `file:line[:col]` path in your editor. |
 
 The Command Palette lists everything you can also reach with the mouse, so it is the quickest way to discover features. Its **Actions** section shows each action's current key binding, or its action name when it has none.
+
+### Find in output
+
+`Ctrl+F` opens a find bar above the active tab's blocks (both panes of a split tab). Type to search the output of every block: matches are highlighted, the current one in solid amber, and the bar shows "3 of 12". `Enter` and `Shift+Enter` (or the ▲ ▼ buttons) move between matches and scroll each one into view. Letters match regardless of case (ASCII); other characters must match exactly. Blocks shown in a structured view (JSON tree, table) are counted and scrolled to but not highlighted. Inside a running full-screen program, `Ctrl+F` goes to the program.
 
 ### Custom keybindings
 

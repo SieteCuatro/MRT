@@ -45,6 +45,8 @@ pub enum Action {
     ToggleToolbox,
     ToggleMosaic,
     OpenTaskManager,
+    /// Open the find bar (search the active tab's output).
+    Find,
     /// Enter the named key table.
     EnterTable(String),
     /// Leave the active key table.
@@ -53,6 +55,7 @@ pub enum Action {
 
 /// The simple (argument-free) actions, in Command Palette order.
 pub const PALETTE_ACTIONS: &[Action] = &[
+    Action::Find,
     Action::SplitHorizontal,
     Action::SplitVertical,
     Action::Unsplit,
@@ -77,6 +80,7 @@ const SIMPLE_ACTIONS: &[(Action, &str, &str)] = &[
         "Toggle the Command Palette",
     ),
     (Action::ExitTui, "exit_tui", "Exit Interactive TUI mode"),
+    (Action::Find, "find", "Find in output"),
     (Action::NewTab, "new_tab", "New tab"),
     (Action::CloseTab, "close_tab", "Close tab"),
     (Action::NextTab, "next_tab", "Next tab"),
@@ -195,6 +199,8 @@ impl Action {
     fn applies_in(&self, context: KeyContext) -> bool {
         match self {
             Action::ExitTui => context.tui_active,
+            // A program with the keyboard keeps Ctrl+F (e.g. less, vim, readline).
+            Action::Find => !context.tui_active,
             _ => true,
         }
     }
@@ -527,6 +533,7 @@ const DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("ctrl+k", "toggle_command_palette"),
     ("ctrl+p", "toggle_command_palette"),
     ("ctrl+q", "exit_tui"),
+    ("ctrl+f", "find"),
 ];
 
 impl Keymap {

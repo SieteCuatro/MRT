@@ -39,6 +39,17 @@ pub fn render_command_block(
 ) -> Option<BlockAction> {
     let mut triggered_action = None;
     let failed = matches!(block.exit_code, Some(c) if c != 0);
+    // The block holding the current find match is scrolled into view first; when its
+    // text is drawn as spans the exact match is scrolled to afterwards and wins.
+    if let Some(h) = find_highlight(ui) {
+        if h.scroll && h.current.is_some_and(|(id, _)| id == block.id) {
+            ui.scroll_to_rect_animation(
+                egui::Rect::from_min_size(ui.cursor().min, egui::vec2(1.0, 60.0)),
+                Some(egui::Align::Center),
+                egui::style::ScrollAnimation::none(),
+            );
+        }
+    }
 
     egui::Frame::none()
         .fill(Palette::BG_SURFACE)
@@ -346,6 +357,7 @@ pub fn render_compact_block(ui: &mut Ui, block: &CommandBlock) -> Option<BlockAc
             &SpanStyle { font_size: 12.0, backgrounds: false },
             block_cwd(block),
             egui::Id::new(("link_error_compact", block.id)),
+            None,
         ) {
             action = Some(link_request_action(link_action));
         }
@@ -421,6 +433,12 @@ fn link_request_action(request: LinkRequest) -> BlockAction {
 }
 
 fn render_ansi_spans(ui: &mut Ui, block: &CommandBlock) -> Option<BlockAction> {
+    let highlight = find_highlight(ui);
+    let find = highlight.as_ref().map(|h| crate::widgets::links::FindView {
+        query: &h.query,
+        current: h.current.filter(|(id, _)| *id == block.id).map(|(_, n)| n),
+        scroll: h.scroll,
+    });
     if block.ansi_spans.is_empty() {
         ui.label(
             RichText::new("(no output)")
@@ -435,8 +453,14 @@ fn render_ansi_spans(ui: &mut Ui, block: &CommandBlock) -> Option<BlockAction> {
         &SpanStyle { font_size: 13.0, backgrounds: true },
         block_cwd(block),
         egui::Id::new(("link_error", block.id)),
+        find.as_ref(),
     )
     .map(link_request_action)
+}
+
+/// The find-in-output highlight for this frame, if the find bar is open.
+fn find_highlight(ui: &Ui) -> Option<crate::find::Highlight> {
+    ui.ctx().data(|d| d.get_temp::<crate::find::Highlight>(egui::Id::new(crate::find::HIGHLIGHT_ID)))
 }
 
 /// OSC 52: programs may ask to write the clipboard, but MRT only does it

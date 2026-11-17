@@ -480,6 +480,8 @@ pub struct MrtGuiApp {
     pub config_state: crate::config_runtime::ConfigState,
     /// Desktop notifications and sidebar badges for commands that finish in the background.
     pub(crate) notifier: crate::notifications::CommandNotifier,
+    /// Find in output (Ctrl+F).
+    pub(crate) find: crate::find::FindState,
 }
 
 impl MrtGuiApp {
@@ -597,6 +599,7 @@ impl MrtGuiApp {
             force_process_tick: false,
             pending_ps_compare: None,
             notifier: crate::notifications::CommandNotifier::new(),
+            find: crate::find::FindState::default(),
             config_state,
         };
         app.apply_config_side_effects();
@@ -3032,6 +3035,102 @@ impl MrtGuiApp {
         }
     }
 
+    /// The find bar above the active tab's blocks (Ctrl+F): query box, match count,
+    /// previous/next and close. Publishes the highlight blocks draw this frame.
+    fn render_find_bar(&mut self, ui: &mut egui::Ui) {
+        let key = egui::Id::new(crate::find::HIGHLIGHT_ID);
+        if !self.find.open || self.mosaic {
+            ui.ctx().data_mut(|d| d.remove::<crate::find::Highlight>(key));
+            return;
+        }
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return;
+        };
+        let blocks = tab.blocks.iter().chain(tab.secondary_pane.iter().flat_map(|p| p.blocks.iter()));
+        let (per_block, total) =
+            crate::find::count_matches(blocks.map(|b| (b.id, b.plain_output.as_str())), &self.find.query);
+        if self.find.current >= total {
+            self.find.current = 0;
+        }
+
+        let mut step = None;
+        let mut close = false;
+        egui::Frame::none()
+            .fill(Palette::BG_ELEVATED)
+            .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_STRONG))
+            .rounding(egui::Rounding::same(Radius::BUTTON))
+            .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("🔍").color(Palette::TEXT_MUTED));
+                    let edit = ui.add(
+                        egui::TextEdit::singleline(&mut self.find.query)
+                            .hint_text("Find in output")
+                            .desired_width(280.0),
+                    );
+                    if std::mem::take(&mut self.find.focus_requested) {
+                        edit.request_focus();
+                    }
+                    if edit.changed() {
+                        self.find.current = 0;
+                        self.find.scroll_pending = true;
+                    }
+                    let (enter, shift, escape) =
+                        ui.input(|i| (i.key_pressed(Key::Enter), i.modifiers.shift, i.key_pressed(Key::Escape)));
+                    if edit.lost_focus() && enter {
+                        step = Some(!shift);
+                        edit.request_focus();
+                    }
+                    if edit.lost_focus() && escape {
+                        close = true;
+                    }
+                    let count = if self.find.query.is_empty() {
+                        String::new()
+                    } else if total == 0 {
+                        "No matches".to_string()
+                    } else {
+                        format!("{} of {total}", self.find.current + 1)
+                    };
+                    ui.label(RichText::new(count).size(12.5).color(Palette::TEXT_MUTED));
+                    if ui.add_enabled(total > 0, egui::Button::new("▲").small()).on_hover_text("Previous match (Shift+Enter)").clicked() {
+                        step = Some(false);
+                    }
+                    if ui.add_enabled(total > 0, egui::Button::new("▼").small()).on_hover_text("Next match (Enter)").clicked() {
+                        step = Some(true);
+                    }
+                    if ui.small_button("×").on_hover_text("Close (Esc)").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        ui.add_space(6.0);
+
+        if let Some(forward) = step {
+            self.find.step(forward, total);
+        }
+        if close {
+            self.find.close();
+            ui.ctx().data_mut(|d| d.remove::<crate::find::Highlight>(key));
+            return;
+        }
+        let highlight = crate::find::Highlight {
+            query: self.find.query.clone(),
+            current: crate::find::locate(&per_block, self.find.current),
+            scroll: {
+                if std::mem::take(&mut self.find.scroll_pending) {
+                    self.find.scroll_frames = 3;
+                }
+                let scroll = self.find.scroll_frames > 0 && total > 0;
+                self.find.scroll_frames = self.find.scroll_frames.saturating_sub(1);
+                if self.find.scroll_frames > 0 {
+                    ui.ctx().request_repaint();
+                }
+                scroll
+            },
+        };
+        ui.ctx().data_mut(|d| d.insert_temp(key, highlight));
+    }
+
     fn render_tui_overlay(&mut self, ctx: &egui::Context) {
         let exit_keys = self
             .key_resolver
@@ -3447,6 +3546,7 @@ impl MrtGuiApp {
             }
             Action::ToggleMosaic => self.mosaic = !self.mosaic,
             Action::OpenTaskManager => self.open_task_manager(None),
+            Action::Find => self.find.open(),
             // The resolver itself tracks the active key table.
             Action::EnterTable(_) | Action::ExitTable => {}
         }
@@ -4200,6 +4300,10 @@ impl eframe::App for MrtGuiApp {
                     .inner_margin(egui::Margin { left: 20.0, right: 20.0, top: 12.0, bottom: 4.0 }),
             )
             .show(ctx, |ui| {
+            self.render_find_bar(ui);
+            // While the find bar is open, block lists stop sticking to the end so a match
+            // above can be scrolled into view (sticking overrides programmatic scrolls).
+            let stick_to_end = !self.find.open;
             if self.mosaic {
                 self.render_mosaic(ui);
                 return;
@@ -4239,7 +4343,7 @@ impl eframe::App for MrtGuiApp {
                             egui::ScrollArea::vertical()
                                 .id_salt("split_pane_primary")
                                 .auto_shrink([false, false])
-                                .stick_to_bottom(true)
+                                .stick_to_bottom(stick_to_end)
                                 .show(ui, |ui| {
                                     let mut previous_runs = HashMap::new();
                                     for block in &mut tab.blocks {
@@ -4274,7 +4378,7 @@ impl eframe::App for MrtGuiApp {
                             egui::ScrollArea::vertical()
                                 .id_salt("split_pane_secondary")
                                 .auto_shrink([false, false])
-                                .stick_to_bottom(true)
+                                .stick_to_bottom(stick_to_end)
                                 .show(ui, |ui| {
                                     if sec.blocks.is_empty() {
                                         ui.label(RichText::new("Secondary pane active. Commands run here when focused.").italics().color(Palette::TEXT_MUTED));
@@ -4312,7 +4416,7 @@ impl eframe::App for MrtGuiApp {
                             egui::ScrollArea::vertical()
                             .id_salt("split_v_primary")
                             .max_height(half_h)
-                            .stick_to_bottom(true)
+                            .stick_to_bottom(stick_to_end)
                             .show(ui, |ui| {
                                 let mut previous_runs = HashMap::new();
                                 for block in &mut tab.blocks {
@@ -4348,7 +4452,7 @@ impl eframe::App for MrtGuiApp {
                             egui::ScrollArea::vertical()
                             .id_salt("split_v_secondary")
                             .max_height(half_h)
-                            .stick_to_bottom(true)
+                            .stick_to_bottom(stick_to_end)
                             .show(ui, |ui| {
                                 if sec.blocks.is_empty() {
                                     ui.label(RichText::new("Secondary pane active. Commands run here when focused.").italics().color(Palette::TEXT_MUTED));
@@ -4369,7 +4473,7 @@ impl eframe::App for MrtGuiApp {
                 } else {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
-                        .stick_to_bottom(true)
+                        .stick_to_bottom(stick_to_end)
                         .show(ui, |ui| centered_column(ui, |ui| {
                             ui.add_space(8.0);
                             if tab.blocks.is_empty() {

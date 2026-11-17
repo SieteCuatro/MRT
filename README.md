@@ -45,7 +45,7 @@ Dual-licensed under the [MIT License or The Unlicense](LICENSE), at your option.
   - **MCP Host**: Connects to external MCP servers over `stdio` or Streamable HTTP (with custom headers such as `Authorization`) from the GUI's MCP Hub panel, with one-click presets for common servers (Filesystem, Git, Memory Graph, SQLite, Fetch).
 - **Safety Approval Gate**: Classifies commands (`Safe`, `Moderate`, `Critical`) across Bash, PowerShell, CMD/Batch, Git, SQL, Kubernetes, and process control (`kill`, `pkill`, `taskkill`, `Stop-Process`, …); prompts for confirmation in the GUI for `Critical` and process-control commands and blocks unapproved `Critical` commands over MCP.
 - **Provider-Agnostic AI with Streaming**: Translates natural-language prompts (`#` or `?`) into shell-specific commands and streams AI error diagnoses token-by-token directly into failed blocks, with an offline heuristic fallback when no API key is configured.
-- **Automated CI/CD Distribution**: Multi-platform release matrix in GitHub Actions publishing ready-to-use binaries for Windows (x86_64 ZIP), Linux (Ubuntu tar.gz), and macOS (Intel & Apple Silicon tar.gz).
+- **Automated CI/CD Distribution**: Multi-platform release matrix in GitHub Actions publishing ready-to-use binaries for Windows (x86_64 ZIP), Linux (tar.gz, glibc 2.17 or newer), and macOS (Intel & Apple Silicon tar.gz).
 
 ## Quick Start
 

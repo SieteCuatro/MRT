@@ -49,7 +49,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libx11-dev libasound2-dev libudev-dev
 
+      - name: Install Zig and cargo-zigbuild (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          pip install ziglang
+          cargo install cargo-zigbuild --locked
+
+      # Linux: linked against glibc 2.17 so the binary runs on old and new distributions alike.
+      - name: Build release binary (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo zigbuild --release --locked -p mrt-app --target ${{ matrix.target }}.2.17
+
       - name: Build release binary
+        if: matrix.os != 'ubuntu-latest'
         run: cargo build --release --target ${{ matrix.target }} --locked
 
       - name: Package binary (Windows)

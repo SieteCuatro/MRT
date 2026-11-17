@@ -43,3 +43,10 @@ RUSTFLAGS="-D warnings" cargo test --workspace --locked
 | The session host, background mode, `mrt share` / `pair` / `attach`, or the phone companion | [docs/SESSION_SERVER.md](docs/SESSION_SERVER.md) and [docs/USER_GUIDE.md](docs/USER_GUIDE.md) |
 | A module, crate dependency, or process | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [AGENTS.md](AGENTS.md) |
 | A roadmap item | Mark it in [ROADMAP.md](ROADMAP.md) |
+
+## Building release archives
+
+While the release workflow is disabled, archives are built locally:
+
+- **Windows:** `cargo build --release --locked -p mrt-app`, then zip `target/release/mrt.exe` as `mrt-<tag>-x86_64-pc-windows-msvc.zip`.
+- **Linux:** `scripts/release/build-linux.sh <tag>` (in WSL or on Linux, with Zig and `cargo-zigbuild` installed). It links against glibc 2.17, checks that the binary asks for nothing newer, and writes `mrt-<tag>-x86_64-unknown-linux-gnu.tar.gz`. Do not ship a plain `cargo build` binary for Linux: it needs the build machine's glibc or newer.

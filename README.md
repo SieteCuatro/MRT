@@ -99,7 +99,7 @@ MRT checks configured environment variables in the following order (set `ai.prov
 - [Session Server & Remote Sessions](docs/SESSION_SERVER.md) — The session host, background mode, upgrades, `mrt share` / `pair` / `attach`, the phone companion, and how they are verified.
 - [Performance & Benchmarks](docs/PERFORMANCE.md) — Output throughput numbers, hot spots with large output, and how to run `cargo bench`.
 - [Changelog](CHANGELOG.md) — What each release changed.
-- [Roadmap](ROADMAP.md) — Milestones (all implemented) and the competitor comparison behind them.
+- [Roadmap](ROADMAP.md) — Open work (second list, from a 2026 comparison with Warp, Ghostty, Kitty, Windows Terminal and Wave) and the finished first list.
 - [Contributing](CONTRIBUTING.md) — Development workflow and PR checklist.
 - [AI Agent Instructions](AGENTS.md) — Workspace context for coding agents.
 - [Configuration Example](mrt.example.toml) — Every setting MRT reads from `~/.config/mrt/config.toml` (`%APPDATA%\mrt\config.toml` on Windows) and a per-project `.mrt.toml`, reloaded live. See [User Guide §6](docs/USER_GUIDE.md#6-configuration-file).

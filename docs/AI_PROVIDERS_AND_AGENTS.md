@@ -23,6 +23,14 @@ flowchart TD
     Check4 -->|No| Offline["MRT Offline Polyglot Engine\n(100% Free Native Rust Heuristics)"]
 ```
 
+`plan_ai_backends()` builds this list. The `[ai]` section of the [configuration file](USER_GUIDE.md#6-configuration-file) can change it (the GUI passes it in with `set_ai_preferences()`):
+
+- `provider = "<name>"` moves that provider to the front; the others keep their order as fallbacks. `provider = "offline"` skips every network provider.
+- `model` replaces the default model of the provider named in `provider`.
+- `ollama_endpoint` sets the Ollama URL, and `model` with `provider = "ollama"` enables Ollama without `OLLAMA_MODEL`.
+
+Environment variables win: keys come only from the environment, and `OLLAMA_MODEL` / `OLLAMA_HOST` override `model` / `ollama_endpoint`.
+
 ### Environment Variables Reference
 
 | Provider | Environment Variable | Endpoint Used | Default Model |

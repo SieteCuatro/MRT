@@ -44,58 +44,27 @@ pub async fn translate_nl_to_command(
 
     let system_prompt = build_system_prompt(cleaned_query, shell, cwd, mcp_tool_names);
 
-    // 1. Google Gemini
-    if let Ok(api_key) = std::env::var("GEMINI_API_KEY") {
-        if !api_key.trim().is_empty() {
-            if let Ok(p) = call_gemini_translator(&api_key, cleaned_query, shell, &system_prompt).await {
-                return Ok(p);
+    let backends = plan_ai_backends(&|name| std::env::var(name).ok(), &ai_preferences());
+
+    for backend in backends {
+        let result = match &backend {
+            AiBackend::Gemini { api_key, model } => {
+                call_gemini_translator(api_key, model, cleaned_query, shell, &system_prompt).await
             }
-        }
-    }
-
-    // 2. Anthropic Claude
-    if let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY") {
-        if !api_key.trim().is_empty() {
-            if let Ok(p) = call_anthropic_translator(&api_key, cleaned_query, shell, &system_prompt).await {
-                return Ok(p);
+            AiBackend::Anthropic { api_key, model } => {
+                call_anthropic_translator(api_key, model, cleaned_query, shell, &system_prompt)
+                    .await
             }
-        }
-    }
-
-    // 3. OpenAI, xAI Grok, DeepSeek, or OpenRouter (OpenAI-compatible chat completions)
-    let openai_compatible_providers = [
-        (
-            "OPENAI_API_KEY",
-            "https://api.openai.com/v1/chat/completions",
-            "gpt-4o-mini",
-            "OpenAI (gpt-4o-mini)",
-        ),
-        (
-            "XAI_API_KEY",
-            "https://api.x.ai/v1/chat/completions",
-            "grok-2-latest",
-            "xAI Grok",
-        ),
-        (
-            "DEEPSEEK_API_KEY",
-            "https://api.deepseek.com/chat/completions",
-            "deepseek-chat",
-            "DeepSeek",
-        ),
-        (
-            "OPENROUTER_API_KEY",
-            "https://openrouter.ai/api/v1/chat/completions",
-            "openrouter/auto",
-            "OpenRouter",
-        ),
-    ];
-
-    for (env_var, endpoint, model, label) in openai_compatible_providers {
-        if let Ok(api_key) = std::env::var(env_var) {
-            if !api_key.trim().is_empty() {
-                if let Ok(p) = call_openai_compatible_translator(
+            AiBackend::OpenAiCompatible {
+                endpoint,
+                api_key,
+                model,
+                label,
+                ..
+            } => {
+                call_openai_compatible_translator(
                     endpoint,
-                    &api_key,
+                    api_key,
                     model,
                     label,
                     cleaned_query,
@@ -103,34 +72,206 @@ pub async fn translate_nl_to_command(
                     &system_prompt,
                 )
                 .await
-                {
-                    return Ok(p);
-                }
             }
+            AiBackend::Ollama { host, model } => {
+                call_ollama_translator(host, model, cleaned_query, shell, &system_prompt).await
+            }
+        };
+        if let Ok(p) = result {
+            return Ok(p);
         }
     }
 
-    // 4. Local Ollama (if OLLAMA_MODEL is set)
-    if let Ok(ollama_model) = std::env::var("OLLAMA_MODEL") {
-        if !ollama_model.trim().is_empty() {
-            let host = std::env::var("OLLAMA_HOST")
-                .unwrap_or_else(|_| "http://localhost:11434".to_string());
-            if let Ok(p) = call_ollama_translator(
-                &host,
-                &ollama_model,
-                cleaned_query,
-                shell,
-                &system_prompt,
-            )
-            .await
-            {
-                return Ok(p);
-            }
-        }
-    }
-
-    // 5. Built-in Offline Polyglot Heuristic Engine
+    // Built-in Offline Polyglot Heuristic Engine
     Ok(heuristic_shell_translator(cleaned_query, shell))
+}
+
+/// Provider preferences from MRT's configuration file (`[ai]`). API keys never come
+/// from here: they are read from environment variables only.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AiPreferences {
+    /// `None`/`"auto"`: try providers in the default order. A provider id tries that
+    /// provider first; `"offline"` always uses the heuristic engine.
+    pub provider: Option<String>,
+    /// Model for the preferred provider (`OLLAMA_MODEL` wins for Ollama).
+    pub model: Option<String>,
+    /// Ollama base URL (`OLLAMA_HOST` wins).
+    pub ollama_endpoint: Option<String>,
+}
+
+static AI_PREFERENCES: std::sync::RwLock<AiPreferences> = std::sync::RwLock::new(AiPreferences {
+    provider: None,
+    model: None,
+    ollama_endpoint: None,
+});
+
+/// Replaces the process-wide AI provider preferences (called when the config loads).
+pub fn set_ai_preferences(preferences: AiPreferences) {
+    match AI_PREFERENCES.write() {
+        Ok(mut guard) => *guard = preferences,
+        Err(poisoned) => *poisoned.into_inner() = preferences,
+    }
+}
+
+/// The current process-wide AI provider preferences.
+pub fn ai_preferences() -> AiPreferences {
+    match AI_PREFERENCES.read() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    }
+}
+
+/// One AI provider MRT can call, with its resolved key, endpoint and model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AiBackend {
+    Gemini {
+        api_key: String,
+        model: String,
+    },
+    Anthropic {
+        api_key: String,
+        model: String,
+    },
+    OpenAiCompatible {
+        id: &'static str,
+        endpoint: String,
+        api_key: String,
+        model: String,
+        label: String,
+    },
+    Ollama {
+        host: String,
+        model: String,
+    },
+}
+
+impl AiBackend {
+    /// Provider id as written in `ai.provider`.
+    pub fn id(&self) -> &'static str {
+        match self {
+            AiBackend::Gemini { .. } => "gemini",
+            AiBackend::Anthropic { .. } => "anthropic",
+            AiBackend::OpenAiCompatible { id, .. } => id,
+            AiBackend::Ollama { .. } => "ollama",
+        }
+    }
+}
+
+const DEFAULT_OLLAMA_HOST: &str = "http://localhost:11434";
+
+/// Resolves which providers to try, in order, from environment variables (`env`)
+/// and the configuration preferences. Environment variables win over the config:
+/// keys come only from the environment, and `OLLAMA_MODEL` / `OLLAMA_HOST`
+/// override `ai.model` / `ai.ollama_endpoint` for Ollama.
+pub fn plan_ai_backends(
+    env: &dyn Fn(&str) -> Option<String>,
+    preferences: &AiPreferences,
+) -> Vec<AiBackend> {
+    let var = |name: &str| env(name).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let preferred = preferences
+        .provider
+        .as_deref()
+        .map(|p| p.trim().to_ascii_lowercase())
+        .map(|p| if p == "grok" { "xai".to_string() } else { p })
+        .filter(|p| !p.is_empty() && p != "auto");
+    if preferred.as_deref() == Some("offline") {
+        return Vec::new();
+    }
+    let config_model = preferences
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty());
+    let model_for = |id: &str, default: &str| -> String {
+        match (preferred.as_deref(), config_model) {
+            (Some(p), Some(model)) if p == id => model.to_string(),
+            _ => default.to_string(),
+        }
+    };
+
+    let mut backends = Vec::new();
+    if let Some(api_key) = var("GEMINI_API_KEY") {
+        backends.push(AiBackend::Gemini {
+            api_key,
+            model: model_for("gemini", "gemini-2.5-flash"),
+        });
+    }
+    if let Some(api_key) = var("ANTHROPIC_API_KEY") {
+        backends.push(AiBackend::Anthropic {
+            api_key,
+            model: model_for("anthropic", "claude-3-7-sonnet-latest"),
+        });
+    }
+    // OpenAI, xAI Grok, DeepSeek, or OpenRouter (OpenAI-compatible chat completions)
+    let openai_compatible_providers = [
+        (
+            "openai",
+            "OPENAI_API_KEY",
+            "https://api.openai.com/v1/chat/completions",
+            "gpt-4o-mini",
+            "OpenAI",
+        ),
+        (
+            "xai",
+            "XAI_API_KEY",
+            "https://api.x.ai/v1/chat/completions",
+            "grok-2-latest",
+            "xAI Grok",
+        ),
+        (
+            "deepseek",
+            "DEEPSEEK_API_KEY",
+            "https://api.deepseek.com/chat/completions",
+            "deepseek-chat",
+            "DeepSeek",
+        ),
+        (
+            "openrouter",
+            "OPENROUTER_API_KEY",
+            "https://openrouter.ai/api/v1/chat/completions",
+            "openrouter/auto",
+            "OpenRouter",
+        ),
+    ];
+    for (id, env_var, endpoint, default_model, name) in openai_compatible_providers {
+        if let Some(api_key) = var(env_var) {
+            let model = model_for(id, default_model);
+            backends.push(AiBackend::OpenAiCompatible {
+                id,
+                endpoint: endpoint.to_string(),
+                api_key,
+                label: format!("{name} ({model})"),
+                model,
+            });
+        }
+    }
+    // Local Ollama: OLLAMA_MODEL, or ai.model when ai.provider = "ollama".
+    let ollama_model = var("OLLAMA_MODEL").or_else(|| {
+        if preferred.as_deref() == Some("ollama") {
+            config_model.map(str::to_string)
+        } else {
+            None
+        }
+    });
+    if let Some(model) = ollama_model {
+        let host = var("OLLAMA_HOST")
+            .or_else(|| {
+                preferences
+                    .ollama_endpoint
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|h| !h.is_empty())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| DEFAULT_OLLAMA_HOST.to_string());
+        backends.push(AiBackend::Ollama { host, model });
+    }
+
+    if let Some(preferred) = preferred {
+        // Stable sort: the preferred provider moves to the front, the rest keep their order.
+        backends.sort_by_key(|b| b.id() != preferred);
+    }
+    backends
 }
 
 fn build_system_prompt(
@@ -158,12 +299,13 @@ fn build_system_prompt(
 
 async fn call_gemini_translator(
     api_key: &str,
+    model: &str,
     query: &str,
     shell: &ShellProfile,
     prompt: &str,
 ) -> Result<AiCommandProposal> {
     let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+        "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     );
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(12))
@@ -182,11 +324,12 @@ async fn call_gemini_translator(
         .pointer("/candidates/0/content/parts/0/text")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("Invalid Gemini response"))?;
-    parse_ai_json_response(text, query, shell, "Gemini 2.5 Flash")
+    parse_ai_json_response(text, query, shell, &format!("Google Gemini ({model})"))
 }
 
 async fn call_anthropic_translator(
     api_key: &str,
+    model: &str,
     query: &str,
     shell: &ShellProfile,
     prompt: &str,
@@ -199,7 +342,7 @@ async fn call_anthropic_translator(
         .header("x-api-key", api_key)
         .header("anthropic-version", "2023-06-01")
         .json(&json!({
-            "model": "claude-3-7-sonnet-latest",
+            "model": model,
             "max_tokens": 300,
             "messages": [{ "role": "user", "content": prompt }]
         }))
@@ -211,7 +354,7 @@ async fn call_anthropic_translator(
         .pointer("/content/0/text")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("Invalid Anthropic response"))?;
-    parse_ai_json_response(text, query, shell, "Anthropic Claude")
+    parse_ai_json_response(text, query, shell, &format!("Anthropic Claude ({model})"))
 }
 
 async fn call_openai_compatible_translator(
@@ -533,5 +676,81 @@ mod tests {
         let first = &shells[0];
         let prop = heuristic_shell_translator("list all files", first);
         assert!(!prop.proposed_command.is_empty());
+    }
+
+    fn env_of(vars: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |name| {
+            vars.iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    fn prefs(provider: &str, model: Option<&str>, endpoint: Option<&str>) -> AiPreferences {
+        AiPreferences {
+            provider: Some(provider.to_string()),
+            model: model.map(str::to_string),
+            ollama_endpoint: endpoint.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn auto_keeps_default_provider_order() {
+        let env = env_of(&[
+            ("OPENAI_API_KEY", "sk-1"),
+            ("GEMINI_API_KEY", "g-1"),
+            ("ANTHROPIC_API_KEY", " "),
+            ("OLLAMA_MODEL", "llama3.2"),
+        ]);
+        let ids: Vec<_> = plan_ai_backends(&env, &AiPreferences::default())
+            .iter()
+            .map(|b| b.id())
+            .collect();
+        assert_eq!(ids, vec!["gemini", "openai", "ollama"], "blank keys are ignored");
+    }
+
+    #[test]
+    fn preferred_provider_goes_first_with_config_model() {
+        let env = env_of(&[("GEMINI_API_KEY", "g"), ("XAI_API_KEY", "x")]);
+        let plan = plan_ai_backends(&env, &prefs("grok", Some("grok-4"), None));
+        assert_eq!(plan[0].id(), "xai");
+        match &plan[0] {
+            AiBackend::OpenAiCompatible { model, label, .. } => {
+                assert_eq!(model, "grok-4");
+                assert!(label.contains("grok-4"));
+            }
+            other => panic!("unexpected backend {other:?}"),
+        }
+        match &plan[1] {
+            AiBackend::Gemini { model, .. } => assert_eq!(model, "gemini-2.5-flash"),
+            other => panic!("unexpected backend {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ollama_env_wins_over_config() {
+        let config = prefs("ollama", Some("qwen2.5-coder"), Some("http://box:11434"));
+        let from_config = plan_ai_backends(&env_of(&[]), &config);
+        assert_eq!(
+            from_config,
+            vec![AiBackend::Ollama {
+                host: "http://box:11434".into(),
+                model: "qwen2.5-coder".into()
+            }]
+        );
+        let env = env_of(&[("OLLAMA_MODEL", "llama3.2"), ("OLLAMA_HOST", "http://env:1")]);
+        assert_eq!(
+            plan_ai_backends(&env, &config),
+            vec![AiBackend::Ollama {
+                host: "http://env:1".into(),
+                model: "llama3.2".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn offline_skips_every_provider() {
+        let env = env_of(&[("OPENAI_API_KEY", "sk-1")]);
+        assert!(plan_ai_backends(&env, &prefs("offline", None, None)).is_empty());
     }
 }

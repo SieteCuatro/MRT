@@ -145,16 +145,53 @@ MRT stores its files in the per-user local data directory:
 
 `mrt agent setup` writes to the coding agents' own files (`~/.claude.json`, `~/.codex/config.toml`, `~/.gemini/settings.json` and `skills/mrt/SKILL.md` folders; see the [MCP Guide](MCP_GUIDE.md#21-one-command-setup-for-coding-agents-mrt-agent-setup)). Before changing an existing file it saves a copy next to it as `<file>.mrt-backup-<date>-<time>`.
 
-MRT does not read a configuration file yet. [`mrt.example.toml`](../mrt.example.toml) shows the planned schema.
+See [§6 Configuration File](#6-configuration-file) for where MRT reads its settings.
 
 ---
 
-## 6. Environment Variables
+## 6. Configuration File
+
+MRT reads two optional [TOML](https://toml.io) files. Every setting is optional: a missing, empty, or partial file is fine, and anything you leave out keeps its default. Start from [`mrt.example.toml`](../mrt.example.toml).
+
+| File | Where |
+| :--- | :--- |
+| User config | `~/.config/mrt/config.toml` on Linux and macOS (`$XDG_CONFIG_HOME/mrt/config.toml` if set), `%APPDATA%\mrt\config.toml` on Windows. Set `MRT_CONFIG` to use another file. |
+| Project config | `.mrt.toml` in the folder you start MRT from. It is merged on top of the user config, so its values win. |
+
+**Merging.** Tables merge key by key. `[[mcp.servers]]` entries merge by `name` (a project entry replaces the user entry with the same name; others are added). `safety.blocked_patterns` is the union of both lists, so a project file cannot remove your blocked patterns.
+
+**Live reload.** MRT checks both files about once a second and reloads 300 ms after the last change. If a file has a syntax or type error, MRT keeps the last good settings (the defaults, at startup) and shows the error, with the file name, in a banner under the header. Fixing the file clears the banner. Unknown values (theme, provider, out-of-range font size) show a warning in the same banner.
+
+| Setting | Default | Effect |
+| :--- | :--- | :--- |
+| `terminal.default_shell` | `"auto"` | Shell of the first tab at startup: `auto` (first discovered shell) or a label from **+ New tab** (`pwsh`, `powershell`, `cmd`, `bash`, `git-bash`, `wsl`, `zsh`, `fish`, `nu`, `sh`). An unknown or missing shell falls back to `auto`. |
+| `terminal.font_size` | `13.0` | Terminal (monospace) font size, clamped to 8–40. Applied live. |
+| `terminal.theme` | built-in | `graphite-calm` (aliases `dark`, `default`) is the only theme today. |
+| `terminal.scrollback_blocks`, `terminal.auto_detect_structured_output` | `500`, `true` | Reserved; parsed but not applied yet. |
+| `safety.enabled` | `true` | `false` turns off approval prompts for commands you type and runbook steps. Blocked patterns still apply, and `:kill` still confirms. |
+| `safety.require_approval_for_moderate` | `false` | `true` asks before every Moderate command, not only process-control ones. |
+| `safety.require_approval_for_critical` | `true` | `false` runs Critical commands without asking. |
+| `safety.blocked_patterns` | `[]` | Commands containing any of these strings (case-insensitive) are refused with an error block, and stop a runbook. |
+| `ai.provider` | `"auto"` | `auto` tries providers in the [default order](#7-environment-variables). A name (`gemini`, `anthropic`, `openai`, `xai`/`grok`, `deepseek`, `openrouter`, `ollama`) tries that provider first; `offline` always uses the built-in engine. A provider is only used if its key is set. |
+| `ai.model` | provider default | Model for the provider named in `ai.provider`. |
+| `ai.ollama_endpoint` | `http://localhost:11434` | Ollama base URL. |
+| `[[mcp.servers]]` | none | MCP servers to connect at startup (`name`, `command`, `args`, `enabled`, `transport = "stdio"`). Servers added on reload are connected; removing one takes effect after a restart. |
+| `notifications.enabled`, `notifications.threshold_secs` | `true`, `10` | Reserved for finished-command notifications; parsed but not used yet. |
+| `[keybindings]` | none | `"binding" = "action"` strings, reserved for configurable shortcuts; parsed but not used yet. |
+
+**Environment variables win over the config file.** API keys are read only from the environment (never put them in the file). `OLLAMA_MODEL` and `OLLAMA_HOST` override `ai.model` and `ai.ollama_endpoint` for Ollama; with `ai.provider = "ollama"` and `ai.model` set, Ollama works without `OLLAMA_MODEL`.
+
+Safety settings apply to the GUI. Commands sent by MCP agents (`mrt_run_command`, `mrt_pty_*`) keep their fixed rule: Critical commands are always refused.
+
+---
+
+## 7. Environment Variables
 
 | Variable | Purpose |
 | :--- | :--- |
-| `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY` | AI provider keys, checked in this order. See [AI Providers](AI_PROVIDERS_AND_AGENTS.md). |
-| `OLLAMA_MODEL`, `OLLAMA_HOST` | Use a local Ollama model (default host `http://localhost:11434`). |
+| `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY` | AI provider keys, checked in this order (`ai.provider` in the config can move one to the front). See [AI Providers](AI_PROVIDERS_AND_AGENTS.md). |
+| `MRT_CONFIG` | Path of the user configuration file, instead of the default location. |
+| `OLLAMA_MODEL`, `OLLAMA_HOST` | Use a local Ollama model (default host `http://localhost:11434`). They override `ai.model` and `ai.ollama_endpoint`. |
 | `MRT_MCP_BRIDGE_PORT`, `MRT_MCP_BRIDGE_TOKEN` | Point `mrt --mcp-server` at a specific GUI bridge instead of reading `mcp-bridge.json`. |
 | `CODEX_HOME` | Where `mrt agent setup` finds Codex CLI's `config.toml` (default `~/.codex`). |
 | `RUST_LOG` | Log level for the GUI's stderr logs (default `info`), e.g. `RUST_LOG=debug`. |
@@ -163,7 +200,7 @@ With no AI variables set, MRT uses its offline heuristic engine, so `#` prompts 
 
 ---
 
-## 7. Troubleshooting
+## 8. Troubleshooting
 
 | Problem | What to check |
 | :--- | :--- |
@@ -171,6 +208,7 @@ With no AI variables set, MRT uses its offline heuristic engine, so `#` prompts 
 | `command not found` for tools that work in your normal terminal (macOS/Linux) | MRT loads the login shell's `PATH` at startup. Make sure the tool's folder is added in your login profile (`~/.zprofile`, `~/.bash_profile`, `~/.profile`), not only in an interactive-only file. |
 | A command waits forever | It is probably waiting for input. Press **■ Stop** on the block and rerun it with `:tui <command>`. |
 | `export VAR=…` has no effect on the next command | Each command runs in a new shell process. Combine them on one line (`export X=1 && ./run.sh`) or use a script. |
+| A banner says "Config not applied" | Your `config.toml` or `.mrt.toml` has a TOML error; the banner names the file and line. MRT keeps the last good settings until you fix it. |
 | The AI answer looks generic | No provider key is set, or the provider failed and MRT fell back to the offline engine. Check the provider name in the proposal card. |
 | An MCP client cannot see the open GUI | Make sure the GUI is running and that the client starts the same `mrt` binary with `--mcp-server`. Use **Copy MCP Config** in the MCP Hub for the exact path. If you moved or rebuilt `mrt` elsewhere, run `mrt agent setup` again to update the path. |
 | `mrt agent setup` says *skipped* | The agent already has an `mrt` MCP server or `mrt` skill that MRT did not write. MRT leaves it alone; rename or delete it, then run setup again. |

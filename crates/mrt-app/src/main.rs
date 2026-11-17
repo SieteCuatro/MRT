@@ -2,6 +2,7 @@
 
 mod agent_setup;
 mod app;
+mod config_runtime;
 mod history;
 mod theme;
 mod widgets;

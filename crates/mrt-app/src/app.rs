@@ -279,6 +279,8 @@ pub struct MrtGuiApp {
     force_process_tick: bool,
     /// Tab whose next `:ps` block should be diffed against its previous `:ps` block.
     pending_ps_compare: Option<Uuid>,
+    /// The loaded configuration file and its watcher (see `config_runtime.rs`).
+    pub config_state: crate::config_runtime::ConfigState,
 }
 
 impl MrtGuiApp {
@@ -291,10 +293,17 @@ impl MrtGuiApp {
         let mut mcp_state = MrtMcpServerState::default();
         mcp_state.gui_tx = Some(gui_cmd_tx);
 
-        let first_shell = &shells[0];
+        // Unit tests never read the user's or the repository's config files.
+        let config_state = if cfg!(test) {
+            crate::config_runtime::ConfigState::load(mrt_core::ConfigSources::default(), false)
+        } else {
+            crate::config_runtime::ConfigState::load(mrt_core::ConfigSources::discover(&initial_cwd), true)
+        };
+        let first_shell_idx = crate::config_runtime::default_shell_index(&shells, &config_state.config);
+        let first_shell = &shells[first_shell_idx];
         let first_tab = TerminalTab::new(
             format!("Tab 1 ({})", first_shell.kind.short_label()),
-            0,
+            first_shell_idx,
             initial_cwd,
         );
         if let Ok(mut tabs_guard) = mcp_state.tabs.lock() {
@@ -335,7 +344,7 @@ impl MrtGuiApp {
             Err(error) => (None, Some(error.to_string())),
         };
 
-        Self {
+        let mut app = Self {
             runtime,
             shells,
             tabs: vec![first_tab],
@@ -377,7 +386,10 @@ impl MrtGuiApp {
             process_tick_in_flight: false,
             force_process_tick: false,
             pending_ps_compare: None,
-        }
+            config_state,
+        };
+        app.apply_config_side_effects();
+        app
     }
 
     fn handle_block_action(&mut self, action: BlockAction) {
@@ -2009,9 +2021,20 @@ impl MrtGuiApp {
         }
 
         // 3. Check Safety Gate before running shell commands
+        if let Some(pattern) = self.config_state.config.safety.blocked_pattern(&raw_input) {
+            tab.blocks.push(CommandBlock::new_completed(
+                raw_input.clone(),
+                shell.name,
+                cwd.display().to_string(),
+                format!("Blocked by the Safety Gate: the command matches blocked pattern \"{pattern}\" from your MRT config."),
+                1,
+                0,
+            ));
+            return;
+        }
         if !bypass_safety {
             let assessment = assess_command(&raw_input);
-            if assessment.requires_approval || assessment.risk == RiskLevel::Critical {
+            if self.config_state.config.safety.requires_approval(&assessment) {
                 self.pending_safety = Some(PendingSafetyApproval {
                     tab_id,
                     assessment,
@@ -2193,8 +2216,16 @@ impl MrtGuiApp {
             PathBuf::from(&step.cwd)
         };
 
+        if let Some(pattern) = self.config_state.config.safety.blocked_pattern(&step.command) {
+            let message = format!(
+                "Runbook stopped: '{}' matches blocked pattern \"{pattern}\" from your MRT config.",
+                step.command
+            );
+            self.stop_runbook_replay(Some(message));
+            return;
+        }
         let assessment = assess_command(&step.command);
-        if assessment.requires_approval || assessment.risk == RiskLevel::Critical {
+        if self.config_state.config.safety.requires_approval(&assessment) {
             self.pending_safety = Some(PendingSafetyApproval {
                 tab_id,
                 assessment,
@@ -3059,9 +3090,12 @@ impl MrtGuiApp {
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             ui.spacing_mut().item_spacing.y = 4.0;
+                            let gate_on = self.config_state.config.safety.enabled;
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("●").size(10.0).color(Palette::ACCENT_GREEN));
-                                ui.label(RichText::new("Safety Gate on").size(13.0).color(Palette::TEXT_PRIMARY));
+                                let dot = if gate_on { Palette::ACCENT_GREEN } else { Palette::ACCENT_AMBER };
+                                let label = if gate_on { "Safety Gate on" } else { "Safety Gate off (config)" };
+                                ui.label(RichText::new("●").size(10.0).color(dot));
+                                ui.label(RichText::new(label).size(13.0).color(Palette::TEXT_PRIMARY));
                             });
                             let bridge = match self.bridge_port {
                                 Some(port) => format!("MCP bridge · port {port}"),
@@ -3169,6 +3203,7 @@ impl eframe::App for MrtGuiApp {
             ));
         }
 
+        self.update_config(ctx);
         self.process_async_events();
         self.process_history_events();
         self.process_mcp_ui_commands();
@@ -3190,6 +3225,7 @@ impl eframe::App for MrtGuiApp {
 
         self.render_sidebar(ctx);
         self.render_header(ctx);
+        self.render_config_notice(ctx);
 
         if self.show_explorer {
             self.render_explorer(ctx);

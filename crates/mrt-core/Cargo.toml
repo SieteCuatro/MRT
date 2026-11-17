@@ -16,6 +16,8 @@ vte.workspace = true
 alacritty_terminal.workspace = true
 chrono.workspace = true
 uuid.workspace = true
+toml = "1"
+directories = "6"
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }

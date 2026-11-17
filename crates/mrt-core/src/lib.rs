@@ -1,4 +1,5 @@
 pub mod block;
+pub mod config;
 pub mod platform;
 pub mod pty;
 pub mod safety;
@@ -9,6 +10,10 @@ pub mod vt;
 
 pub use block::{
     classify_output, CommandBlock, HttpExchangeSummary, StructuredOutput, ViewMode,
+};
+pub use config::{
+    load_config, ConfigError, ConfigSources, ConfigWatcher, LoadedConfig, McpServerEntry,
+    MrtConfig, NotificationsConfig, SafetyConfig,
 };
 pub use platform::{attach_parent_console_if_cli, hydrate_login_environment};
 pub use pty::{

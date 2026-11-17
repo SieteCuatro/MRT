@@ -21,8 +21,8 @@ pub use block::{
     DEFAULT_MAX_BLOCK_OUTPUT_BYTES, STRUCTURED_CLASSIFY_LIMIT,
 };
 pub use config::{
-    load_config, ConfigError, ConfigSources, ConfigWatcher, LoadedConfig, McpServerEntry,
-    MrtConfig, NotificationsConfig, SafetyConfig,
+    load_config, ConfigError, ConfigSources, ConfigWatcher, HookEntry, LoadedConfig,
+    McpServerEntry, MrtConfig, NamedActionEntry, NotificationsConfig, SafetyConfig, HOOK_EVENTS,
 };
 pub use platform::{attach_parent_console_if_cli, hydrate_login_environment};
 pub use pty::{

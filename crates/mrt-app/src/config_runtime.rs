@@ -106,7 +106,15 @@ impl MrtGuiApp {
     /// preferences and the MCP servers to connect (already-known names are skipped).
     pub(crate) fn apply_config_side_effects(&mut self) {
         let config = &self.config_state.config;
-        let (key_resolver, keymap_issues) = crate::app::load_key_resolver(config.keybindings());
+        // `key = ...` of [[actions]] entries are bindings to `run:<name>`; explicit
+        // [keybindings] entries win.
+        let mut bindings = config.keybindings().clone();
+        for action in &config.actions {
+            if let Some(key) = action.key.as_deref().filter(|k| !k.trim().is_empty()) {
+                bindings.entry(key.trim().to_string()).or_insert_with(|| format!("run:{}", action.id()));
+            }
+        }
+        let (key_resolver, keymap_issues) = crate::app::load_key_resolver(&bindings);
         self.key_resolver = key_resolver;
         self.keymap_issues = keymap_issues;
         // Unit tests opt in to persistent shells themselves.

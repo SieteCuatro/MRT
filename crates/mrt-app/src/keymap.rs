@@ -552,7 +552,7 @@ const DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("ctrl+p", "toggle_command_palette"),
     ("ctrl+q", "exit_tui"),
     ("ctrl+f", "find"),
-    ("ctrl+shift+x", "copy_mode"),
+    ("ctrl+shift+space", "copy_mode"),
 ];
 
 impl Keymap {

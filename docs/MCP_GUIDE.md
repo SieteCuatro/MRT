@@ -63,13 +63,29 @@ All built-in tools are defined in [`MrtMcpServerState::built_in_tools()`](../cra
 
 | Tool | Description | Key Parameters |
 | :--- | :--- | :--- |
-| **`mrt_get_session_state`** | Returns OS, arch, active CWD, active tab ID, all open tabs, active PTY count, GUI attachment flag, and available shells. | *(none)* |
-| **`mrt_list_tabs`** | Lists all terminal tabs with index, UUID, title, active status, shell ID/name, CWD, and block count. | *(none)* |
+| **`mrt_get_session_state`** | Returns OS, arch, active CWD, active tab ID, all open tabs (each with its `activity`), active PTY count, GUI attachment flag, and available shells. | *(none)* |
+| **`mrt_list_tabs`** | Lists all terminal tabs with index, UUID, title, active status, shell ID/name, CWD, block count, and `activity`. | *(none)* |
 | **`mrt_create_tab`** | Opens a new terminal tab with optional title, shell profile, working directory, and focus activation. | `title?`, `shell?`, `cwd?`, `activate?` (default `true`) |
 | **`mrt_switch_tab`** | Switches the active terminal tab by UUID, 0-based index, or title substring. | `tab_id` *(required)* |
 | **`mrt_close_tab`** | Closes a tab by UUID, index, or title substring (always keeps at least 1 tab open). | `tab_id` *(required)* |
 | **`mrt_configure_tab`** | Updates a tab's shell profile, working directory (`cwd`), or title. | `tab_id?`, `shell?`, `cwd?`, `title?` |
 | **`mrt_control_gui`** | Controls the live MRT GUI: sets/submits the prompt bar (honoring the GUI Safety Gate modal), toggles Mosaic mode with its arrangement (`grid`, `columns`, `rows`, `focus`) and grid columns, toggles the Folder Explorer, or opens the Toolbox panel on a tab (`"network"`, `"task_manager"`, `true`/`false`, `"hidden"`). | `tab_id?`, `input_text?`, `submit_input?`, `mosaic?`, `mosaic_columns?`, `mosaic_layout?`, `explorer?`, `toolbox?` |
+
+Each tab entry in `mrt_list_tabs`, `mrt_get_session_state` and the `mrt://session/tabs` resource carries an `activity` object, so an orchestrating agent can see which tabs are busy, blocked or done:
+
+```json
+"activity": {
+  "state": "waiting_for_input",
+  "label": "Waiting for input",
+  "progress": null,
+  "tone": "normal",
+  "agent": "claude",
+  "detail": "Last line: Do you want to proceed?",
+  "command": "claude"
+}
+```
+
+`state` is one of `idle`, `running`, `progress` (then `progress` holds 0–100), `waiting_for_input`, `succeeded`, `failed`. `tone` is `normal`, `error` or `warning` (from `OSC 9;4` states 2 and 4). `agent` names a recognised agent CLI (`claude`, `codex`, `gemini`, `aider`) or is `null`. With a live GUI the values come from the GUI's per-tab tracker; a headless `mrt --mcp-server` derives them from the tab's blocks (running, or the last exit code). The states, heuristics and the `OSC 678` status sequence are described in the [User Guide](USER_GUIDE.md#tab-activity-status).
 
 ### 3.2 Command Execution & Block Inspection
 

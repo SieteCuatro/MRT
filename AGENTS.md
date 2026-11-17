@@ -15,6 +15,7 @@ The Cargo workspace contains 5 modular crates:
   - `vt.rs`: Parses ANSI/VT100 escape sequences via `vte` into colored `AnsiSpan` segments and stripped plain text.
   - `block.rs`: Defines `CommandBlock` and `classify_output` (auto-detecting JSON trees, CSV/TSV tables, Markdown, and HTTP responses).
   - `safety.rs`: Evaluates command risk (`Safe`, `Moderate`, `Critical`) across Bash, PowerShell, CMD/Batch, SQL, Git, Kubernetes, and process control (`kill`, `taskkill`, `Stop-Process`, protected OS process names) for the MRT Safety Approval Gate.
+  - `activity.rs`: Per-tab activity state (`ActivityTracker`: idle, running, progress, waiting for input, succeeded, failed) from block lifecycle, `OSC 9;4` progress, MRT's `OSC 678;status=…` sequence, and conservative agent-CLI (`claude`, `codex`, `gemini`, `aider`) prompt heuristics.
   - `shell_integration.rs`: OSC 133 semantic prompt markers parser and shell integration generator for Bash, Zsh, Fish, PowerShell, and CMD (library only; not wired into the GUI yet).
   - `platform.rs`: Cross-platform startup helpers (`hydrate_login_environment` for macOS/Linux GUI `$PATH` inheritance and `attach_parent_console_if_cli` for Windows CLI flags).
 - **`crates/mrt-tools`**:

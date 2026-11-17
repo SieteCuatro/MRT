@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod block;
 pub mod platform;
 pub mod pty;
@@ -5,6 +6,10 @@ pub mod safety;
 pub mod shell_integration;
 pub mod vt;
 
+pub use activity::{
+    detect_agent_cli, parse_activity_signals, ActivitySignal, ActivitySnapshot, ActivityState,
+    ActivityTracker, ProgressTone, MRT_STATUS_OSC,
+};
 pub use block::{
     classify_output, CommandBlock, HttpExchangeSummary, StructuredOutput, ViewMode,
 };

@@ -12,6 +12,7 @@
 | **`vt`** | [`src/vt.rs`](../crates/mrt-core/src/vt.rs) | ANSI / VT100 escape sequence state machine powered by `vte`, producing styled `AnsiSpan` vectors and stripped plain text. |
 | **`block`** | [`src/block.rs`](../crates/mrt-core/src/block.rs) | `CommandBlock` data model and automatic `StructuredOutput` detector (JSON, CSV/TSV Tables, Markdown, HTTP results). |
 | **`safety`** | [`src/safety.rs`](../crates/mrt-core/src/safety.rs) | Cross-shell destructive command classifier (`RiskLevel::Safe`, `Moderate`, `Critical`) powering the MRT Safety Approval Gate. |
+| **`activity`** | [`src/activity.rs`](../crates/mrt-core/src/activity.rs) | Per-tab `ActivityTracker` (idle, running, progress, waiting for input, succeeded, failed): parses `OSC 9;4` progress and MRT's `OSC 678;status=…` sequence, recognises agent CLIs (`claude`, `codex`, `gemini`, `aider`), and applies conservative "waiting for input" heuristics. See the [User Guide](USER_GUIDE.md#tab-activity-status). |
 | **`shell_integration`** | [`src/shell_integration.rs`](../crates/mrt-core/src/shell_integration.rs) | OSC 133 semantic prompt marker parser and shell integration generator for Bash, Zsh, Fish, PowerShell, and CMD. |
 | **`platform`** | [`src/platform.rs`](../crates/mrt-core/src/platform.rs) | OS-specific environment hydration (macOS/Linux login `$PATH` loader and Windows `AttachConsole` CLI helper). |
 

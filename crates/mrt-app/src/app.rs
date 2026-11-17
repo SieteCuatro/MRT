@@ -241,6 +241,12 @@ pub struct ActiveTuiSession {
     /// History (with colors) moved out of `term` before Windows resizes; see
     /// `render_tui_overlay`.
     pub saved_history: Vec<String>,
+    /// Mouse state for reports to the program: the button held since a press over the
+    /// grid, the last cell reported (motion is only sent when it changes), and the
+    /// part of a wheel notch not sent yet.
+    pub mouse_held: Option<crate::term_input::MouseButton>,
+    pub mouse_cell: Option<(u16, u16)>,
+    pub wheel_accum: f32,
 }
 
 /// Lines of history the TUI overlay's emulator keeps.
@@ -2169,6 +2175,9 @@ impl MrtGuiApp {
                         start_time: std::time::Instant::now(),
                         term: TerminalEmulator::new(cols, rows, TUI_SCROLLBACK_LINES),
                         saved_history: Vec::new(),
+                        mouse_held: None,
+                        mouse_cell: None,
+                        wheel_accum: 0.0,
                     });
                 }
                 Err(e) => {
@@ -2764,7 +2773,7 @@ impl MrtGuiApp {
         // Answers to the program's queries (device attributes, cursor position, size).
         let replies = session.term.take_replies();
         if !replies.is_empty() {
-            let _ = session.pty.send_input(&String::from_utf8_lossy(&replies), false);
+            let _ = session.pty.send_bytes(&replies);
         }
         let modes = session.term.modes();
         let Some(ref session) = self.active_tui else {
@@ -2780,13 +2789,10 @@ impl MrtGuiApp {
         // Keys bound to actions (e.g. `exit_tui`, Ctrl+Q by default) were already
         // removed from the input by `handle_keybindings`; forward the rest to the PTY.
         let kill_requested = std::mem::take(&mut self.tui_exit_requested);
-        ctx.input(|i| {
-            for event in &i.events {
-                if let Some(bytes) = crate::term_input::encode_event(event, &modes) {
-                    let _ = session.pty.send_input(&String::from_utf8_lossy(&bytes), false);
-                }
-            }
-        });
+        let bytes = ctx.input(|i| crate::term_input::encode_events(&i.events, &modes));
+        if !bytes.is_empty() {
+            let _ = session.pty.send_bytes(&bytes);
+        }
 
         if kill_requested {
             let _ = session.pty.kill();
@@ -2926,11 +2932,79 @@ impl MrtGuiApp {
                                 },
                             )
                         });
+                        forward_tui_mouse(ctx, session, response.rect, cell, &snapshot.modes);
                     });
             });
         if exit_clicked {
             let _ = session.pty.kill();
         }
+    }
+}
+
+/// Sends this frame's mouse input over the TUI grid (`rect`, cells of `cell` size) to
+/// the program: presses, releases and motion as mouse reports when it asked for them,
+/// and the wheel as mouse reports or, on an alternate screen with mode 1007, as arrows.
+fn forward_tui_mouse(ctx: &egui::Context, session: &mut ActiveTuiSession, rect: egui::Rect, cell: egui::Vec2, modes: &mrt_core::TermModes) {
+    use crate::term_input::{encode_mouse, wheel_as_arrows, MouseAction, MouseButton};
+    let (cols, rows) = (session.term.cols(), session.term.rows());
+    let to_cell = |pos: egui::Pos2| -> (u16, u16) {
+        let col = ((pos.x - rect.left()) / cell.x).floor().clamp(0.0, (cols - 1) as f32) as u16;
+        let row = ((pos.y - rect.top()) / cell.y).floor().clamp(0.0, (rows - 1) as f32) as u16;
+        (col, row)
+    };
+    let (events, hover) = ctx.input(|i| (i.events.clone(), i.pointer.hover_pos()));
+    let mut out: Vec<u8> = Vec::new();
+    for event in events {
+        match event {
+            egui::Event::PointerButton { pos, button, pressed, modifiers } => {
+                let Some(button) = MouseButton::from_egui(button) else { continue };
+                if pressed && !rect.contains(pos) {
+                    continue;
+                }
+                if !pressed && session.mouse_held != Some(button) {
+                    continue;
+                }
+                session.mouse_held = pressed.then_some(button);
+                let (col, row) = to_cell(pos);
+                session.mouse_cell = Some((col, row));
+                let action = if pressed { MouseAction::Press(button) } else { MouseAction::Release(button) };
+                out.extend(encode_mouse(action, col, row, modifiers, modes).unwrap_or_default());
+            }
+            egui::Event::PointerMoved(pos) => {
+                if !rect.contains(pos) && session.mouse_held.is_none() {
+                    continue;
+                }
+                let at = to_cell(pos);
+                if session.mouse_cell == Some(at) {
+                    continue;
+                }
+                session.mouse_cell = Some(at);
+                let mods = ctx.input(|i| i.modifiers);
+                out.extend(encode_mouse(MouseAction::Move(session.mouse_held), at.0, at.1, mods, modes).unwrap_or_default());
+            }
+            egui::Event::MouseWheel { unit, delta, modifiers } => {
+                let Some(pos) = hover.filter(|p| rect.contains(*p)) else { continue };
+                // Positive y moves the content down, i.e. scrolls up.
+                let notches = match unit {
+                    egui::MouseWheelUnit::Line => delta.y,
+                    egui::MouseWheelUnit::Point => delta.y / cell.y,
+                    egui::MouseWheelUnit::Page => delta.y * rows as f32,
+                };
+                session.wheel_accum += notches;
+                let (col, row) = to_cell(pos);
+                while session.wheel_accum.abs() >= 1.0 {
+                    let up = session.wheel_accum > 0.0;
+                    session.wheel_accum -= session.wheel_accum.signum();
+                    let action = if up { MouseAction::WheelUp } else { MouseAction::WheelDown };
+                    let bytes = encode_mouse(action, col, row, modifiers, modes).or_else(|| wheel_as_arrows(up, modes));
+                    out.extend(bytes.unwrap_or_default());
+                }
+            }
+            _ => {}
+        }
+    }
+    if !out.is_empty() {
+        let _ = session.pty.send_bytes(&out);
     }
 }
 

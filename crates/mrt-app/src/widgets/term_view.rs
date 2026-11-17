@@ -37,7 +37,7 @@ pub fn grid_dims(available: Vec2, cell: Vec2) -> (u16, u16) {
 /// the cursor is an outline, like other terminals show an unfocused window.
 pub fn paint_terminal(ui: &mut Ui, snapshot: &TermSnapshot, font: &FontId, cell: Vec2, focused: bool) -> Response {
     let size = Vec2::new(cell.x * snapshot.cols as f32, cell.y * snapshot.rows as f32);
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
     if !ui.is_rect_visible(rect) {
         return response;
     }

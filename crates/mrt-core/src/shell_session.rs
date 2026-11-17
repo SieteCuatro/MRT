@@ -206,9 +206,7 @@ impl ShellSession {
         configure_command(&mut cmd, &shell.kind, &scratch, options.load_user_config);
         cmd.cwd(cwd);
         cmd.env("MRT_SHELL_INTEGRATION", "1");
-        if !cfg!(target_os = "windows") {
-            cmd.env("TERM", "xterm-256color");
-        }
+        crate::pty::apply_terminal_env(&mut cmd);
         for (key, value) in &options.env {
             cmd.env(key, value);
         }

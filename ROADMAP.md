@@ -14,12 +14,12 @@ These comparisons shaped the order of the milestones.
 
 ## Milestone 1 — A real terminal core
 
-The TUI overlay now draws from a real screen emulator and follows the window size. What is left is mouse and Alt input, inline interactive panes, and screen-accurate MCP reads.
+The TUI overlay now draws from a real screen emulator and follows the window size. Keys, Alt+letter and the mouse reach the program. What is left is selection and copy, inline interactive panes, and screen-accurate MCP reads.
 
 - **Terminal grid emulator.** *(implemented, #9; the TUI overlay uses it)* Wrap `alacritty_terminal` (it uses the same `vte` parser MRT already depends on) or `libghostty-vt` behind a `mrt-core::term` module that exposes a cell grid, cursor, scrollback, modes, and title. Keep `vt::parse_ansi_text` for finished command blocks. *Done when:* `vim`, `htop`, `less`, `lazygit`, and `top` display and redraw correctly, and a unit test feeds recorded escape-sequence fixtures and checks the resulting grid.
 - **Grid renderer widget.** *(implemented in the TUI overlay: `widgets/term_view.rs`; selection is not done yet, and the MCP PTY tools do not use it)* An egui widget that paints the grid cell by cell: colors, bold, italic, underline, inverse, wide CJK characters and emoji, the cursor, and selection. Use it in the TUI overlay and in the MCP PTY tools.
 - **Resize.** *(implemented for the TUI overlay)* Compute columns and rows from the widget size and font metrics, and call `InteractivePty::resize` when the window or pane changes size. *Done when:* resizing the window while `htop` runs reflows it.
-- **Complete keyboard and mouse input.** *(keyboard implemented except Alt+letter: `term_input.rs`; mouse not started)* Function keys, Alt/Meta, Home/End/PgUp/PgDn, and application cursor mode. Mouse reporting (SGR 1006) for TUIs that ask for it. Bracketed paste. Later, the kitty keyboard protocol.
+- **Complete keyboard and mouse input.** *(implemented in `term_input.rs`: xterm keys including Alt+letter, bracketed paste, and mouse reports in SGR 1006 or X10 for clicks, drags, motion and the wheel; the kitty keyboard protocol is not done)* Function keys, Alt/Meta, Home/End/PgUp/PgDn, and application cursor mode. Mouse reporting (SGR 1006) for TUIs that ask for it. Bracketed paste. Later, the kitty keyboard protocol.
 - **Inline interactive panes.** Show a running PTY directly inside a split pane instead of a modal overlay, so `htop` can run next to a shell.
 - **Screen-accurate MCP reads.** `mrt_pty_read` can return the visible screen as text, the cursor position, and the scrollback, not only the raw byte transcript, so agents can drive TUIs reliably.
 
@@ -96,7 +96,7 @@ The first version is implemented in the **Runbooks** panel and SQLite `HistorySt
 
 ### Terminal basics
 
-- **Interactive TUI overlay.** *(implemented)* `vim`, `nano`, `htop`, `lazygit`, `less`, and `:tui <cmd>` open a PTY in a full-screen overlay drawn from the terminal grid emulator, sized to the window. Keys are encoded the xterm way, `Ctrl+Q` or the program exiting closes it, and the session is saved as a command block. Mouse input is not sent yet.
+- **Interactive TUI overlay.** *(implemented)* `vim`, `nano`, `htop`, `lazygit`, `less`, and `:tui <cmd>` open a PTY in a full-screen overlay drawn from the terminal grid emulator, sized to the window. Keys and the mouse are encoded the xterm way, `Ctrl+Q` or the program exiting closes it, and the session is saved as a command block.
 - **Split panes within a tab.** *(implemented)* Split any tab horizontally or vertically into independent panes (`:split`, `:split-h`, `:split-v`, `:unsplit`, and UI buttons), each with its own block stream, shell, and focus management.
 - **Shell integration.** *(implemented)* `mrt-core::shell_integration` parses OSC 133 and OSC 7 and generates integration scripts for Bash, Git Bash, sh, Zsh, Fish, PowerShell, and CMD, and `mrt-core::shell_session` runs a persistent shell with them, which each GUI tab uses (see [persistent shell per tab](#milestone-2--everyday-terminal-use)).
 

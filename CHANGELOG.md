@@ -39,4 +39,4 @@ The first release with the whole [ROADMAP](ROADMAP.md): a real terminal core, pe
 - ConPTY resize, Ctrl+C in programs, Alt+letter, find scrolling, pane focus, and more (see the merged pull requests #7–#37).
 
 ### Notes
-- The Windows and Linux archives of this release were built locally (Windows 11, Ubuntu); the Linux binary needs a recent glibc. macOS builds come from the release workflow when GitHub Actions runs it.
+- The Windows and Linux archives of this release were built locally (Windows 11, Ubuntu); the Linux binary needs glibc 2.43 or newer. There are no macOS archives: the release workflow is disabled while there are no GitHub Actions minutes; build from source on macOS.

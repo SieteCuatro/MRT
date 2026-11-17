@@ -2,6 +2,7 @@ pub mod bug_reporter;
 pub mod dns_inspector;
 pub mod http_inspector;
 pub mod net_inspector;
+pub mod process_control;
 pub mod process_inspector;
 pub mod structured_diff;
 pub mod web_fetch;
@@ -26,3 +27,7 @@ pub use structured_diff::{
 };
 pub use web_fetch::{fetch_url_as_markdown, html_to_readable_markdown};
 pub use ws_inspector::{inspect_websocket, parse_ws_command, WsFrameEntry, WsSessionReport};
+pub use process_control::{
+    apply_control, control_outcomes_markdown, parse_control_command, plan_control, ControlAction, ControlOutcome,
+    ControlRequest, Priority,
+};

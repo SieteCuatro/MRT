@@ -1080,6 +1080,34 @@ impl MrtGuiApp {
     }
 
     /// Resolves a kill request against a fresh snapshot; the result opens the Safety Gate.
+    /// `:suspend`, `:resume`, `:priority`: resolved like `:kill`; Critical targets are
+    /// refused and the rest changed at once (each change can be undone).
+    fn spawn_process_control(&mut self, tab_id: Uuid, cwd: PathBuf, raw_input: String, request: mrt_tools::ControlRequest) {
+        let sampler = self.process_sampler.clone();
+        let owned = self.owned_processes();
+        let tx = self.tx.clone();
+        self.busy_count += 1;
+        self.runtime.spawn(async move {
+            let started = Instant::now();
+            let (text, code) = match sampler.snapshot().await {
+                Ok(snapshot) => match mrt_tools::plan_control(&snapshot, &request, &owned) {
+                    Ok(targets) => {
+                        let action = request.action;
+                        let outcomes = tokio::task::spawn_blocking(move || mrt_tools::apply_control(action, &targets))
+                            .await
+                            .unwrap_or_default();
+                        let failed = outcomes.iter().any(|o| o.result.is_err());
+                        (mrt_tools::control_outcomes_markdown(action, &outcomes), i32::from(failed))
+                    }
+                    Err(e) => (e.to_string(), 1),
+                },
+                Err(e) => (format!("Process snapshot failed: {e}"), 1),
+            };
+            let block = CommandBlock::new_completed(&raw_input, "mrt-proc", cwd.display().to_string(), text, code, started.elapsed().as_millis() as u64);
+            let _ = tx.send(AsyncWorkerEvent::BlockCompleted { tab_id, block, updated_cwd: None });
+        });
+    }
+
     fn spawn_kill_plan(&mut self, tab_id: Uuid, cwd: PathBuf, request: KillRequest) {
         let sampler = self.process_sampler.clone();
         let owned = self.owned_processes();
@@ -1271,6 +1299,13 @@ impl MrtGuiApp {
             }
             return true;
         }
+        if [":suspend", ":resume", ":priority"].iter().any(|c| command_args(raw_input, c).is_some()) {
+            match mrt_tools::parse_control_command(raw_input) {
+                Ok(request) => self.spawn_process_control(tab_id, cwd, raw_input.to_string(), request),
+                Err(e) => self.push_block(tab_id, Self::process_error_block(raw_input, &cwd, e.to_string())),
+            }
+            return true;
+        }
         if let Some(rest) = command_args(raw_input, ":kill") {
             if rest.trim().is_empty() {
                 self.open_task_manager(None);
@@ -1369,6 +1404,7 @@ impl MrtGuiApp {
             ),
             TaskManagerEvent::Inspect(pid) => self.submit_input(Some(format!(":proc {pid}")), false),
             TaskManagerEvent::Watch(pid) => self.submit_input(Some(format!(":watch-proc {pid}")), false),
+            TaskManagerEvent::Control(command) => self.submit_input(Some(command), false),
             TaskManagerEvent::SnapshotToTab { command, compare } => {
                 if compare {
                     self.pending_ps_compare = Some(tab_id);
@@ -5947,6 +5983,31 @@ mod tests {
     /// A remote tab's commands go to the SSH session and never run on this machine: with
     /// an unreachable host the first block reports the connection failure instead of the
     /// local `hostname`.
+    #[test]
+    fn suspend_resume_and_priority_commands_change_a_child_process() {
+        let mut app = MrtGuiApp::new();
+        let mut child = spawn_sleeper();
+        let pid = child.id();
+        for (command, expected) in [
+            (format!(":suspend {pid}"), "Suspended"),
+            (format!(":resume {pid}"), "Resumed"),
+            (format!(":priority low {pid}"), "Priority set to below normal"),
+        ] {
+            app.submit_input(Some(command.clone()), false);
+            pump_one(&mut app);
+            let block = app.tabs[0].blocks.last().unwrap();
+            assert_eq!(block.command, command);
+            assert!(block.plain_output.contains(expected), "{command}: {}", block.plain_output);
+            assert_eq!(block.exit_code, Some(0), "{}", block.plain_output);
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        app.submit_input(Some(format!(":suspend {}", std::process::id())), false);
+        pump_one(&mut app);
+        let block = app.tabs[0].blocks.last().unwrap();
+        assert_eq!(block.exit_code, Some(1), "MRT itself is refused: {}", block.plain_output);
+    }
+
     #[test]
     fn assist_investigates_the_failed_block_with_mcp_tools() {
         // The built-in plan only; never call a provider from tests.

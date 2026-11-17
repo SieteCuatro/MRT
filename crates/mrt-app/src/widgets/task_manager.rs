@@ -24,6 +24,8 @@ pub enum TaskManagerEvent {
     Inspect(u32),
     /// Run `:watch-proc <pid>` in the active tab.
     Watch(u32),
+    /// Run a process-control command (`:suspend`, `:resume`, `:priority`) in the active tab.
+    Control(String),
     /// Run `:ps` with the current filter in the active tab (optionally diffing it with the
     /// previous `:ps` block).
     SnapshotToTab { command: String, compare: bool },
@@ -476,6 +478,20 @@ pub fn render_task_manager_tab(
                             {
                                 event = Some(TaskManagerEvent::Stop { pid, force: true, tree: true });
                             }
+                            if ui.add(ghost_button("Suspend")).on_hover_text(":suspend — pause it (resume later)").clicked() {
+                                event = Some(TaskManagerEvent::Control(format!(":suspend {pid}")));
+                            }
+                            if ui.add(ghost_button("Resume")).on_hover_text(":resume — continue a suspended process").clicked() {
+                                event = Some(TaskManagerEvent::Control(format!(":resume {pid}")));
+                            }
+                            ui.menu_button("Priority", |ui| {
+                                for (label, level) in [("Idle", "idle"), ("Below normal", "low"), ("Normal", "normal"), ("Above normal", "above"), ("High", "high")] {
+                                    if ui.button(label).clicked() {
+                                        event = Some(TaskManagerEvent::Control(format!(":priority {level} {pid}")));
+                                        ui.close_menu();
+                                    }
+                                }
+                            });
                             if ui.add(ghost_button("Details")).on_hover_text(":proc in the active tab").clicked() {
                                 event = Some(TaskManagerEvent::Inspect(pid));
                             }

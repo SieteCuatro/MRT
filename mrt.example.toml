@@ -15,6 +15,7 @@ font_size = 14.0       # terminal (monospace) font size, 8–40
 # theme = "graphite-calm" # the built-in dark theme ("dark" and "default" are aliases)
 scrollback_blocks = 500              # reserved, not applied yet
 auto_detect_structured_output = true # reserved, not applied yet
+persistent_shell = true              # one shell per tab: cd, variables and venvs carry over
 
 [safety]
 enabled = true                       # false: never ask (blocked_patterns still apply)

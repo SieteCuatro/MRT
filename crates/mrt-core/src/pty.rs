@@ -442,6 +442,20 @@ async fn execute_command_impl(
     })
 }
 
+/// Environment that tells programs in an MRT PTY what terminal they run in. A GUI
+/// started from the desktop on Linux or macOS has no `TERM`, and full-screen programs
+/// (vim, htop, less) then fall back to a dumb terminal or refuse to start. `TERM` is
+/// not set on Windows, where native console programs do not use it and some tools
+/// change behaviour when they see it.
+pub(crate) fn apply_terminal_env(cmd: &mut CommandBuilder) {
+    if !cfg!(target_os = "windows") {
+        cmd.env("TERM", "xterm-256color");
+    }
+    cmd.env("COLORTERM", "truecolor");
+    cmd.env("TERM_PROGRAM", "MRT");
+    cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+}
+
 // Retain incomplete UTF-8 between reads, separately for each output stream.
 fn decode_output(pending: &mut Vec<u8>, eof: bool) -> String {
     let mut text = String::new();
@@ -553,6 +567,7 @@ impl InteractivePty {
             }
         }
         cmd.cwd(cwd);
+        apply_terminal_env(&mut cmd);
 
         let child = pair.slave.spawn_command(cmd)?;
         let mut reader = pair.master.try_clone_reader()?;
@@ -565,11 +580,26 @@ impl InteractivePty {
 
         std::thread::spawn(move || {
             let mut temp = [0u8; 4096];
+            // Bytes of a UTF-8 character cut off at the end of the previous read.
+            let mut pending: Vec<u8> = Vec::new();
             while let Ok(n) = reader.read(&mut temp) {
                 if n == 0 {
                     break;
                 }
-                let text = String::from_utf8_lossy(&temp[..n]);
+                pending.extend_from_slice(&temp[..n]);
+                let text = decode_output(&mut pending, false);
+                if text.is_empty() {
+                    continue;
+                }
+                if let Ok(mut guard) = buf_clone.lock() {
+                    guard.push_str(&text);
+                }
+                if let Ok(mut guard) = transcript_clone.lock() {
+                    guard.push_str(&text);
+                }
+            }
+            if !pending.is_empty() {
+                let text = decode_output(&mut pending, true);
                 if let Ok(mut guard) = buf_clone.lock() {
                     guard.push_str(&text);
                 }
@@ -606,6 +636,18 @@ impl InteractivePty {
             #[cfg(not(target_os = "windows"))]
             write!(guard, "\n")?;
         }
+        guard.flush()?;
+        Ok(())
+    }
+
+    /// Writes raw bytes to the program, e.g. key and mouse reports that are not UTF-8
+    /// (X10 mouse coordinates above 127).
+    pub fn send_bytes(&self, bytes: &[u8]) -> Result<()> {
+        let mut guard = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("PTY writer mutex poisoned"))?;
+        guard.write_all(bytes)?;
         guard.flush()?;
         Ok(())
     }

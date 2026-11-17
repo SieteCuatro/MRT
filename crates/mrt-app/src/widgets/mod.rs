@@ -6,4 +6,5 @@ pub mod mosaic;
 pub mod runbooks;
 pub mod side_panels;
 pub mod task_manager;
+pub mod term_view;
 pub mod toolbox;

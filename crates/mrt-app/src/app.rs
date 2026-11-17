@@ -22,7 +22,7 @@ use mrt_ai::{
 };
 use mrt_core::{
     ActivitySnapshot, ActivityTracker, assess_command, discover_shells, execute_command_streaming_with_pid, CommandBlock,
-    InteractivePty, RiskLevel, SafetyAssessment, ShellProfile, StructuredOutput,
+    InteractivePty, RiskLevel, SafetyAssessment, ShellProfile, StructuredOutput, TerminalEmulator,
 };
 use mrt_mcp::{
     start_gui_bridge_listener, parse_http_headers, GuiUiCommand, McpHostManager, McpServerConfig,
@@ -236,6 +236,41 @@ pub struct ActiveTuiSession {
     pub tab_id: Uuid,
     pub command: String,
     pub start_time: std::time::Instant,
+    /// The screen the program draws on, fed with the PTY's output every frame.
+    pub term: TerminalEmulator,
+    /// History (with colors) moved out of `term` before Windows resizes; see
+    /// `render_tui_overlay`.
+    pub saved_history: Vec<String>,
+    /// Mouse state for reports to the program: the button held since a press over the
+    /// grid, the last cell reported (motion is only sent when it changes), and the
+    /// part of a wheel notch not sent yet.
+    pub mouse_held: Option<crate::term_input::MouseButton>,
+    pub mouse_cell: Option<(u16, u16)>,
+    pub wheel_accum: f32,
+}
+
+/// Lines of history the TUI overlay's emulator keeps.
+const TUI_SCROLLBACK_LINES: usize = 5_000;
+/// The PTY size a TUI session starts with, before the overlay has measured its area.
+const TUI_INITIAL_SIZE: (u16, u16) = (120, 35);
+
+impl ActiveTuiSession {
+    /// Text to store in the command block when the session ends: what the terminal
+    /// shows (history plus the main screen) with its colors. The raw transcript is
+    /// mostly cursor movement (full-screen programs, and ConPTY on Windows), which
+    /// would turn into blank lines in a block.
+    fn final_output(&self) -> String {
+        let current = self.term.text_with_colors();
+        if self.saved_history.is_empty() {
+            return current;
+        }
+        let mut text = self.saved_history.join("\n");
+        if !current.is_empty() {
+            text.push('\n');
+            text.push_str(&current);
+        }
+        text
+    }
 }
 
 pub struct MrtGuiApp {
@@ -281,6 +316,8 @@ pub struct MrtGuiApp {
     process_sampler: SharedProcessSampler,
     /// OS PID of the shell behind each running command block.
     running_pids: Arc<Mutex<HashMap<Uuid, u32>>>,
+    /// Each tab's persistent shell (`shell_pool.rs`).
+    pub(crate) shell_pool: crate::shell_pool::ShellPool,
     live_top: Option<LiveTopBlock>,
     process_watches: Vec<ActiveProcessWatch>,
     next_watch_id: usize,
@@ -398,6 +435,10 @@ impl MrtGuiApp {
             sidebar_collapsed: false,
             process_sampler,
             running_pids: Arc::new(Mutex::new(HashMap::new())),
+            // Unit tests run one process per command unless a test opts in.
+            shell_pool: crate::shell_pool::ShellPool::new(
+                !cfg!(test) && config_state.config.terminal.persistent_shell,
+            ),
             live_top: None,
             process_watches: Vec::new(),
             next_watch_id: 1,
@@ -889,6 +930,29 @@ impl MrtGuiApp {
             self.stop_live_top();
             return;
         }
+        // A command in a persistent shell gets Ctrl+C; killing the shell's process tree
+        // would end the shell and lose its state. If the command is still running a moment
+        // later (Ctrl+C does not reach programs through Windows ConPTY), stop the shell's
+        // child processes instead, which leaves the shell at its prompt.
+        if let Some(session) = self.shell_pool.interrupt(block_id) {
+            if let Some(shell_pid) = session.process_id() {
+                let pool = self.shell_pool.clone();
+                let sampler = self.process_sampler.clone();
+                self.runtime.spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                    if !pool.is_running(block_id) {
+                        return;
+                    }
+                    if let Ok(snapshot) = sampler.snapshot().await {
+                        let children: Vec<u32> = snapshot.children_of(shell_pid).iter().map(|e| e.pid).collect();
+                        if !children.is_empty() {
+                            let _ = sampler.terminate(children, true, true).await;
+                        }
+                    }
+                });
+            }
+            return;
+        }
         let Some(pid) = self.running_pids.lock().ok().and_then(|g| g.get(&block_id).copied()) else {
             return;
         };
@@ -1099,6 +1163,7 @@ impl MrtGuiApp {
         }
         let active_id = self.tabs[self.active_tab].id;
         self.tabs.retain(|tab| tab.id != id);
+        self.shell_pool.close_tab(id);
         self.active_tab = self
             .tabs
             .iter()
@@ -2097,7 +2162,8 @@ impl MrtGuiApp {
         };
 
         if let Some(tui_cmd) = is_tui_command {
-            match InteractivePty::spawn_with_command(&shell, &cwd, 120, 35, Some(&tui_cmd)) {
+            let (cols, rows) = TUI_INITIAL_SIZE;
+            match InteractivePty::spawn_with_command(&shell, &cwd, cols, rows, Some(&tui_cmd)) {
                 Ok(pty) => {
                     if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
                         tab.activity.command_started(&tui_cmd, Instant::now());
@@ -2107,6 +2173,11 @@ impl MrtGuiApp {
                         tab_id,
                         command: tui_cmd,
                         start_time: std::time::Instant::now(),
+                        term: TerminalEmulator::new(cols, rows, TUI_SCROLLBACK_LINES),
+                        saved_history: Vec::new(),
+                        mouse_held: None,
+                        mouse_cell: None,
+                        wheel_accum: 0.0,
                     });
                 }
                 Err(e) => {
@@ -2286,9 +2357,31 @@ impl MrtGuiApp {
         self.running_output.insert(block_id, (tab_id, output.clone()));
         let running_pids = self.running_pids.clone();
         let tx = self.tx.clone();
+        let pool = self.shell_pool.clone();
         self.busy_count += 1;
         self.runtime.spawn(async move {
             let cwd_str = cwd.display().to_string();
+
+            // Run in the tab's persistent shell when it is free; otherwise in a new process.
+            if let Some(result) = crate::shell_pool::run_with_pool(&pool, tab_id, block_id, &shell, &raw_input, &cwd, &output, &running_pids).await {
+                let (text, exit_code, duration_ms, updated_cwd) = match result {
+                    Ok(run) => (run.output, run.exit_code, run.duration_ms, run.cwd),
+                    Err(e) => (format!("Error: {e}"), 1, 0, None),
+                };
+                let mut block = CommandBlock::new_completed(
+                    &raw_input,
+                    shell.kind.short_label(),
+                    cwd_str,
+                    text,
+                    exit_code,
+                    duration_ms,
+                );
+                block.id = block_id;
+                block.timestamp = timestamp;
+                let _ = tx.send(AsyncWorkerEvent::BlockCompleted { tab_id, block, updated_cwd });
+                return;
+            }
+
             let on_spawn = |pid: u32| {
                 if let Ok(mut pids) = running_pids.lock() {
                     pids.insert(block_id, pid);
@@ -2660,7 +2753,7 @@ impl MrtGuiApp {
         let mut close_session = false;
         let mut exit_code = 0;
 
-        // Feed new PTY output to the tab's activity tracker (the overlay reads the transcript).
+        // Feed new PTY output to the screen emulator and the tab's activity tracker.
         let fresh = session.pty.drain_output();
         if !fresh.is_empty() {
             let tab_id = session.tab_id;
@@ -2668,6 +2761,21 @@ impl MrtGuiApp {
                 tab.activity.feed_output(&fresh, Instant::now());
             }
         }
+        let Some(session) = self.active_tui.as_mut() else {
+            return;
+        };
+        if !fresh.is_empty() {
+            session.term.feed(fresh.as_bytes());
+        }
+        if session.term.sync_deadline().is_some_and(|deadline| Instant::now() >= deadline) {
+            session.term.flush_sync();
+        }
+        // Answers to the program's queries (device attributes, cursor position, size).
+        let replies = session.term.take_replies();
+        if !replies.is_empty() {
+            let _ = session.pty.send_bytes(&replies);
+        }
+        let modes = session.term.modes();
         let Some(ref session) = self.active_tui else {
             return;
         };
@@ -2681,11 +2789,10 @@ impl MrtGuiApp {
         // Keys bound to actions (e.g. `exit_tui`, Ctrl+Q by default) were already
         // removed from the input by `handle_keybindings`; forward the rest to the PTY.
         let kill_requested = std::mem::take(&mut self.tui_exit_requested);
-        ctx.input(|i| {
-            for event in &i.events {
-                forward_egui_event_to_pty(event, &session.pty);
-            }
-        });
+        let bytes = ctx.input(|i| crate::term_input::encode_events(&i.events, &modes));
+        if !bytes.is_empty() {
+            let _ = session.pty.send_bytes(&bytes);
+        }
 
         if kill_requested {
             let _ = session.pty.kill();
@@ -2694,13 +2801,13 @@ impl MrtGuiApp {
         }
 
         if close_session {
-            if let Some(session) = self.active_tui.take() {
-                let transcript = session.pty.read_transcript();
-                let output = if transcript.is_empty() {
-                    session.pty.drain_output()
-                } else {
-                    transcript
-                };
+            if let Some(mut session) = self.active_tui.take() {
+                // Pick up output that arrived after this frame's drain.
+                let rest = session.pty.drain_output();
+                if !rest.is_empty() {
+                    session.term.feed(rest.as_bytes());
+                }
+                let output = session.final_output();
                 let duration_ms = session.start_time.elapsed().as_millis() as u64;
 
                 if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == session.tab_id) {
@@ -2725,13 +2832,24 @@ impl MrtGuiApp {
     }
 
     fn render_tui_overlay(&mut self, ctx: &egui::Context) {
-        let Some(ref session) = self.active_tui else {
+        let exit_keys = self
+            .key_resolver
+            .keymap()
+            .bindings_for(&Action::ExitTui)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let Some(session) = self.active_tui.as_mut() else {
             return;
         };
 
         let screen_rect = ctx.screen_rect();
+        let window_focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        let mut exit_clicked = false;
+        // The dimmed backdrop sits in the Middle layer, above the app's panels;
+        // the terminal window goes in the Foreground layer so it is drawn on top.
         egui::Area::new(egui::Id::new("tui_overlay_modal"))
-            .order(egui::Order::Foreground)
+            .order(egui::Order::Middle)
             .fixed_pos(egui::pos2(0.0, 0.0))
             .show(ctx, |ui| {
                 ui.painter().rect_filled(
@@ -2742,8 +2860,16 @@ impl MrtGuiApp {
 
                 let win_width = (screen_rect.width() * 0.94).max(300.0);
                 let win_height = (screen_rect.height() * 0.90).max(200.0);
+                // The program may set a window title (OSC 0/2); fall back to the command.
+                let title = session
+                    .term
+                    .title()
+                    .filter(|t| !t.trim().is_empty())
+                    .unwrap_or_else(|| session.command.clone());
 
-                egui::Window::new(format!("📺 Interactive TUI: {} (Ctrl+Q to exit)", session.command))
+                egui::Window::new(format!("📺 {title}"))
+                    .id(egui::Id::new("tui_overlay_window"))
+                    .order(egui::Order::Foreground)
                     .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                     .fixed_size(egui::vec2(win_width, win_height))
                     .collapsible(false)
@@ -2751,46 +2877,134 @@ impl MrtGuiApp {
                     .show(ctx, |ui| {
                         ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new("Alt-Screen PTY Running")
+                                RichText::new(format!("{} × {}", session.term.cols(), session.term.rows()))
                                     .monospace()
-                                    .color(Palette::ACCENT_BLUE),
+                                    .color(Palette::TEXT_MUTED),
                             );
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui
-                                    .button(
-                                        RichText::new("Exit Session (Ctrl+Q)")
-                                            .color(Palette::ACCENT_RED),
-                                    )
-                                    .clicked()
-                                {
-                                    let _ = session.pty.kill();
+                                let label = if exit_keys.is_empty() {
+                                    "Exit Session".to_string()
+                                } else {
+                                    format!("Exit Session ({exit_keys})")
+                                };
+                                if ui.button(RichText::new(label).color(Palette::ACCENT_RED)).clicked() {
+                                    exit_clicked = true;
                                 }
                             });
                         });
                         ui.separator();
 
-                        let transcript = session.pty.read_transcript();
-                        egui::ScrollArea::vertical()
-                            .auto_shrink([false; 2])
-                            .stick_to_bottom(true)
-                            .show(ui, |ui| {
-                                let content = if transcript.is_empty() {
-                                    "Starting terminal emulator session..."
-                                } else {
-                                    &transcript
-                                };
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(content)
-                                            .monospace()
-                                            .size(12.0)
-                                            .color(Palette::TEXT_PRIMARY),
-                                    )
-                                    .wrap(),
-                                );
-                            });
+                        // Size the PTY to the space the overlay has, in whole cells.
+                        let font = egui::TextStyle::Monospace.resolve(ui.style());
+                        let cell = crate::widgets::term_view::cell_size(ui, &font);
+                        let (cols, rows) = crate::widgets::term_view::grid_dims(ui.available_size(), cell);
+                        if (cols, rows) != (session.term.cols(), session.term.rows()) {
+                            // portable-pty opens ConPTY with PSEUDOCONSOLE_RESIZE_QUIRK: ConPTY
+                            // does not repaint after a resize and expects the terminal to resize
+                            // its copy the way conhost does, adding blank rows at the bottom.
+                            // alacritty instead pulls lines back from history when the screen
+                            // grows, which shifts the screen and leaves stale rows. Move the
+                            // history out first (it is kept for the command block).
+                            if cfg!(windows) && session.term.scrollback_len() > 0 {
+                                let history = session.term.scrollback_with_colors();
+                                session.saved_history.extend(history);
+                                session.term.clear_scrollback();
+                            }
+                            session.term.resize(cols, rows);
+                            session.term.set_cell_size_px(cell.x.round() as u16, cell.y.round() as u16);
+                            let _ = session.pty.resize(cols, rows);
+                        }
+                        let snapshot = session.term.snapshot();
+                        let response =
+                            crate::widgets::term_view::paint_terminal(ui, &snapshot, &font, cell, window_focused);
+                        // Keep keyboard focus on the terminal so the command input underneath
+                        // does not also receive the keys, and so Tab, arrows and Esc stay with
+                        // the program instead of moving egui's focus.
+                        response.request_focus();
+                        ui.memory_mut(|m| {
+                            m.set_focus_lock_filter(
+                                response.id,
+                                egui::EventFilter {
+                                    tab: true,
+                                    horizontal_arrows: true,
+                                    vertical_arrows: true,
+                                    escape: true,
+                                },
+                            )
+                        });
+                        forward_tui_mouse(ctx, session, response.rect, cell, &snapshot.modes);
                     });
             });
+        if exit_clicked {
+            let _ = session.pty.kill();
+        }
+    }
+}
+
+/// Sends this frame's mouse input over the TUI grid (`rect`, cells of `cell` size) to
+/// the program: presses, releases and motion as mouse reports when it asked for them,
+/// and the wheel as mouse reports or, on an alternate screen with mode 1007, as arrows.
+fn forward_tui_mouse(ctx: &egui::Context, session: &mut ActiveTuiSession, rect: egui::Rect, cell: egui::Vec2, modes: &mrt_core::TermModes) {
+    use crate::term_input::{encode_mouse, wheel_as_arrows, MouseAction, MouseButton};
+    let (cols, rows) = (session.term.cols(), session.term.rows());
+    let to_cell = |pos: egui::Pos2| -> (u16, u16) {
+        let col = ((pos.x - rect.left()) / cell.x).floor().clamp(0.0, (cols - 1) as f32) as u16;
+        let row = ((pos.y - rect.top()) / cell.y).floor().clamp(0.0, (rows - 1) as f32) as u16;
+        (col, row)
+    };
+    let (events, hover) = ctx.input(|i| (i.events.clone(), i.pointer.hover_pos()));
+    let mut out: Vec<u8> = Vec::new();
+    for event in events {
+        match event {
+            egui::Event::PointerButton { pos, button, pressed, modifiers } => {
+                let Some(button) = MouseButton::from_egui(button) else { continue };
+                if pressed && !rect.contains(pos) {
+                    continue;
+                }
+                if !pressed && session.mouse_held != Some(button) {
+                    continue;
+                }
+                session.mouse_held = pressed.then_some(button);
+                let (col, row) = to_cell(pos);
+                session.mouse_cell = Some((col, row));
+                let action = if pressed { MouseAction::Press(button) } else { MouseAction::Release(button) };
+                out.extend(encode_mouse(action, col, row, modifiers, modes).unwrap_or_default());
+            }
+            egui::Event::PointerMoved(pos) => {
+                if !rect.contains(pos) && session.mouse_held.is_none() {
+                    continue;
+                }
+                let at = to_cell(pos);
+                if session.mouse_cell == Some(at) {
+                    continue;
+                }
+                session.mouse_cell = Some(at);
+                let mods = ctx.input(|i| i.modifiers);
+                out.extend(encode_mouse(MouseAction::Move(session.mouse_held), at.0, at.1, mods, modes).unwrap_or_default());
+            }
+            egui::Event::MouseWheel { unit, delta, modifiers } => {
+                let Some(pos) = hover.filter(|p| rect.contains(*p)) else { continue };
+                // Positive y moves the content down, i.e. scrolls up.
+                let notches = match unit {
+                    egui::MouseWheelUnit::Line => delta.y,
+                    egui::MouseWheelUnit::Point => delta.y / cell.y,
+                    egui::MouseWheelUnit::Page => delta.y * rows as f32,
+                };
+                session.wheel_accum += notches;
+                let (col, row) = to_cell(pos);
+                while session.wheel_accum.abs() >= 1.0 {
+                    let up = session.wheel_accum > 0.0;
+                    session.wheel_accum -= session.wheel_accum.signum();
+                    let action = if up { MouseAction::WheelUp } else { MouseAction::WheelDown };
+                    let bytes = encode_mouse(action, col, row, modifiers, modes).or_else(|| wheel_as_arrows(up, modes));
+                    out.extend(bytes.unwrap_or_default());
+                }
+            }
+            _ => {}
+        }
+    }
+    if !out.is_empty() {
+        let _ = session.pty.send_bytes(&out);
     }
 }
 
@@ -2825,94 +3039,6 @@ fn read_directory(path: &std::path::Path) -> std::io::Result<Vec<(PathBuf, bool)
 pub(crate) fn load_key_resolver(overrides: &HashMap<String, String>) -> (KeyResolver, Vec<String>) {
     let (keymap, issues) = Keymap::with_overrides(overrides, Platform::current());
     (KeyResolver::new(keymap), issues.iter().map(|i| i.to_string()).collect())
-}
-
-fn forward_egui_event_to_pty(event: &egui::Event, pty: &InteractivePty) {
-    match event {
-        egui::Event::Text(text) => {
-            let _ = pty.send_input(text, false);
-        }
-        egui::Event::Key {
-            key,
-            pressed: true,
-            modifiers,
-            ..
-        } => {
-            if modifiers.ctrl && !modifiers.alt {
-                match key {
-                    Key::C => {
-                        let _ = pty.send_input("\x03", false);
-                    }
-                    Key::D => {
-                        let _ = pty.send_input("\x04", false);
-                    }
-                    Key::Z => {
-                        let _ = pty.send_input("\x1a", false);
-                    }
-                    Key::L => {
-                        let _ = pty.send_input("\x0c", false);
-                    }
-                    Key::A => {
-                        let _ = pty.send_input("\x01", false);
-                    }
-                    Key::E => {
-                        let _ = pty.send_input("\x05", false);
-                    }
-                    Key::U => {
-                        let _ = pty.send_input("\x15", false);
-                    }
-                    Key::W => {
-                        let _ = pty.send_input("\x17", false);
-                    }
-                    _ => {}
-                }
-            } else if !modifiers.ctrl && !modifiers.alt && !modifiers.command {
-                match key {
-                    Key::Enter => {
-                        let _ = pty.send_input(if cfg!(windows) { "\r\n" } else { "\n" }, false);
-                    }
-                    Key::Backspace => {
-                        let _ = pty.send_input("\x08", false);
-                    }
-                    Key::Tab => {
-                        let _ = pty.send_input("\t", false);
-                    }
-                    Key::Escape => {
-                        let _ = pty.send_input("\x1b", false);
-                    }
-                    Key::ArrowUp => {
-                        let _ = pty.send_input("\x1b[A", false);
-                    }
-                    Key::ArrowDown => {
-                        let _ = pty.send_input("\x1b[B", false);
-                    }
-                    Key::ArrowRight => {
-                        let _ = pty.send_input("\x1b[C", false);
-                    }
-                    Key::ArrowLeft => {
-                        let _ = pty.send_input("\x1b[D", false);
-                    }
-                    Key::PageUp => {
-                        let _ = pty.send_input("\x1b[5~", false);
-                    }
-                    Key::PageDown => {
-                        let _ = pty.send_input("\x1b[6~", false);
-                    }
-                    Key::Home => {
-                        let _ = pty.send_input("\x1b[H", false);
-                    }
-                    Key::End => {
-                        let _ = pty.send_input("\x1b[F", false);
-                    }
-                    Key::Delete => {
-                        let _ = pty.send_input("\x1b[3~", false);
-                    }
-                    _ => {}
-                }
-            }
-        }
-        _ => {}
-    }
 }
 
 impl MrtGuiApp {
@@ -4429,6 +4555,7 @@ impl eframe::App for MrtGuiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mrt_core::{ShellKind, ShellSession};
 
     fn key_event(key: Key, modifiers: egui::Modifiers) -> egui::Event {
         egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }
@@ -5096,6 +5223,121 @@ mod tests {
         let block = app.tabs[0].blocks.iter().find(|b| b.id == block_id).unwrap();
         assert!(block.exit_code.is_some_and(|c| c != 0), "stopped command should report failure");
         assert!(app.running_pids.lock().unwrap().is_empty());
+    }
+
+    /// Commands for the persistent-shell tests in the syntax of `kind`:
+    /// (set a variable, print it, print the working directory, wait a minute).
+    fn session_test_commands(kind: &ShellKind) -> (&'static str, &'static str, &'static str, &'static str) {
+        match kind {
+            ShellKind::PowerShellCore | ShellKind::WindowsPowerShell => (
+                "$env:MRT_SESSION_TEST = 'kept-between-commands'",
+                "Write-Output \"value=$env:MRT_SESSION_TEST\"",
+                "(Get-Location).Path",
+                "ping -n 60 127.0.0.1",
+            ),
+            ShellKind::CmdBatch => (
+                "set MRT_SESSION_TEST=kept-between-commands",
+                "echo value=%MRT_SESSION_TEST%",
+                "cd",
+                "ping -n 60 127.0.0.1",
+            ),
+            ShellKind::Fish => (
+                "set -gx MRT_SESSION_TEST kept-between-commands",
+                "echo value=$MRT_SESSION_TEST",
+                "pwd",
+                "sleep 60",
+            ),
+            _ => (
+                "export MRT_SESSION_TEST=kept-between-commands",
+                "echo value=$MRT_SESSION_TEST",
+                "pwd",
+                "sleep 60",
+            ),
+        }
+    }
+
+    /// Runs `cmd` in tab 0 with its first shell and waits for the block to finish.
+    fn run_to_completion(app: &mut MrtGuiApp, cmd: &str) -> CommandBlock {
+        let block_id = app.spawn_shell_command(app.tabs[0].id, app.shells[0].clone(), app.tabs[0].cwd.clone(), cmd.to_string());
+        let start = Instant::now();
+        loop {
+            if let Some(block) = app.tabs[0].blocks.iter().find(|b| b.id == block_id && b.exit_code.is_some()) {
+                return block.clone();
+            }
+            assert!(start.elapsed() < Duration::from_secs(60), "`{cmd}` did not finish");
+            pump_one(app);
+        }
+    }
+
+    #[test]
+    fn persistent_shell_keeps_variables_and_directory_between_commands() {
+        let mut app = MrtGuiApp::new();
+        app.shell_pool.set_enabled(true);
+        let shell = app.shells[0].clone();
+        if !ShellSession::supports(&shell.kind) {
+            return;
+        }
+        let (set_var, print_var, print_cwd, _) = session_test_commands(&shell.kind);
+
+        run_to_completion(&mut app, set_var);
+        let block = run_to_completion(&mut app, print_var);
+        assert!(
+            block.plain_output.contains("value=kept-between-commands"),
+            "variable lost between commands (session unavailable: {:?}); output: {:?}",
+            app.shell_pool.unavailable_reason(app.tabs[0].id, &shell.id),
+            block.plain_output
+        );
+
+        let root = std::env::temp_dir().join(format!("mrt-session-test-{}", Uuid::new_v4()));
+        let target = root.join("mrt session cd");
+        std::fs::create_dir_all(&target).unwrap();
+        let cd = crate::shell_pool::cd_command(&shell.kind, &target).unwrap();
+        let block = run_to_completion(&mut app, &cd);
+        assert_eq!(block.exit_code, Some(0), "cd failed: {:?}", block.plain_output);
+        assert!(
+            app.tabs[0].cwd.to_string_lossy().contains("mrt session cd"),
+            "tab cwd not updated from the shell: {:?}",
+            app.tabs[0].cwd
+        );
+        let block = run_to_completion(&mut app, print_cwd);
+        assert!(block.plain_output.contains("mrt session cd"), "pwd output: {:?}", block.plain_output);
+        drop(app);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stop_interrupts_a_persistent_shell_command_and_keeps_the_shell() {
+        let mut app = MrtGuiApp::new();
+        app.shell_pool.set_enabled(true);
+        let shell = app.shells[0].clone();
+        if !ShellSession::supports(&shell.kind) {
+            return;
+        }
+        let (set_var, print_var, _, long) = session_test_commands(&shell.kind);
+        run_to_completion(&mut app, set_var);
+
+        let block_id = app.spawn_shell_command(app.tabs[0].id, shell.clone(), app.tabs[0].cwd.clone(), long.to_string());
+        let start = Instant::now();
+        while app.running_pids.lock().unwrap().get(&block_id).is_none() && start.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // Give the command a moment to start inside the shell before interrupting it.
+        std::thread::sleep(Duration::from_millis(1500));
+        app.handle_block_action(BlockAction::StopBlock(block_id));
+        let start = Instant::now();
+        while !app.tabs[0].blocks.iter().any(|b| b.id == block_id && b.exit_code.is_some()) {
+            assert!(start.elapsed() < Duration::from_secs(30), "interrupted command did not finish");
+            pump_one(&mut app);
+        }
+        assert!(start.elapsed() < Duration::from_secs(30));
+
+        // The shell survived the Stop, so the variable is still set.
+        let block = run_to_completion(&mut app, print_var);
+        assert!(
+            block.plain_output.contains("value=kept-between-commands"),
+            "shell state lost after Stop: {:?}",
+            block.plain_output
+        );
     }
 
     #[test]

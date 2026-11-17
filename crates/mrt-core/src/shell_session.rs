@@ -206,9 +206,7 @@ impl ShellSession {
         configure_command(&mut cmd, &shell.kind, &scratch, options.load_user_config);
         cmd.cwd(cwd);
         cmd.env("MRT_SHELL_INTEGRATION", "1");
-        if !cfg!(target_os = "windows") {
-            cmd.env("TERM", "xterm-256color");
-        }
+        crate::pty::apply_terminal_env(&mut cmd);
         for (key, value) in &options.env {
             cmd.env(key, value);
         }
@@ -1413,5 +1411,29 @@ mod tests {
             run(&session, "mrtalias").plain_output().trim(),
             "from-alias"
         );
+    }
+    /// Ctrl+C stops the running command and leaves the shell usable.
+    #[cfg(unix)]
+    fn check_interrupt(shell: &ShellProfile, long: &str, after: &str, expect: &str) {
+        let session = start(shell);
+        let mut handle = session.run(long).unwrap();
+        std::thread::sleep(Duration::from_millis(1500));
+        session.interrupt().unwrap();
+        let started = Instant::now();
+        let outcome = handle.wait_timeout(TEST_TIMEOUT);
+        assert!(started.elapsed() < Duration::from_secs(10), "{:?}: `{long}` ran to the end", shell.kind);
+        assert!(outcome.is_some(), "{:?}: `{long}` did not stop after Ctrl+C", shell.kind);
+        assert!(!session.has_exited(), "{:?}: Ctrl+C ended the shell", shell.kind);
+        assert_eq!(run(&session, after).plain_output().trim(), expect);
+    }
+
+    /// Unix only: through Windows ConPTY the Ctrl+C byte does not reach the running
+    /// program, so the GUI's Stop also ends the shell's child processes there.
+    #[cfg(unix)]
+    #[test]
+    fn interrupt_stops_the_command_and_keeps_the_shell() {
+        if let Some(shell) = find_shell(ShellKind::Bash) {
+            check_interrupt(&shell, "sleep 30", "echo still-here", "still-here");
+        }
     }
 }

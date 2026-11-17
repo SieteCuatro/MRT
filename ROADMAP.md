@@ -16,7 +16,7 @@ These comparisons shaped the order of the milestones.
 
 Today `mrt-core::vt` turns ANSI text into colored spans, and the TUI overlay shows the raw PTY transcript in a scrolling label. Cursor movement, screen clears, the alternate screen, and redraws are ignored. The PTY is fixed at 120×35. Everything else in this roadmap depends on fixing this.
 
-- **Terminal grid emulator.** Wrap `alacritty_terminal` (it uses the same `vte` parser MRT already depends on) or `libghostty-vt` behind a `mrt-core::term` module that exposes a cell grid, cursor, scrollback, modes, and title. Keep `vt::parse_ansi_text` for finished command blocks. *Done when:* `vim`, `htop`, `less`, `lazygit`, and `top` display and redraw correctly, and a unit test feeds recorded escape-sequence fixtures and checks the resulting grid.
+- **Terminal grid emulator.** *(library implemented, #9; the GUI does not use it yet)* Wrap `alacritty_terminal` (it uses the same `vte` parser MRT already depends on) or `libghostty-vt` behind a `mrt-core::term` module that exposes a cell grid, cursor, scrollback, modes, and title. Keep `vt::parse_ansi_text` for finished command blocks. *Done when:* `vim`, `htop`, `less`, `lazygit`, and `top` display and redraw correctly, and a unit test feeds recorded escape-sequence fixtures and checks the resulting grid.
 - **Grid renderer widget.** An egui widget that paints the grid cell by cell: colors, bold, italic, underline, inverse, wide CJK characters and emoji, the cursor, and selection. Use it in the TUI overlay and in the MCP PTY tools.
 - **Resize.** Compute columns and rows from the widget size and font metrics, and call `InteractivePty::resize` when the window or pane changes size. *Done when:* resizing the window while `htop` runs reflows it.
 - **Complete keyboard and mouse input.** Function keys, Alt/Meta, Home/End/PgUp/PgDn, and application cursor mode. Mouse reporting (SGR 1006) for TUIs that ask for it. Bracketed paste. Later, the kitty keyboard protocol.
@@ -27,17 +27,17 @@ Today `mrt-core::vt` turns ANSI text into colored spans, and the TUI overlay sho
 
 These items make MRT usable as a person's main terminal.
 
-- **Persistent shell per tab.** *(the parser is a library already)* Run each tab or pane as one long-lived PTY shell with the `mrt-core::shell_integration` script injected. Use the OSC 133 markers to split output into command blocks with exact exit codes. *Done when:* `cd`, `export`, aliases, shell functions, `source venv/bin/activate`, and `conda activate` persist between blocks in PowerShell, CMD, Bash, Zsh, and Fish. Keep the one-process-per-command mode as a fallback for shells where injection fails.
-- **Working-directory tracking.** Read OSC 7 (and the OSC 133 prompt) to keep the tab's working directory, the folder explorer, and new splits in sync with the shell.
-- **Configuration file.** Load `~/.config/mrt/config.toml` and per-project `.mrt.toml` using the schema in [`mrt.example.toml`](mrt.example.toml): default shell, font and size, theme, Safety Gate options, AI provider, keybindings, and MCP servers to connect at startup. Reload automatically when the file changes. Today MRT reads only environment variables and GUI controls.
+- **Persistent shell per tab.** *(library implemented, #16: `ShellSession`; tested on Windows only, GUI wiring pending)* Run each tab or pane as one long-lived PTY shell with the `mrt-core::shell_integration` script injected. Use the OSC 133 markers to split output into command blocks with exact exit codes. *Done when:* `cd`, `export`, aliases, shell functions, `source venv/bin/activate`, and `conda activate` persist between blocks in PowerShell, CMD, Bash, Zsh, and Fish. Keep the one-process-per-command mode as a fallback for shells where injection fails.
+- **Working-directory tracking.** *(OSC 7 parsing implemented, #15 and #16)* Read OSC 7 (and the OSC 133 prompt) to keep the tab's working directory, the folder explorer, and new splits in sync with the shell.
+- **Configuration file.** *(implemented, #8)* Load `~/.config/mrt/config.toml` and per-project `.mrt.toml` using the schema in [`mrt.example.toml`](mrt.example.toml): default shell, font and size, theme, Safety Gate options, AI provider, keybindings, and MCP servers to connect at startup. Reload automatically when the file changes.
 - **Scrollback search.** Search the live terminal buffer as well as saved history, with match highlighting and next/previous navigation. This is separate from the FTS5 history search.
-- **Command-finished notifications.** Send a desktop notification when a command that ran longer than a set time finishes while MRT is unfocused or the tab is hidden. Include the exit code and duration.
-- **Hyperlinks and clipboard.** OSC 8 hyperlinks, Ctrl/Cmd-click on detected URLs and `file:line` paths (open in the user's editor), and OSC 52 clipboard writes behind a permission prompt.
+- **Command-finished notifications.** *(implemented, #7)* Send a desktop notification when a command that ran longer than a set time finishes while MRT is unfocused or the tab is hidden. Include the exit code and duration.
+- **Hyperlinks and clipboard.** *(implemented, #15)* OSC 8 hyperlinks, Ctrl/Cmd-click on detected URLs and `file:line` paths (open in the user's editor), and OSC 52 clipboard writes behind a permission prompt.
 - **Shell integration over SSH.** When the user runs `ssh`, offer to inject the integration script for that session (Ghostty's approach), so blocks and exit codes keep working on remote machines.
 
 ## Milestone 3 — Rendering and performance
 
-- **Throughput benchmark.** Add a benchmark that streams a large file (for example `cat` of 100 MB, and `yes | head -n 5000000`) and records time to finish and frames dropped. Run it in CI to catch regressions.
+- **Throughput benchmark.** *(implemented, #13; the workflow runs only when started by hand while Actions minutes are unavailable. First finding: Windows PowerShell streams output about 20× slower than `cmd`, see [docs/PERFORMANCE.md](docs/PERFORMANCE.md))* Add a benchmark that streams a large file (for example `cat` of 100 MB, and `yes | head -n 5000000`) and records time to finish and frames dropped. Run it in CI to catch regressions.
 - **Large output.** Store very long block output out of memory or truncate it with "show more", virtualize block rendering, and cap the repaint rate while output is streaming. *Done when:* a 1 GB log does not freeze the UI.
 - **Font handling.** Configurable font, fallback chain for missing glyphs, and optional ligatures. Get cell metrics right for Nerd Font icons.
 - **Images.** The kitty graphics protocol, then Sixel. Show images inline in blocks and in the grid.
@@ -64,15 +64,15 @@ Attach to an existing MRT tab from a second computer running Windows, macOS, or 
 
 MRT already has a 31-tool MCP server. These items make that easy to use and visible.
 
-- **Agent status on tabs.** Show what a tab's program is doing (running, waiting for input, finished, failed) on the tab and in the Mosaic grid. Read standard OSC 9;4 progress and OSC 133 states, plus a documented MRT escape code that agents can send. Recognise common agent CLIs (`claude`, `codex`, `gemini`, `aider`) and flag when one is waiting for approval.
-- **One-step agent setup.** `mrt agent setup` writes the MCP server entry and a short skill/instructions file for Claude Code, Codex, Gemini CLI, and other agents, and `mrt agent show` prints the instructions for any other tool. Undo with `mrt agent remove`.
+- **Agent status on tabs.** *(implemented, #10)* Show what a tab's program is doing (running, waiting for input, finished, failed) on the tab and in the Mosaic grid. Read standard OSC 9;4 progress and OSC 133 states, plus a documented MRT escape code that agents can send. Recognise common agent CLIs (`claude`, `codex`, `gemini`, `aider`) and flag when one is waiting for approval.
+- **One-step agent setup.** *(implemented, #14)* `mrt agent setup` writes the MCP server entry and a short skill/instructions file for Claude Code, Codex, Gemini CLI, and other agents, and `mrt agent show` prints the instructions for any other tool. Undo with `mrt agent remove`.
 - **Multi-step MCP assistance.** Let the assistant use results from one tool call to choose the next. For example, it could inspect a failed command block, retrieve the previous run, and explain the differences. Route any proposed shell execution through the existing Safety Approval Gate.
-- **Remote MCP connections.** Add HTTP transport with support for streamed server events alongside the existing stdio client.
+- **Remote MCP connections.** *(implemented, #11)* Add HTTP transport with support for streamed server events alongside the existing stdio client.
 - **Agent sandbox tab.** A tab type whose commands always go through the Safety Gate and whose working directory is fixed, for letting an agent work unattended.
 
 ## Milestone 6 — Keyboard and scripting
 
-- **Configurable keybindings.** All actions bindable from the config file, including chained keys (`ctrl+a > c`) and key tables / modes (Ghostty 1.3, tmux prefix key).
+- **Configurable keybindings.** *(implemented, #12; read from the config file's `[keybindings]` table)* All actions bindable from the config file, including chained keys (`ctrl+a > c`) and key tables / modes (Ghostty 1.3, tmux prefix key).
 - **Named actions.** User-defined actions in the config (a command, a runbook, or a sequence of MRT actions) that appear in the Command Palette and can be bound to keys.
 - **Copy mode.** Move through scrollback with the keyboard, select, and copy, without the mouse.
 - **Input to several panes.** Optionally send typed input to every pane in a tab at once, with a clear on-screen indicator and the Safety Gate still checking each pane.
@@ -98,7 +98,7 @@ The first version is implemented in the **Runbooks** panel and SQLite `HistorySt
 
 - **Interactive TUI overlay.** *(first version)* `vim`, `nano`, `htop`, `lazygit`, `less`, and `:tui <cmd>` open a PTY in a full-screen overlay. Text and control keys are forwarded, `Ctrl+Q` or the program exiting closes it, and the transcript is saved as a command block. The overlay shows the raw PTY output as text and the PTY is fixed at 120×35, so full-screen programs do not display correctly yet. [Milestone 1](#milestone-1--a-real-terminal-core) fixes this.
 - **Split panes within a tab.** *(implemented)* Split any tab horizontally or vertically into independent panes (`:split`, `:split-h`, `:split-v`, `:unsplit`, and UI buttons), each with its own block stream, shell, and focus management.
-- **Shell integration.** *(library only)* `mrt-core::shell_integration` parses OSC 133 semantic prompt markers and generates integration scripts for Bash, Zsh, Fish, PowerShell, and CMD. Wiring it into the GUI is the [persistent shell per tab](#milestone-2--everyday-terminal-use) item.
+- **Shell integration.** *(library only)* `mrt-core::shell_integration` parses OSC 133 and OSC 7 and generates integration scripts for Bash, Git Bash, sh, Zsh, Fish, PowerShell, and CMD, and `mrt-core::shell_session` runs a persistent shell with them. Wiring it into the GUI is the [persistent shell per tab](#milestone-2--everyday-terminal-use) item.
 
 ### Debugging and sharing results
 

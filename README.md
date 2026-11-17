@@ -98,6 +98,7 @@ MRT checks configured environment variables in the following order (set `ai.prov
 - [GUI & Widgets](docs/GUI_AND_WIDGETS.md) — Async architecture, block viewers, and side panels.
 - [Session Server & Remote Sessions](docs/SESSION_SERVER.md) — The session host, background mode, upgrades, `mrt share` / `pair` / `attach`, the phone companion, and how they are verified.
 - [Performance & Benchmarks](docs/PERFORMANCE.md) — Output throughput numbers, hot spots with large output, and how to run `cargo bench`.
+- [Changelog](CHANGELOG.md) — What each release changed.
 - [Roadmap](ROADMAP.md) — Milestones (all implemented) and the competitor comparison behind them.
 - [Contributing](CONTRIBUTING.md) — Development workflow and PR checklist.
 - [AI Agent Instructions](AGENTS.md) — Workspace context for coding agents.

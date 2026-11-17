@@ -62,6 +62,7 @@ flowchart LR
 
 ### 5. `mrt-app` — Native GPU GUI (`eframe` / `egui` 0.29)
 - Renders multi-shell tabs, **Split Panes** within any tab (`:split-h`, `:split-v`, `:unsplit`), full-screen **Interactive TUI Mode** overlay (`:tui <cmd>`, `vim`, `nano`, `htop`, `lazygit`), **Mosaic** multi-terminal grid mode, **Folder Explorer**, persistent SQLite **Command History** and **Saved Runbooks** (with offline sequence editing, preview, Safety Gate enforcement, and stop-on-first-failure replay), the **Command Block** stream (with structured diff comparison), the **MCP Hub** (with Live GUI Bridge indicator) and **Toolbox** side panels (**Network** and **Task Manager** tabs), live `:top` blocks and `:watch-proc` alerts, the **Safety Approval Gate** modal, and the **Universal Command Palette** (`Ctrl+K` / `Ctrl+P`).
+- Routes every key press through `keymap.rs`: a `KeyResolver` turns chords, `ctrl+a > c` chains, and named key tables into `Action`s before egui widgets or the TUI PTY see the keys; unbound keys pass through. Defaults reproduce the historical shortcuts; overrides come from a `binding -> action` map (the config file's `[keybindings]` table).
 - Persists history and runbooks to `history.sqlite` in the per-user MRT data directory (see the [User Guide](USER_GUIDE.md#5-data-files-and-locations)).
 
 ---

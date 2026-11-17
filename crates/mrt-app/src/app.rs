@@ -1,3 +1,4 @@
+use crate::keymap::{Action, KeyChord, KeyContext, KeyResolver, Keymap, Platform, Resolution, PALETTE_ACTIONS};
 use crate::theme::{
     apply_mrt_theme, chip, ghost_button, icon_button, panel_frame, primary_button, secondary_button, section_label,
     Palette, Radius,
@@ -13,7 +14,7 @@ use crate::widgets::runbooks::{
 use crate::widgets::side_panels::{render_mcp_side_panel, SidePanelEvent, SidePanelState};
 use crate::widgets::task_manager::TaskManagerEvent;
 use crate::widgets::toolbox::{render_toolbox_side_panel, ToolboxTab};
-use egui::{Color32, Key, Modifiers, RichText};
+use egui::{Color32, Key, RichText};
 use mrt_ai::{
     diagnose_command_error_streaming, translate_nl_to_command,
     AiCommandProposal,
@@ -250,6 +251,12 @@ pub struct MrtGuiApp {
     pub busy_count: usize,
     pub focused_on_start: bool,
     pub active_tui: Option<ActiveTuiSession>,
+    /// Resolves key presses into actions (configurable keybindings).
+    key_resolver: KeyResolver,
+    /// Problems found while loading keybinding overrides, shown in the palette.
+    keymap_issues: Vec<String>,
+    /// Set by the `exit_tui` action; handled by `process_tui_session`.
+    tui_exit_requested: bool,
     history: Option<crate::history::HistoryWorker>,
     history_error: Option<String>,
     history_pending: usize,
@@ -344,6 +351,8 @@ impl MrtGuiApp {
             Err(error) => (None, Some(error.to_string())),
         };
 
+        let (key_resolver, keymap_issues) = load_key_resolver();
+
         let mut app = Self {
             runtime,
             shells,
@@ -361,6 +370,9 @@ impl MrtGuiApp {
             busy_count: 0,
             focused_on_start: false,
             active_tui: None,
+            key_resolver,
+            keymap_issues,
+            tui_exit_requested: false,
             history,
             history_error,
             history_pending: 0,
@@ -2634,14 +2646,10 @@ impl MrtGuiApp {
             exit_code = code as i32;
         }
 
-        // Check for manual exit via Ctrl+Q or forward keys to PTY
-        let mut kill_requested = false;
+        // Keys bound to actions (e.g. `exit_tui`, Ctrl+Q by default) were already
+        // removed from the input by `handle_keybindings`; forward the rest to the PTY.
+        let kill_requested = std::mem::take(&mut self.tui_exit_requested);
         ctx.input(|i| {
-            if i.modifiers.ctrl && i.key_pressed(Key::Q) {
-                kill_requested = true;
-                return;
-            }
-
             for event in &i.events {
                 forward_egui_event_to_pty(event, &session.pty);
             }
@@ -2779,6 +2787,14 @@ fn read_directory(path: &std::path::Path) -> std::io::Result<Vec<(PathBuf, bool)
     Ok(entries)
 }
 
+/// Builds the key resolver: the default keymap plus user overrides
+/// (`binding -> action`). The config file's `[keybindings]` table plugs in here.
+fn load_key_resolver() -> (KeyResolver, Vec<String>) {
+    let overrides: HashMap<String, String> = HashMap::new();
+    let (keymap, issues) = Keymap::with_overrides(&overrides, Platform::current());
+    (KeyResolver::new(keymap), issues.iter().map(|i| i.to_string()).collect())
+}
+
 fn forward_egui_event_to_pty(event: &egui::Event, pty: &InteractivePty) {
     match event {
         egui::Event::Text(text) => {
@@ -2894,6 +2910,138 @@ impl MrtGuiApp {
             cwd,
         ));
         self.active_tab = self.tabs.len() - 1;
+    }
+
+    /// Runs every key press through the keymap. Keys that complete a binding or
+    /// are mid-chain are removed from the input, so neither egui widgets nor the
+    /// TUI PTY see them; unbound keys pass through untouched.
+    fn handle_keybindings(&mut self, ctx: &egui::Context) {
+        let now = std::time::Instant::now();
+        let context = KeyContext { tui_active: self.active_tui.is_some() };
+        self.key_resolver.tick(now);
+        let mut actions = Vec::new();
+        let resolver = &mut self.key_resolver;
+        ctx.input_mut(|i| {
+            // egui-winit emits `Text` right after the `Key` that typed it; drop
+            // that text too when the key was consumed (e.g. the `c` of `ctrl+a > c`).
+            let mut drop_next_text = false;
+            i.events.retain(|event| match event {
+                egui::Event::Key { key, pressed: true, repeat, modifiers, .. } => {
+                    match resolver.feed(KeyChord::from_egui(*key, *modifiers), *repeat, now, context) {
+                        Resolution::Matched(action) => {
+                            actions.push(action);
+                            drop_next_text = true;
+                            false
+                        }
+                        Resolution::Pending => {
+                            drop_next_text = true;
+                            false
+                        }
+                        Resolution::NoMatch => {
+                            drop_next_text = false;
+                            true
+                        }
+                    }
+                }
+                egui::Event::Text(_) if drop_next_text => {
+                    drop_next_text = false;
+                    false
+                }
+                _ => true,
+            });
+        });
+        for action in actions {
+            self.dispatch_action(action);
+        }
+        if let Some(wait) = self.key_resolver.next_deadline(now) {
+            ctx.request_repaint_after(wait);
+        }
+    }
+
+    /// Performs a keymap action (from a key binding or the Command Palette).
+    fn dispatch_action(&mut self, action: Action) {
+        match action {
+            Action::ToggleCommandPalette => self.show_command_palette = !self.show_command_palette,
+            Action::ExitTui => self.tui_exit_requested = true,
+            Action::NewTab => {
+                let shell_idx = self.tabs.get(self.active_tab).map(|t| t.active_shell_idx).unwrap_or(0);
+                if shell_idx < self.shells.len() {
+                    self.open_new_tab(shell_idx);
+                }
+            }
+            Action::CloseTab => {
+                if let Some(id) = self.tabs.get(self.active_tab).map(|t| t.id) {
+                    self.close_terminal(id);
+                }
+            }
+            Action::NextTab => {
+                if !self.tabs.is_empty() {
+                    self.active_tab = (self.active_tab + 1) % self.tabs.len();
+                }
+            }
+            Action::PreviousTab => {
+                if !self.tabs.is_empty() {
+                    self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
+                }
+            }
+            Action::SplitHorizontal | Action::SplitVertical | Action::Unsplit | Action::ClearBlocks => {
+                let shells_count = self.shells.len();
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    match action {
+                        Action::SplitHorizontal => tab.split(SplitDirection::Horizontal, shells_count),
+                        Action::SplitVertical => tab.split(SplitDirection::Vertical, shells_count),
+                        Action::Unsplit => tab.close_split(),
+                        _ => {
+                            tab.blocks.clear();
+                            tab.comparison = None;
+                        }
+                    }
+                }
+            }
+            Action::ToggleExplorer => self.show_explorer = !self.show_explorer,
+            Action::ToggleHistory => {
+                self.show_history = !self.show_history;
+                if self.show_history {
+                    self.refresh_history();
+                }
+            }
+            Action::ToggleRunbooks => {
+                self.runbooks_state.show_panel = !self.runbooks_state.show_panel;
+                if self.runbooks_state.show_panel {
+                    self.refresh_runbooks();
+                    self.refresh_history();
+                }
+            }
+            Action::ToggleMcpHub => self.side_state.show_mcp_panel = !self.side_state.show_mcp_panel,
+            Action::ToggleToolbox => {
+                self.side_state.show_toolbox_panel = !self.side_state.show_toolbox_panel;
+            }
+            Action::ToggleMosaic => self.mosaic = !self.mosaic,
+            Action::OpenTaskManager => self.open_task_manager(None),
+            // The resolver itself tracks the active key table.
+            Action::EnterTable(_) | Action::ExitTable => {}
+        }
+    }
+
+    /// Small bottom-right badge while a chain is half-typed or a key table is active.
+    fn render_key_indicator(&self, ctx: &egui::Context) {
+        let Some(label) = self.key_resolver.indicator() else {
+            return;
+        };
+        egui::Area::new(egui::Id::new("keymap_pending_indicator"))
+            .anchor(egui::Align2::RIGHT_BOTTOM, [-16.0, -16.0])
+            .order(egui::Order::Foreground)
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::none()
+                    .fill(Palette::BG_ELEVATED)
+                    .stroke(egui::Stroke::new(1.0_f32, Palette::BORDER_FAINT))
+                    .rounding(egui::Rounding::same(8.0))
+                    .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new(format!("⌨ {label}")).monospace().size(12.0).color(Palette::TEXT_BODY));
+                    });
+            });
     }
 
     /// Left sidebar: brand, new tab, tabs list, workspace panels and status card.
@@ -3178,7 +3326,14 @@ impl MrtGuiApp {
                         }
                         ui.add_space(4.0);
                         let width = ui.available_width().clamp(160.0, 320.0);
-                        if search_pill(ui, width, "Commands, tabs, tools…", "Ctrl K").clicked() {
+                        let palette_keys = self
+                            .key_resolver
+                            .keymap()
+                            .bindings_for(&Action::ToggleCommandPalette)
+                            .into_iter()
+                            .next()
+                            .unwrap_or_default();
+                        if search_pill(ui, width, "Commands, tabs, tools…", &palette_keys).clicked() {
                             self.show_command_palette = !self.show_command_palette;
                         }
                     });
@@ -3207,6 +3362,7 @@ impl eframe::App for MrtGuiApp {
         self.process_async_events();
         self.process_history_events();
         self.process_mcp_ui_commands();
+        self.handle_keybindings(ctx);
         self.process_tui_session(ctx);
         self.maybe_spawn_process_tick();
 
@@ -3215,13 +3371,6 @@ impl eframe::App for MrtGuiApp {
         } else {
             250
         }));
-
-        // Keyboard shortcut for Command Palette (Ctrl+K or Ctrl+P)
-        if ctx.input_mut(|i| {
-            i.consume_key(Modifiers::CTRL, Key::K) || i.consume_key(Modifiers::CTRL, Key::P)
-        }) {
-            self.show_command_palette = !self.show_command_palette;
-        }
 
         self.render_sidebar(ctx);
         self.render_header(ctx);
@@ -3954,6 +4103,7 @@ impl eframe::App for MrtGuiApp {
         if self.show_command_palette {
             let mut close_palette = false;
             let mut cmd_to_run = None;
+            let mut action_to_run: Option<Action> = None;
             let mut switch_shell_idx = None;
 
             egui::Area::new(egui::Id::new("palette_backdrop"))
@@ -4014,6 +4164,7 @@ impl eframe::App for MrtGuiApp {
                         q.is_empty() || title.to_lowercase().contains(&q) || hint.to_lowercase().contains(&q)
                     };
                     let mut first_cmd: Option<String> = None;
+                    let mut first_action: Option<Action> = None;
                     let mut first_shell: Option<usize> = None;
                     let mut results = 0usize;
 
@@ -4022,17 +4173,42 @@ impl eframe::App for MrtGuiApp {
                         .show(ui, |ui| {
                             egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
                                 ui.set_width(ui.available_width());
-                                let sections: [(&str, &str, &[(&str, &str)]); 4] = [
-                                    (
-                                        "Layout",
-                                        "‖",
-                                        &[
-                                            ("Split pane horizontally", ":split-h"),
-                                            ("Split pane vertically", ":split-v"),
-                                            ("Unsplit", ":unsplit"),
-                                            ("Clear terminal blocks", ":clear"),
-                                        ],
-                                    ),
+                                if !self.keymap_issues.is_empty() {
+                                    section_label(ui, "   Keybinding problems");
+                                    for issue in &self.keymap_issues {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.add_space(12.0);
+                                            ui.label(RichText::new(format!("⚠ {issue}")).size(12.0).color(Palette::ACCENT_AMBER));
+                                        });
+                                    }
+                                    ui.add_space(6.0);
+                                }
+                                // Bindable actions, each showing its current key binding
+                                // (or its action name, ready to bind in `[keybindings]`).
+                                let keymap = self.key_resolver.keymap();
+                                let action_rows: Vec<(Action, String, String)> = PALETTE_ACTIONS
+                                    .iter()
+                                    .map(|action| {
+                                        let keys = keymap.bindings_for(action).join(" / ");
+                                        let hint = if keys.is_empty() { action.name() } else { keys };
+                                        (action.clone(), action.title(), hint)
+                                    })
+                                    .filter(|(action, title, hint)| matches(title, &format!("{hint} {}", action.name())))
+                                    .collect();
+                                if !action_rows.is_empty() {
+                                    section_label(ui, "   Actions");
+                                    for (action, title, hint) in action_rows {
+                                        results += 1;
+                                        if first_cmd.is_none() && first_action.is_none() && first_shell.is_none() {
+                                            first_action = Some(action.clone());
+                                        }
+                                        if palette_row(ui, "‖", &title, &hint).clicked() {
+                                            action_to_run = Some(action);
+                                            close_palette = true;
+                                        }
+                                    }
+                                }
+                                let sections: [(&str, &str, &[(&str, &str)]); 3] = [
                                     (
                                         "Tools",
                                         "🌐",
@@ -4049,7 +4225,6 @@ impl eframe::App for MrtGuiApp {
                                         "Processes",
                                         "📈",
                                         &[
-                                            ("Show processes (Task Manager)", ":toolbox task-manager"),
                                             ("List processes by CPU", ":ps"),
                                             ("List processes by memory", ":ps --sort mem"),
                                             ("Processes started by MRT", ":ps --mrt --tree"),
@@ -4076,7 +4251,7 @@ impl eframe::App for MrtGuiApp {
                                     section_label(ui, &format!("   {section}"));
                                     for (title, cmd) in visible {
                                         results += 1;
-                                        if first_cmd.is_none() && first_shell.is_none() {
+                                        if first_cmd.is_none() && first_action.is_none() && first_shell.is_none() {
                                             first_cmd = Some(cmd.to_string());
                                         }
                                         if palette_row(ui, icon, title, cmd).clicked() {
@@ -4096,7 +4271,7 @@ impl eframe::App for MrtGuiApp {
                                     section_label(ui, "   Shells");
                                     for (idx, title, program) in shell_rows {
                                         results += 1;
-                                        if first_cmd.is_none() && first_shell.is_none() {
+                                        if first_cmd.is_none() && first_action.is_none() && first_shell.is_none() {
                                             first_shell = Some(idx);
                                         }
                                         if palette_row(ui, "›_", &title, &program).clicked() {
@@ -4117,7 +4292,9 @@ impl eframe::App for MrtGuiApp {
                         });
 
                     if enter_pressed {
-                        if let Some(cmd) = first_cmd.take() {
+                        if let Some(action) = first_action.take() {
+                            action_to_run = Some(action);
+                        } else if let Some(cmd) = first_cmd.take() {
                             cmd_to_run = Some(cmd);
                         } else if let Some(idx) = first_shell {
                             switch_shell_idx = Some(idx);
@@ -4167,6 +4344,10 @@ impl eframe::App for MrtGuiApp {
                 self.palette_query.clear();
                 self.submit_input(Some(cmd), false);
             }
+            if let Some(action) = action_to_run {
+                self.palette_query.clear();
+                self.dispatch_action(action);
+            }
             if close_palette || ctx.input(|i| i.key_pressed(Key::Escape)) {
                 self.show_command_palette = false;
                 if self.pending_safety.is_none() {
@@ -4176,6 +4357,7 @@ impl eframe::App for MrtGuiApp {
         }
 
         self.render_tui_overlay(ctx);
+        self.render_key_indicator(ctx);
         self.sync_mcp_from_gui();
     }
 }
@@ -4183,6 +4365,61 @@ impl eframe::App for MrtGuiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn key_event(key: Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }
+    }
+
+    #[test]
+    fn keybindings_consume_bound_keys_and_pass_the_rest_through() {
+        let mut app = MrtGuiApp::new();
+        let ctx = egui::Context::default();
+        let mut ctrl = egui::Modifiers::NONE;
+        ctrl.ctrl = true;
+        ctrl.command = !cfg!(target_os = "macos");
+        let raw = egui::RawInput {
+            events: vec![
+                key_event(Key::K, ctrl),
+                key_event(Key::A, egui::Modifiers::NONE),
+                egui::Event::Text("a".into()),
+                key_event(Key::Q, ctrl),
+            ],
+            ..Default::default()
+        };
+        let mut remaining = Vec::new();
+        let _ = ctx.run(raw, |ctx| {
+            app.handle_keybindings(ctx);
+            remaining = ctx.input(|i| i.events.clone());
+        });
+        assert!(app.show_command_palette, "Ctrl+K toggles the palette");
+        // `a` (and its text) plus Ctrl+Q outside TUI mode reach the widgets/shell.
+        assert_eq!(remaining.len(), 3, "{remaining:?}");
+        assert!(!app.tui_exit_requested);
+    }
+
+    #[test]
+    fn keymap_actions_drive_tabs_and_splits() {
+        let mut app = MrtGuiApp::new();
+        app.dispatch_action(Action::NewTab);
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active_tab, 1);
+        app.dispatch_action(Action::NextTab);
+        assert_eq!(app.active_tab, 0);
+        app.dispatch_action(Action::PreviousTab);
+        assert_eq!(app.active_tab, 1);
+        app.dispatch_action(Action::SplitVertical);
+        assert_eq!(app.tabs[1].split_direction, SplitDirection::Vertical);
+        app.dispatch_action(Action::Unsplit);
+        assert_eq!(app.tabs[1].split_direction, SplitDirection::None);
+        app.dispatch_action(Action::CloseTab);
+        assert_eq!(app.tabs.len(), 1);
+        app.dispatch_action(Action::ToggleMosaic);
+        assert!(app.mosaic);
+        app.dispatch_action(Action::ExitTui);
+        assert!(app.tui_exit_requested);
+        // Keyed actions do not pollute the per-tab command history.
+        assert!(app.tabs[0].command_history.is_empty());
+    }
 
     #[test]
     fn command_entry_creates_comparable_output_blocks() {

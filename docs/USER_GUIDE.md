@@ -110,8 +110,16 @@ Commands that may be destructive open the **Safety Approval Gate** first (see [C
 | `Enter` | Command Palette | Runs the first match, or the typed text as a command when nothing matches. |
 | `Esc` | Command Palette / Safety Gate | Closes the palette / cancels the pending command. |
 | `Ctrl+Q` | Interactive TUI mode | Ends the session and saves its transcript as a block. |
+| `Ctrl+click` (`Cmd+click` on macOS) | Link in block output | Opens a URL in the browser, or a `file:line[:col]` path in your editor. |
 
 The Command Palette lists everything you can also reach with the mouse, so it is the quickest way to discover features.
+
+### Links and clipboard requests in output
+
+- URLs, terminal hyperlinks (OSC 8) and locations such as `src/main.rs:10:5` are underlined. Hover to see the target, and `Ctrl+click` (`Cmd+click` on macOS) to open it. Only `http`, `https`, `ftp`, `mailto` and `file` links open.
+- Files open in `$VISUAL`, else `$EDITOR`, at the right line. Terminal editors such as `vim` or `nano` open in the Interactive TUI overlay. With neither variable set, the file opens with your OS's default app.
+- Relative paths are resolved against the directory the command reported with OSC 7, else the directory it started in.
+- When a program asks to copy text to your clipboard (OSC 52, used by tmux, Neovim and others over SSH), the block shows the text and asks you to **Allow** or **Deny**. MRT never writes the clipboard without your approval, and never lets programs read it.
 
 ---
 
@@ -151,6 +159,7 @@ MRT does not read a configuration file yet. [`mrt.example.toml`](../mrt.example.
 | `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY` | AI provider keys, checked in this order. See [AI Providers](AI_PROVIDERS_AND_AGENTS.md). |
 | `OLLAMA_MODEL`, `OLLAMA_HOST` | Use a local Ollama model (default host `http://localhost:11434`). |
 | `MRT_MCP_BRIDGE_PORT`, `MRT_MCP_BRIDGE_TOKEN` | Point `mrt --mcp-server` at a specific GUI bridge instead of reading `mcp-bridge.json`. |
+| `VISUAL`, `EDITOR` | Editor used when you `Ctrl+click` a `file:line` link (`VISUAL` wins). Examples: `code`, `subl`, `nvim`. |
 | `RUST_LOG` | Log level for the GUI's stderr logs (default `info`), e.g. `RUST_LOG=debug`. |
 
 With no AI variables set, MRT uses its offline heuristic engine, so `#` prompts and **Diagnose** always work.

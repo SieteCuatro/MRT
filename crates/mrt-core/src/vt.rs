@@ -22,6 +22,9 @@ pub struct AnsiSpan {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    /// Target URI of an OSC 8 hyperlink covering this span, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
 }
 
 impl Default for AnsiSpan {
@@ -33,24 +36,50 @@ impl Default for AnsiSpan {
             bold: false,
             italic: false,
             underline: false,
+            link: None,
         }
     }
 }
 
+/// Side-channel events carried by OSC sequences in command output.
+///
+/// They are reported to the caller and never applied automatically: the GUI
+/// decides what to do with them (OSC 52 always needs the user's approval).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VtEvent {
+    /// OSC 7: the shell reported its working directory (`file://host/path`).
+    WorkingDirectory {
+        /// Host part of the URI (empty for `file:///path`).
+        host: String,
+        /// Percent-decoded local path (`/C:/x` becomes `C:/x`).
+        path: String,
+    },
+    /// OSC 52: a program asked to write `text` to the clipboard.
+    ClipboardWrite {
+        /// Selection targets as sent (`c`, `p`, `s`, `0`..`7`; empty means `s0`).
+        selection: String,
+        /// Decoded clipboard payload.
+        text: String,
+    },
+}
+
+/// Result of [`parse_ansi_rich`]: styled spans, stripped text and OSC events.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ParsedAnsi {
+    pub spans: Vec<AnsiSpan>,
+    pub plain_text: String,
+    pub events: Vec<VtEvent>,
+}
+
+/// Largest OSC 52 payload (decoded bytes) MRT will offer to put on the clipboard.
+pub const MAX_CLIPBOARD_WRITE_BYTES: usize = 1024 * 1024;
+
+#[derive(Default)]
 pub struct VtParserState {
     pub spans: Vec<AnsiSpan>,
     current: AnsiSpan,
     pub plain_text: String,
-}
-
-impl Default for VtParserState {
-    fn default() -> Self {
-        Self {
-            spans: Vec::new(),
-            current: AnsiSpan::default(),
-            plain_text: String::new(),
-        }
-    }
+    pub events: Vec<VtEvent>,
 }
 
 impl VtParserState {
@@ -83,7 +112,144 @@ impl VtParserState {
     }
 }
 
+impl VtParserState {
+    fn handle_osc(&mut self, params: &[&[u8]]) {
+        let Some(code) = params.first() else { return };
+        // vte splits OSC data on ';'. Payloads such as URLs may contain ';',
+        // so rejoin everything after the fixed parameters.
+        let rest = |from: usize| -> String {
+            let joined: Vec<u8> = params.get(from..).unwrap_or(&[]).join(&b';');
+            String::from_utf8_lossy(&joined).into_owned()
+        };
+        match *code {
+            b"7" => {
+                if let Some((host, path)) = parse_osc7_parts(&rest(1)) {
+                    self.events.push(VtEvent::WorkingDirectory { host, path });
+                }
+            }
+            b"8" => {
+                // OSC 8 ; params ; URI. An empty URI closes the hyperlink.
+                if params.len() < 3 {
+                    return;
+                }
+                let uri = rest(2);
+                let uri = uri.trim();
+                self.flush_current();
+                self.current.link = if uri.is_empty() || uri.chars().any(char::is_control) {
+                    None
+                } else {
+                    Some(uri.to_string())
+                };
+            }
+            b"52" => {
+                if params.len() < 3 {
+                    return;
+                }
+                let selection = String::from_utf8_lossy(params[1]).into_owned();
+                let data = rest(2);
+                // `?` is a clipboard read request; MRT never answers those.
+                if data == "?" {
+                    return;
+                }
+                if let Some(bytes) = decode_base64(data.as_bytes()) {
+                    if bytes.len() <= MAX_CLIPBOARD_WRITE_BYTES {
+                        let text = String::from_utf8_lossy(&bytes).into_owned();
+                        self.events.push(VtEvent::ClipboardWrite { selection, text });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Parses an OSC 7 `file://host/path` URI into the local path it names.
+/// Percent-escapes are decoded and `/C:/x` becomes `C:/x` on any OS.
+pub fn parse_osc7_uri(uri: &str) -> Option<std::path::PathBuf> {
+    parse_osc7_parts(uri).map(|(_, path)| std::path::PathBuf::from(path))
+}
+
+/// Parses an OSC 7 `file://host/path` URI into `(host, decoded_path)`.
+fn parse_osc7_parts(uri: &str) -> Option<(String, String)> {
+    let rest = uri.trim().strip_prefix("file://")?;
+    let slash = rest.find('/')?;
+    let host = rest[..slash].to_string();
+    let mut path = percent_decode(&rest[slash..])?;
+    // Windows shells report `file://host/C:/Users/...`.
+    let b = path.as_bytes();
+    if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' {
+        path.remove(0);
+    }
+    if path.chars().any(char::is_control) {
+        return None;
+    }
+    Some((host, path))
+}
+
+fn percent_decode(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Decodes standard (RFC 4648) base64, ignoring ASCII whitespace.
+/// Returns `None` for any other invalid character or a malformed length.
+fn decode_base64(input: &[u8]) -> Option<Vec<u8>> {
+    fn value(c: u8) -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some((c - b'A') as u32),
+            b'a'..=b'z' => Some((c - b'a' + 26) as u32),
+            b'0'..=b'9' => Some((c - b'0' + 52) as u32),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let clean: Vec<u8> = input.iter().copied().filter(|c| !c.is_ascii_whitespace()).collect();
+    let mut end = clean.len();
+    while end > 0 && clean[end - 1] == b'=' && clean.len() - end < 2 {
+        end -= 1;
+    }
+    if end != clean.len() && clean.len() % 4 != 0 {
+        return None;
+    }
+    let data = &clean[..end];
+    if data.len() % 4 == 1 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(data.len() * 3 / 4);
+    for chunk in data.chunks(4) {
+        let mut acc = 0u32;
+        for (i, &c) in chunk.iter().enumerate() {
+            acc |= value(c)? << (18 - 6 * i as u32);
+        }
+        out.push((acc >> 16) as u8);
+        if chunk.len() > 2 {
+            out.push((acc >> 8) as u8);
+        }
+        if chunk.len() > 3 {
+            out.push(acc as u8);
+        }
+    }
+    Some(out)
+}
+
 impl Perform for VtParserState {
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        self.handle_osc(params);
+    }
+
     fn print(&mut self, c: char) {
         self.current.text.push(c);
         self.plain_text.push(c);
@@ -171,11 +337,158 @@ impl Perform for VtParserState {
 
 /// Parses an ANSI-escaped string into styled spans and stripped plain text.
 pub fn parse_ansi_text(input: &str) -> (Vec<AnsiSpan>, String) {
+    let parsed = parse_ansi_rich(input);
+    (parsed.spans, parsed.plain_text)
+}
+
+/// Like [`parse_ansi_text`], but also returns OSC 7 / OSC 52 events.
+/// OSC 8 hyperlinks are attached to the spans they cover ([`AnsiSpan::link`]).
+pub fn parse_ansi_rich(input: &str) -> ParsedAnsi {
     let mut parser = vte::Parser::new();
     let mut state = VtParserState::default();
     for byte in input.as_bytes() {
         parser.advance(&mut state, *byte);
     }
     state.flush_current();
-    (state.spans, state.plain_text)
+    ParsedAnsi {
+        spans: state.spans,
+        plain_text: state.plain_text,
+        events: state.events,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ST: &str = "\x1b\\";
+
+    #[test]
+    fn plain_parse_is_unchanged() {
+        let (spans, plain) = parse_ansi_text("\x1b[31mred\x1b[0m ok\n");
+        assert_eq!(plain, "red ok\n");
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].text, "red");
+        assert!(spans[0].fg.is_some());
+        assert!(spans.iter().all(|s| s.link.is_none()));
+    }
+
+    #[test]
+    fn osc7_bel_and_st() {
+        let bel = parse_ansi_rich("\x1b]7;file://box/home/me/my%20dir\x07$ ");
+        assert_eq!(
+            bel.events,
+            vec![VtEvent::WorkingDirectory { host: "box".into(), path: "/home/me/my dir".into() }]
+        );
+        assert_eq!(bel.plain_text, "$ ");
+
+        let st = parse_ansi_rich(&format!("\x1b]7;file:///C:/Users/me{ST}"));
+        assert_eq!(
+            st.events,
+            vec![VtEvent::WorkingDirectory { host: String::new(), path: "C:/Users/me".into() }]
+        );
+        assert_eq!(st.plain_text, "");
+    }
+
+    #[test]
+    fn public_osc7_helper() {
+        assert_eq!(
+            parse_osc7_uri("file://h/home/a%20b"),
+            Some(std::path::PathBuf::from("/home/a b"))
+        );
+        assert_eq!(parse_osc7_uri("file:///D:/x"), Some(std::path::PathBuf::from("D:/x")));
+        assert_eq!(parse_osc7_uri("https://h/x"), None);
+    }
+
+    #[test]
+    fn other_osc_sequences_are_stripped() {
+        let parsed = parse_ansi_rich(
+            "\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]9;4;1;50\x07\x1b]0;title\x1b\\\x1b]133;D;0\x07done",
+        );
+        assert_eq!(parsed.plain_text, "$ lsdone");
+        assert!(parsed.events.is_empty());
+        assert!(parsed.spans.iter().all(|s| s.link.is_none()));
+    }
+
+    #[test]
+    fn osc7_malformed_is_ignored() {
+        for bad in [
+            "\x1b]7;http://host/x\x07",
+            "\x1b]7;file://hostonly\x07",
+            "\x1b]7;file:///bad%zz\x07",
+            "\x1b]7\x07",
+        ] {
+            let parsed = parse_ansi_rich(bad);
+            assert!(parsed.events.is_empty(), "{bad:?}");
+            assert_eq!(parsed.plain_text, "");
+        }
+    }
+
+    #[test]
+    fn osc8_links_spans_bel_and_st() {
+        let input = format!(
+            "see \x1b]8;;https://example.com/a;b\x07here\x1b]8;;\x07 and \x1b]8;id=1;file:///tmp/x{ST}\x1b[1mthere\x1b]8;;{ST} done"
+        );
+        let parsed = parse_ansi_rich(&input);
+        assert_eq!(parsed.plain_text, "see here and there done");
+        let linked: Vec<_> = parsed
+            .spans
+            .iter()
+            .filter_map(|s| s.link.as_deref().map(|l| (s.text.as_str(), l)))
+            .collect();
+        assert_eq!(linked, vec![("here", "https://example.com/a;b"), ("there", "file:///tmp/x")]);
+        assert!(parsed.spans.last().unwrap().link.is_none());
+        assert!(parsed.events.is_empty());
+    }
+
+    #[test]
+    fn osc8_malformed_does_not_break_text() {
+        let parsed = parse_ansi_rich("a\x1b]8\x07b\x1b]8;;\x07c");
+        assert_eq!(parsed.plain_text, "abc");
+        assert!(parsed.spans.iter().all(|s| s.link.is_none()));
+        // Unterminated link: the text still shows and keeps the link.
+        let parsed = parse_ansi_rich("\x1b]8;;https://x.dev\x07tail");
+        assert_eq!(parsed.plain_text, "tail");
+        assert_eq!(parsed.spans[0].link.as_deref(), Some("https://x.dev"));
+    }
+
+    #[test]
+    fn osc52_bel_and_st() {
+        let bel = parse_ansi_rich("\x1b]52;c;aGVsbG8gd29ybGQ=\x07");
+        assert_eq!(
+            bel.events,
+            vec![VtEvent::ClipboardWrite { selection: "c".into(), text: "hello world".into() }]
+        );
+        assert_eq!(bel.plain_text, "");
+        let st = parse_ansi_rich(&format!("\x1b]52;;w7xiZXI={ST}"));
+        assert_eq!(
+            st.events,
+            vec![VtEvent::ClipboardWrite { selection: String::new(), text: "über".into() }]
+        );
+    }
+
+    #[test]
+    fn osc52_malformed_and_queries_are_ignored() {
+        for bad in [
+            "\x1b]52;c;?\x07",
+            "\x1b]52;c;not*base64\x07",
+            "\x1b]52;c;QQ=Q\x07",
+            "\x1b]52;c\x07",
+            "\x1b]52\x07",
+        ] {
+            assert!(parse_ansi_rich(bad).events.is_empty(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn base64_decoder() {
+        assert_eq!(decode_base64(b"").unwrap(), b"");
+        assert_eq!(decode_base64(b"Zg==").unwrap(), b"f");
+        assert_eq!(decode_base64(b"Zm8=").unwrap(), b"fo");
+        assert_eq!(decode_base64(b"Zm9v").unwrap(), b"foo");
+        assert_eq!(decode_base64(b"Zm9vYg").unwrap(), b"foob");
+        assert_eq!(decode_base64(b"Zm9v\nYmFy").unwrap(), b"foobar");
+        assert!(decode_base64(b"Z").is_none());
+        assert!(decode_base64(b"Zg=").is_none());
+    }
 }

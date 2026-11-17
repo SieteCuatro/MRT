@@ -1698,11 +1698,11 @@ impl MrtGuiApp {
                 .and_then(|tab| tab.blocks.iter_mut().find(|block| block.id == *block_id));
             if let Some(block) = found_in_primary {
                 block.raw_output.push_str(&chunk);
-                (block.ansi_spans, block.plain_output) = mrt_core::parse_ansi_text(&block.raw_output);
+                block.refresh_output();
             } else if let Some(sec) = self.tabs.iter_mut().find(|tab| tab.id == *tab_id).and_then(|tab| tab.secondary_pane.as_mut()) {
                 if let Some(block) = sec.blocks.iter_mut().find(|block| block.id == *block_id) {
                     block.raw_output.push_str(&chunk);
-                    (block.ansi_spans, block.plain_output) = mrt_core::parse_ansi_text(&block.raw_output);
+                    block.refresh_output();
                 }
             }
         }

@@ -1,6 +1,7 @@
 use crate::theme::{chip, ghost_button, icon_button, primary_button, secondary_button, Palette, Radius};
+use crate::widgets::links::{render_spans_with_links, LinkRequest, SpanStyle};
 use egui::{Color32, RichText, Ui};
-use mrt_core::{CommandBlock, HttpExchangeSummary, StructuredOutput, ViewMode};
+use mrt_core::{ClipboardDecision, CommandBlock, HttpExchangeSummary, StructuredOutput, ViewMode};
 use mrt_tools::{compare_blocks_structured, ChangeType, StructuredDiffKind};
 use serde_json::Value;
 
@@ -224,9 +225,13 @@ pub fn render_command_block(
                             render_markdown_block(ui, md);
                         }
                         _ => {
-                            render_ansi_spans(ui, block);
+                            if let Some(action) = render_ansi_spans(ui, block) {
+                                triggered_action = Some(action);
+                            }
                         }
                     }
+
+                    render_clipboard_prompt(ui, block);
 
                     // Inline AI diagnosis
                     if let Some(ref explanation) = block.ai_explanation {
@@ -334,25 +339,24 @@ pub fn render_compact_block(ui: &mut Ui, block: &CommandBlock) -> Option<BlockAc
             block.timestamp.format("%H:%M:%S")
         ));
     });
-    let mut job = egui::text::LayoutJob::default();
-    for span in &block.ansi_spans {
-        let fg = span
-            .fg
-            .map(|c| Color32::from_rgb(c.r, c.g, c.b))
-            .unwrap_or(Palette::TEXT_BODY);
-        job.append(
-            &span.text,
-            0.0,
-            egui::TextFormat {
-                font_id: egui::FontId::monospace(12.0),
-                color: fg,
-                italics: span.italic,
-                ..Default::default()
-            },
-        );
+    if block.ansi_spans.iter().any(|s| !s.text.trim().is_empty()) {
+        if let Some(link_action) = render_spans_with_links(
+            ui,
+            &block.ansi_spans,
+            &SpanStyle { font_size: 12.0, backgrounds: false },
+            block_cwd(block),
+            egui::Id::new(("link_error_compact", block.id)),
+        ) {
+            action = Some(link_request_action(link_action));
+        }
     }
-    if !job.text.trim().is_empty() {
-        ui.label(job);
+    let pending = block.pending_clipboard_requests();
+    if pending > 0 {
+        ui.label(
+            RichText::new(format!("📋 {pending} clipboard request(s) — open the block outside Mosaic to review"))
+                .size(11.0)
+                .color(Palette::ACCENT_TEXT),
+        );
     }
     if let Some(code) = block.exit_code.filter(|c| *c != 0) {
         ui.horizontal(|ui| {
@@ -404,42 +408,114 @@ pub fn render_compact_block(ui: &mut Ui, block: &CommandBlock) -> Option<BlockAc
     action
 }
 
-fn render_ansi_spans(ui: &mut Ui, block: &CommandBlock) {
+/// Directory used to resolve relative file links: the cwd the command last
+/// reported via OSC 7, else the directory it was started in.
+fn block_cwd(block: &CommandBlock) -> &str {
+    block.reported_cwd.as_deref().unwrap_or(&block.cwd)
+}
+
+fn link_request_action(request: LinkRequest) -> BlockAction {
+    match request {
+        LinkRequest::RunCommand(cmd) => BlockAction::Rerun(cmd),
+    }
+}
+
+fn render_ansi_spans(ui: &mut Ui, block: &CommandBlock) -> Option<BlockAction> {
     if block.ansi_spans.is_empty() {
         ui.label(
             RichText::new("(no output)")
                 .italics()
                 .color(Palette::TEXT_MUTED),
         );
-        return;
+        return None;
+    }
+    render_spans_with_links(
+        ui,
+        &block.ansi_spans,
+        &SpanStyle { font_size: 13.0, backgrounds: true },
+        block_cwd(block),
+        egui::Id::new(("link_error", block.id)),
+    )
+    .map(link_request_action)
+}
+
+/// OSC 52: programs may ask to write the clipboard, but MRT only does it
+/// after the user approves each request here.
+fn render_clipboard_prompt(ui: &mut Ui, block: &mut CommandBlock) {
+    let pending: Vec<usize> = block
+        .clipboard_requests
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.decision == ClipboardDecision::Pending)
+        .map(|(i, _)| i)
+        .collect();
+    let Some(&first) = pending.first() else { return };
+    let request = &block.clipboard_requests[first];
+    let chars = request.text.chars().count();
+    let mut preview: String = request
+        .text
+        .chars()
+        .take(160)
+        .map(|c| match c {
+            '\n' => '⏎',
+            c if c.is_control() => '·',
+            c => c,
+        })
+        .collect();
+    if chars > 160 {
+        preview.push('…');
     }
 
-    let mut job = egui::text::LayoutJob::default();
-    for span in &block.ansi_spans {
-        let fg = span
-            .fg
-            .map(|c| Color32::from_rgb(c.r, c.g, c.b))
-            .unwrap_or(Palette::TEXT_BODY);
-        let bg = span
-            .bg
-            .map(|c| Color32::from_rgb(c.r, c.g, c.b))
-            .unwrap_or(Color32::TRANSPARENT);
+    let mut decision = None;
+    let mut deny_all = false;
+    ui.add_space(8.0);
+    egui::Frame::none()
+        .fill(Palette::BG_INSET)
+        .stroke(egui::Stroke::new(1.0_f32, Palette::ACCENT))
+        .rounding(egui::Rounding::same(Radius::BUTTON))
+        .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(
+                RichText::new(format!(
+                    "📋 This command wants to copy {chars} character{} to your clipboard (OSC 52)",
+                    if chars == 1 { "" } else { "s" }
+                ))
+                .size(12.5)
+                .color(Palette::TEXT_PRIMARY),
+            );
+            ui.label(RichText::new(preview).monospace().size(12.0).color(Palette::TEXT_BODY));
+            ui.horizontal(|ui| {
+                if ui.add(primary_button("Allow")).on_hover_text("Write this text to the clipboard").clicked() {
+                    decision = Some(ClipboardDecision::Approved);
+                }
+                if ui.add(secondary_button("Deny")).clicked() {
+                    decision = Some(ClipboardDecision::Denied);
+                }
+                if pending.len() > 1 {
+                    ui.label(
+                        RichText::new(format!("+{} more", pending.len() - 1))
+                            .size(11.5)
+                            .color(Palette::TEXT_MUTED),
+                    );
+                    if ui.add(ghost_button("Deny all")).clicked() {
+                        deny_all = true;
+                    }
+                }
+            });
+        });
 
-        let font_id = egui::FontId::monospace(13.0);
-        let mut format = egui::TextFormat {
-            font_id,
-            color: fg,
-            background: bg,
-            italics: span.italic,
-            ..Default::default()
-        };
-        if span.underline {
-            format.underline = egui::Stroke::new(1.0_f32, fg);
+    if deny_all {
+        for i in pending {
+            block.clipboard_requests[i].decision = ClipboardDecision::Denied;
         }
-        job.append(&span.text, 0.0, format);
+    } else if let Some(decision) = decision {
+        if decision == ClipboardDecision::Approved {
+            let text = block.clipboard_requests[first].text.clone();
+            ui.output_mut(|o| o.copied_text = text);
+        }
+        block.clipboard_requests[first].decision = decision;
     }
-
-    ui.label(job);
 }
 
 fn render_json_tree(ui: &mut Ui, key: &str, value: &Value, default_open: bool) {

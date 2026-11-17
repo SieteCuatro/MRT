@@ -13,6 +13,7 @@ pub mod term;
 pub mod theme_file;
 pub mod shell_session;
 pub mod vt;
+pub mod worktree;
 
 pub use activity::{
     detect_agent_cli, parse_activity_signals, ActivitySignal, ActivitySnapshot, ActivityState,

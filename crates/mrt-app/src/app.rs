@@ -92,6 +92,18 @@ pub struct TerminalTab {
     /// Agent sandbox tab (`:sandbox`): commands always start in this folder, and every
     /// command the Safety Gate does not rate Safe waits for approval, whatever the config.
     pub sandbox_root: Option<PathBuf>,
+    /// Worktree tab (`:worktree <branch>`): the git worktree it works in. Closing the
+    /// tab offers to remove the worktree folder when it has no uncommitted changes.
+    pub worktree: Option<mrt_core::worktree::Worktree>,
+}
+
+/// Closing a worktree tab waits for this prompt: remove the worktree folder or keep it.
+#[derive(Clone)]
+pub struct PendingWorktreeClose {
+    pub tab_id: Uuid,
+    pub worktree: mrt_core::worktree::Worktree,
+    /// Files with uncommitted changes, or why git could not tell.
+    pub changed: Result<Vec<String>, String>,
 }
 
 impl TerminalTab {
@@ -115,6 +127,7 @@ impl TerminalTab {
             remote: None,
             broadcast: false,
             sandbox_root: None,
+            worktree: None,
         }
     }
 
@@ -580,6 +593,8 @@ pub struct MrtGuiApp {
     pub tx: Sender<AsyncWorkerEvent>,
     pub rx: Receiver<AsyncWorkerEvent>,
     pub pending_safety: Option<PendingSafetyApproval>,
+    /// A worktree tab waiting for "remove the folder or keep it" before it closes.
+    pub pending_worktree_close: Option<PendingWorktreeClose>,
     pub show_command_palette: bool,
     pub palette_query: String,
     pub busy_count: usize,
@@ -853,6 +868,7 @@ impl MrtGuiApp {
                 blocks: Vec::new(),
                 activity: None,
                 sandbox_root: None,
+                worktree: None,
             }];
         }
         if let Ok(mut active_guard) = mcp_state.active_tab_id.lock() {
@@ -897,6 +913,7 @@ impl MrtGuiApp {
             tx,
             rx,
             pending_safety: None,
+            pending_worktree_close: None,
             show_command_palette: false,
             palette_query: String::new(),
             busy_count: 0,
@@ -1747,7 +1764,49 @@ impl MrtGuiApp {
         }
     }
 
+    /// Closes a tab. A worktree tab first asks whether to remove its worktree folder.
     fn close_terminal(&mut self, id: Uuid) {
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        if let Some(worktree) = self.tabs.iter().find(|t| t.id == id).and_then(|t| t.worktree.clone()) {
+            let changed = mrt_core::worktree::changed_files(&worktree.path);
+            self.pending_worktree_close = Some(PendingWorktreeClose { tab_id: id, worktree, changed });
+            return;
+        }
+        self.close_terminal_now(id);
+    }
+
+    /// Answers the worktree prompt: closes the tab and, with `remove_folder`, removes
+    /// the worktree (git refuses when it has uncommitted changes; the branch stays).
+    fn finish_worktree_close(&mut self, remove_folder: bool) {
+        let Some(pending) = self.pending_worktree_close.take() else { return };
+        self.close_terminal_now(pending.tab_id);
+        if remove_folder {
+            let notice_tab = self.tabs[self.active_tab].id;
+            let cwd = self.tabs[self.active_tab].cwd.clone();
+            let command = format!(":worktree remove {}", pending.worktree.branch);
+            let block = match mrt_core::worktree::remove(&pending.worktree) {
+                Ok(()) => CommandBlock::new_completed(
+                    &command,
+                    PROCESS_BLOCK_SHELL,
+                    cwd.display().to_string(),
+                    format!(
+                        "Removed the worktree folder {}. The branch {} and its commits are still in {}.",
+                        pending.worktree.path.display(),
+                        pending.worktree.branch,
+                        pending.worktree.repo.display()
+                    ),
+                    0,
+                    0,
+                ),
+                Err(e) => Self::process_error_block(&command, &cwd, format!("Kept the worktree folder: {e}")),
+            };
+            self.push_block(notice_tab, block);
+        }
+    }
+
+    fn close_terminal_now(&mut self, id: Uuid) {
         if self.tabs.len() <= 1 {
             return;
         }
@@ -2328,6 +2387,7 @@ impl MrtGuiApp {
                         blocks,
                         activity: Some(t.activity.snapshot(now)),
                         sandbox_root: t.sandbox_root.clone(),
+                        worktree: t.worktree.clone(),
                     }
                 })
                 .collect();
@@ -2364,6 +2424,7 @@ impl MrtGuiApp {
                             } else {
                                 let mut new_tab = TerminalTab::new(mt.title, shell_idx, mt.cwd);
                                 new_tab.id = mt.id;
+                                new_tab.worktree = mt.worktree;
                                 new_tab.blocks = mt.blocks;
                                 rebuilt.push(new_tab);
                             }
@@ -2462,6 +2523,10 @@ impl MrtGuiApp {
             }
         }
         if let Some(cmd_text) = pending_submit {
+            // Submitted, so the draft leaves the input box as if the user pressed Enter.
+            if let Some(tab) = self.tabs.get_mut(self.active_tab).filter(|t| t.input_line == cmd_text) {
+                tab.input_line.clear();
+            }
             self.submit_input(Some(cmd_text), false);
         }
     }
@@ -2865,6 +2930,20 @@ impl MrtGuiApp {
             };
             let shell_label = shell.kind.short_label().to_string();
             self.spawn_assist(tab_id, cwd, shell_label, raw_input, question);
+            return;
+        }
+
+        if raw_input == ":worktree" || raw_input.starts_with(":worktree ") {
+            let args: Vec<&str> = raw_input.trim_start_matches(":worktree").split_whitespace().collect();
+            match args.as_slice() {
+                [] | ["list"] => self.list_worktrees(tab_id, &cwd, &raw_input),
+                [branch] => self.open_worktree_tab(tab_id, &cwd, &raw_input, branch, None),
+                [branch, base] => self.open_worktree_tab(tab_id, &cwd, &raw_input, branch, Some(base)),
+                _ => self.push_block(
+                    tab_id,
+                    Self::process_error_block(&raw_input, &cwd, "Usage: :worktree <branch> [base] | :worktree list"),
+                ),
+            }
             return;
         }
 
@@ -4563,6 +4642,128 @@ impl MrtGuiApp {
         }
     }
 
+    /// `:worktree <branch> [base]`: opens a tab in a git worktree for `branch` of the
+    /// repository that contains `cwd`, creating the worktree (and the branch, from
+    /// `base` or HEAD) when needed. A tab already open on that worktree is focused.
+    pub(crate) fn open_worktree_tab(&mut self, tab_id: Uuid, cwd: &std::path::Path, command: &str, branch: &str, base: Option<&str>) {
+        let worktree = match mrt_core::worktree::create(cwd, branch, base) {
+            Ok(wt) => wt,
+            Err(e) => {
+                self.push_block(tab_id, Self::process_error_block(command, cwd, e));
+                return;
+            }
+        };
+        if let Some(pos) = self.tabs.iter().position(|t| t.worktree.as_ref().is_some_and(|w| w.path == worktree.path)) {
+            self.active_tab = pos;
+            return;
+        }
+        let shell_idx = self.tabs.get(self.active_tab).map(|t| t.active_shell_idx).unwrap_or(0);
+        let mut tab = TerminalTab::new(worktree.branch.clone(), shell_idx, worktree.path.clone());
+        tab.worktree = Some(worktree.clone());
+        self.tabs.push(tab);
+        self.active_tab = self.tabs.len() - 1;
+        self.fire_hooks(crate::hooks::HookEvent {
+            event: "tab_opened",
+            cwd: worktree.path.display().to_string(),
+            tab_title: worktree.branch,
+            ..Default::default()
+        });
+    }
+
+    /// `:worktree list`: the worktrees of the repository that contains `cwd`.
+    fn list_worktrees(&mut self, tab_id: Uuid, cwd: &std::path::Path, command: &str) {
+        let block = match mrt_core::worktree::list(cwd) {
+            Ok(entries) => {
+                let mut out = String::from("branch\tpath\topen in MRT\n");
+                for entry in &entries {
+                    let open = self.tabs.iter().any(|t| t.worktree.as_ref().is_some_and(|w| w.path == entry.path));
+                    let branch = match (&entry.branch, entry.main) {
+                        (Some(b), true) => format!("{b} (main checkout)"),
+                        (Some(b), false) => b.clone(),
+                        (None, _) => "(detached)".to_string(),
+                    };
+                    out.push_str(&format!("{branch}\t{}\t{}\n", entry.path.display(), if open { "yes" } else { "" }));
+                }
+                CommandBlock::new_completed(command, PROCESS_BLOCK_SHELL, cwd.display().to_string(), out, 0, 0)
+            }
+            Err(e) => Self::process_error_block(command, cwd, e),
+        };
+        self.push_block(tab_id, block);
+    }
+
+    /// The prompt shown when a worktree tab is closed.
+    fn render_worktree_close_prompt(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_worktree_close.clone() else { return };
+        let mut answer: Option<Option<bool>> = None; // Some(None) = cancel
+        egui::Window::new("Close worktree tab")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .default_width(460.0)
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(format!("Close the tab for branch {}?", pending.worktree.branch))
+                        .size(15.0)
+                        .strong()
+                        .color(Palette::TEXT_PRIMARY()),
+                );
+                ui.add_space(6.0);
+                ui.label(RichText::new(pending.worktree.path.display().to_string()).monospace().color(Palette::TEXT_SECONDARY()));
+                ui.add_space(6.0);
+                match &pending.changed {
+                    Ok(files) if files.is_empty() => {
+                        ui.label("The worktree has no uncommitted changes. Removing the folder keeps the branch and its commits in the repository.");
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Close and remove folder").clicked() {
+                                answer = Some(Some(true));
+                            }
+                            if ui.button("Close and keep folder").clicked() {
+                                answer = Some(Some(false));
+                            }
+                            if ui.button("Cancel").clicked() {
+                                answer = Some(None);
+                            }
+                        });
+                    }
+                    other => {
+                        match other {
+                            Ok(files) => {
+                                ui.label(format!(
+                                    "The worktree has {} uncommitted change{}, so its folder is kept:",
+                                    files.len(),
+                                    if files.len() == 1 { "" } else { "s" }
+                                ));
+                                for file in files.iter().take(8) {
+                                    ui.label(RichText::new(file).monospace());
+                                }
+                                if files.len() > 8 {
+                                    ui.label(format!("… and {} more", files.len() - 8));
+                                }
+                            }
+                            Err(e) => {
+                                ui.label(format!("Git could not check the worktree ({e}), so its folder is kept."));
+                            }
+                        }
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Close tab").clicked() {
+                                answer = Some(Some(false));
+                            }
+                            if ui.button("Cancel").clicked() {
+                                answer = Some(None);
+                            }
+                        });
+                    }
+                }
+            });
+        match answer {
+            Some(Some(remove)) => self.finish_worktree_close(remove),
+            Some(None) => self.pending_worktree_close = None,
+            None => {}
+        }
+    }
+
     /// Opens an agent sandbox tab rooted at `root` (`:sandbox [folder]`).
     pub(crate) fn open_sandbox_tab(&mut self, root: PathBuf) {
         let root = match std::fs::canonicalize(&root) {
@@ -5128,6 +5329,7 @@ impl eframe::App for MrtGuiApp {
         self.render_header(ctx);
         self.render_config_notice(ctx);
         self.render_agent_ptys(ctx);
+        self.render_worktree_close_prompt(ctx);
 
         if self.show_explorer {
             self.render_explorer(ctx);
@@ -7001,6 +7203,124 @@ error: test failed
         let layout = app.capture_layout();
         assert_eq!(layout.tabs[1].sandbox.as_ref(), Some(&sandbox));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn worktree_tabs_open_once_and_ask_before_removing_their_folder() {
+        let git_ok = std::process::Command::new("git").arg("--version").output().is_ok_and(|o| o.status.success());
+        if !git_ok {
+            return;
+        }
+        let base = std::env::temp_dir().join(format!("mrt-wt-app-{}", Uuid::new_v4().simple()));
+        let repo = base.join("proj");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let mut cmd = std::process::Command::new("git");
+            cmd.current_dir(&repo).args(args);
+            #[cfg(windows)]
+            {
+                // Its own hidden console: Ctrl+C sent to MRT's test console must not reach it.
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x08000000);
+            }
+            let out = cmd.output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {:?} {}", out.status, String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["config", "user.name", "MRT test"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(repo.join("a.txt"), "a").unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-q", "-m", "first"]);
+
+        let mut app = MrtGuiApp::new();
+        app.tabs[0].cwd = repo.clone();
+        app.submit_input(Some(":worktree feature/a".into()), false);
+        assert_eq!(app.tabs.len(), 2, "{:?}", app.tabs[0].blocks.last().map(|b| b.plain_output.clone()));
+        let wt = app.tabs[1].worktree.clone().expect("worktree tab");
+        assert_eq!(app.tabs[1].title, "feature/a");
+        assert_eq!(app.tabs[1].cwd, wt.path);
+        assert!(wt.path.join("a.txt").exists());
+        assert_eq!(app.active_tab, 1);
+
+        // Asking again focuses the same tab instead of opening another.
+        app.active_tab = 0;
+        app.submit_input(Some(":worktree feature/a".into()), false);
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active_tab, 1);
+
+        // `:worktree list` marks the open one; a bad name is an error block.
+        app.active_tab = 0;
+        app.submit_input(Some(":worktree list".into()), false);
+        let listing = app.tabs[0].blocks.last().unwrap().plain_output.clone();
+        assert!(listing.contains("feature/a") && listing.contains("main (main checkout)"), "{listing}");
+        app.submit_input(Some(":worktree bad..name".into()), false);
+        assert_eq!(app.tabs[0].blocks.last().unwrap().exit_code, Some(1));
+        assert_eq!(app.tabs.len(), 2);
+
+        // Mirrored to MCP and saved in the layout.
+        app.sync_mcp_from_gui();
+        let mirrored = app.mcp_host.local_server_state.tabs.lock().unwrap()[1].worktree.clone();
+        assert_eq!(mirrored.as_ref(), Some(&wt));
+        assert_eq!(app.capture_layout().tabs[1].worktree.as_ref(), Some(&wt));
+
+        // With uncommitted changes the folder is always kept.
+        std::fs::write(wt.path.join("draft.txt"), "x").unwrap();
+        app.close_terminal(app.tabs[1].id);
+        assert_eq!(app.tabs.len(), 2, "closing waits for the prompt");
+        let pending = app.pending_worktree_close.clone().expect("prompt");
+        assert_eq!(pending.changed.as_ref().unwrap(), &vec!["draft.txt".to_string()]);
+        app.pending_worktree_close = None; // Cancel
+        assert_eq!(app.tabs.len(), 2);
+
+        // Clean: "Close and remove folder" removes the worktree and keeps the branch.
+        std::fs::remove_file(wt.path.join("draft.txt")).unwrap();
+        app.close_terminal(app.tabs[1].id);
+        assert!(app.pending_worktree_close.as_ref().unwrap().changed.as_ref().unwrap().is_empty());
+        app.finish_worktree_close(true);
+        assert!(app.pending_worktree_close.is_none());
+        assert_eq!(app.tabs.len(), 1);
+        assert!(!wt.path.exists());
+        let notice = app.tabs[0].blocks.last().unwrap();
+        assert_eq!(notice.exit_code, Some(0), "{}", notice.plain_output);
+        git(&["rev-parse", "--verify", "--quiet", "refs/heads/feature/a"]); // the branch is kept
+
+        // Agents get the same through mrt_create_tab.
+        let state = app.mcp_host.local_server_state.clone();
+        let request = mrt_mcp::JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/call".into(),
+            params: Some(serde_json::json!({ "name": "mrt_create_tab", "arguments": {
+                "cwd": repo.display().to_string(), "worktree": { "branch": "agent-b", "base": "main" } } })),
+        };
+        let response = app.runtime.block_on(mrt_mcp::handle_mcp_jsonrpc(&state, request)).unwrap();
+        let result = response.result.unwrap();
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let created: serde_json::Value = serde_json::from_str(text).expect(text);
+        assert_eq!(created["title"], "agent-b");
+        assert_eq!(created["worktree"]["branch"], "agent-b");
+        app.process_mcp_ui_commands();
+        let agent_tab = app.tabs.iter().find(|t| t.title == "agent-b").expect("tab from MCP");
+        let agent_wt = agent_tab.worktree.clone().expect("worktree from MCP");
+        assert_eq!(agent_tab.cwd, agent_wt.path);
+        app.close_terminal(agent_tab.id);
+        app.finish_worktree_close(true);
+        assert!(!agent_wt.path.exists());
+
+        // A command an agent submits through mrt_control_gui leaves the input box empty.
+        let request = mrt_mcp::JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(serde_json::json!(2)),
+            method: "tools/call".into(),
+            params: Some(serde_json::json!({ "name": "mrt_control_gui", "arguments": { "input_text": ":worktree list", "submit_input": true } })),
+        };
+        app.runtime.block_on(mrt_mcp::handle_mcp_jsonrpc(&state, request)).unwrap();
+        app.process_mcp_ui_commands();
+        assert_eq!(app.tabs[app.active_tab].input_line, "");
+        assert_eq!(app.tabs[app.active_tab].blocks.last().unwrap().command, ":worktree list");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

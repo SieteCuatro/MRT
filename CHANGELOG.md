@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### New
+- **Worktree tabs**: `:worktree <branch> [base]` opens a tab in a git worktree for the branch (in `<repo>.worktrees/<branch>`, next to the repository), so several agents can change the same repository at once without touching each other's files; `:worktree list` lists them. Agents get the same with `mrt_create_tab` and `"worktree": { "branch": … }`. Closing a worktree tab asks whether to remove the folder when it has no uncommitted changes; the branch and its commits always stay.
+
+### Fixed
+- A command an agent submits with `mrt_control_gui` (`input_text` + `submit_input`) no longer stays in the input box.
+
 ## v0.2.2 — 2026-11-17
 
 ### Fixed

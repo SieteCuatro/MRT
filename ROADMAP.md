@@ -21,7 +21,7 @@ MRT already covers much of this: vertical tab sidebar, scrollback search, key ta
 
 ## Milestone 7 — Agents working in parallel
 
-- **Worktree tabs.** `:worktree <branch>` (and an MCP tool) creates a git worktree for a new branch next to the repository, opens a tab in it, and labels the tab with the branch. Closing the tab offers to remove the worktree if it has no uncommitted changes. *Done when:* two agents run in two worktree tabs of the same repository without touching each other's files.
+- **Worktree tabs.** *(implemented: `:worktree <branch> [base]`, `:worktree list`, and `mrt_create_tab` with `worktree`; closing the tab asks to remove a clean worktree and always keeps one with uncommitted changes)* `:worktree <branch>` (and an MCP tool) creates a git worktree for a new branch next to the repository, opens a tab in it, and labels the tab with the branch. Closing the tab offers to remove the worktree if it has no uncommitted changes. *Done when:* two agents run in two worktree tabs of the same repository without touching each other's files.
 - **Review before merge.** A worktree tab shows its changes against the base branch (files changed, a diff block) and has Merge, Open PR (`gh`, when installed) and Discard actions, each through the Safety Gate.
 - **Send work to an idle tab.** `mrt send --idle <repo>` and an MCP option pick a tab in the same repository that is not running anything, so an agent can queue work while another tab is busy.
 - **AI cost.** Show the tokens and the estimated cost of each AI request (per provider price table in the config), per tab and per session.

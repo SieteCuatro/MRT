@@ -103,7 +103,7 @@ All built-in tools are defined in [`MrtMcpServerState::built_in_tools()`](../cra
 | :--- | :--- | :--- |
 | **`mrt_get_session_state`** | Returns OS, arch, active CWD, active tab ID, all open tabs (each with its `activity`), active PTY count, GUI attachment flag, and available shells. | *(none)* |
 | **`mrt_list_tabs`** | Lists all terminal tabs with index, UUID, title, active status, shell ID/name, CWD, block count, and `activity`. | *(none)* |
-| **`mrt_create_tab`** | Opens a new terminal tab with optional title, shell profile, working directory, and focus activation. | `title?`, `shell?`, `cwd?`, `activate?` (default `true`) |
+| **`mrt_create_tab`** | Opens a new terminal tab with optional title, shell profile, working directory, and focus activation. With `worktree`, the tab works in its own git worktree for that branch (see below). | `title?`, `shell?`, `cwd?`, `activate?` (default `true`), `worktree?` (`{ "branch", "base"? }`) |
 | **`mrt_switch_tab`** | Switches the active terminal tab by UUID, 0-based index, or title substring. | `tab_id` *(required)* |
 | **`mrt_close_tab`** | Closes a tab by UUID, index, or title substring (always keeps at least 1 tab open). | `tab_id` *(required)* |
 | **`mrt_configure_tab`** | Updates a tab's shell profile, working directory (`cwd`), or title. | `tab_id?`, `shell?`, `cwd?`, `title?` |
@@ -182,6 +182,10 @@ Remote devices paired with `mrt share` reach these same tools through an encrypt
 `mrt server` serves the same tools headless and keeps PTY sessions running between client connections; `mrt_pty_read` with `drain: true` returns only what a client has not read yet. See [SESSION_SERVER.md](SESSION_SERVER.md).
 
 ### 3.6 Agent sandbox tabs
+
+### Worktree tabs for parallel agents
+
+`mrt_create_tab` with `"worktree": { "branch": "agent-a", "base": "main" }` creates a git worktree for the branch of the repository that contains `cwd` (or the active tab's folder), in `<repo>.worktrees/<branch>` next to the repository, and opens the tab there, titled with the branch unless `title` is given. A new branch starts from `base` (default: the current commit); an existing branch is checked out; a branch that already has a worktree reuses it. The response and `mrt_list_tabs` include `"worktree": { "branch", "path", "repo" }`. Give each agent its own branch so they never edit the same files. `mrt_close_tab` closes the tab and keeps the worktree folder; in the window, closing a worktree tab asks the user whether to remove it. The user can open the same tabs with `:worktree <branch> [base]`.
 
 A tab opened with `:sandbox [folder]` is marked with `"sandbox": "<folder>"` in `mrt_list_tabs`. `mrt_run_command` aimed at it runs only commands the Safety Gate rates **Safe**, always from the sandbox folder (a `cwd` argument is ignored, and `cd` does not move the tab); anything else is refused with a message telling the agent to send it with `mrt_control_gui` (`input_text` + `submit_input`), so the user approves it in the window. This lets an agent work unattended without being able to change things outside the folder silently.
 

@@ -38,6 +38,9 @@ pub struct SavedTab {
     /// Root of an agent sandbox tab.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<PathBuf>,
+    /// Git worktree of a worktree tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<mrt_core::worktree::Worktree>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -88,6 +91,7 @@ impl MrtGuiApp {
                     cwd: tab.cwd.clone(),
                     remote: tab.remote.clone(),
                     sandbox: tab.sandbox_root.clone(),
+                    worktree: tab.worktree.clone(),
                     split: tab.secondary_pane.as_ref().and_then(|pane| {
                         let direction = match tab.split_direction {
                             SplitDirection::Horizontal => "horizontal",
@@ -130,6 +134,8 @@ impl MrtGuiApp {
                     tab.sandbox_root = Some(root.clone());
                     tab.cwd = root.clone();
                 }
+                // A worktree removed outside MRT leaves a normal tab.
+                tab.worktree = saved.worktree.clone().filter(|w| w.path.is_dir());
                 if let Some(split) = &saved.split {
                     let direction = match split.direction.as_str() {
                         "vertical" => SplitDirection::Vertical,
@@ -192,6 +198,7 @@ mod tests {
                     cwd: dir.clone(),
                     remote: None,
                     sandbox: None,
+                    worktree: None,
                     split: Some(SavedSplit { direction: "vertical".into(), shell: "no-such-shell".into(), cwd: dir.join("gone") }),
                 },
                 SavedTab {
@@ -202,6 +209,7 @@ mod tests {
                     remote: Some(vec!["me@box".into()]),
                     split: None,
                     sandbox: None,
+                    worktree: None,
                 },
             ],
         };

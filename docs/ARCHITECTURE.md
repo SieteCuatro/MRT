@@ -54,6 +54,7 @@ flowchart LR
 
 ### 1. `mrt-core` — shells, PTYs, terminal emulation, blocks, safety
 - **Shell discovery and execution (`pty.rs`)**: finds PowerShell 7, Windows PowerShell, CMD, Git Bash, WSL, Bash, Zsh, Fish, Nushell and `sh`; runs one-off commands with 64 KiB streaming reads (`execute_command_streaming_with_pid`); `InteractivePty` has a local and a **hosted** backend (`pty_host.rs`) with the same API.
+- **Git worktrees (`worktree.rs`)**: `create`, `list`, `changed_files` and `remove` over the `git` command line (no console window on Windows) for worktree tabs; worktrees go in `<repo>.worktrees/<branch>` next to the repository.
 - **Persistent shells (`shell_session.rs`, `shell_integration.rs`)**: one PTY shell per tab with the OSC 133 / OSC 7 integration injected (or typed in over SSH, `spawn_remote`); the `Normalizer` turns ConPTY repaints back into text and passes OSC 8 / 52 / 1337, kitty APC and Sixel DCS through.
 - **VT parsing (`vt.rs`, `images.rs`, `theme_file.rs`)**: `VtStream` parses streamed output chunk by chunk into styled spans, plain text, OSC events and inline images (iTerm2, kitty, Sixel); the ANSI palette can come from a theme file.
 - **Terminal grid (`term.rs`, `grid_images.rs`)**: `TerminalEmulator` wraps `alacritty_terminal` for full-screen programs and places image sequences (taken out by `GraphicsSplitter`) in the grid.

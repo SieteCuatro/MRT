@@ -18,12 +18,16 @@ fn temp_dir(label: &str) -> PathBuf {
     dir
 }
 
-struct Kill(Vec<Child>);
+/// Kills the processes, then removes the test's data folders.
+struct Kill(Vec<Child>, Vec<PathBuf>);
 impl Drop for Kill {
     fn drop(&mut self) {
         for child in &mut self.0 {
             let _ = child.kill();
             let _ = child.wait();
+        }
+        for dir in &self.1 {
+            let _ = std::fs::remove_dir_all(dir);
         }
     }
 }
@@ -52,8 +56,8 @@ fn run(data: &Path, args: &[&str], stdin: &str) -> (i32, String, String) {
 
 #[test]
 fn share_pair_send_and_revoke_between_two_data_folders() {
-    let (host_data, guest_data) = (temp_dir("host"), temp_dir("guest"));
-    let mut procs = Kill(Vec::new());
+    let (host_data, guest_data, intruder_data) = (temp_dir("host"), temp_dir("guest"), temp_dir("intruder"));
+    let mut procs = Kill(Vec::new(), vec![host_data.clone(), guest_data.clone(), intruder_data.clone()]);
     procs.0.push(Command::new(mrt()).arg("server").env("MRT_DATA_DIR", &host_data).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
     wait_for_file(&host_data.join("mcp-bridge.json"));
 
@@ -97,7 +101,7 @@ fn share_pair_send_and_revoke_between_two_data_folders() {
     assert_eq!(status, 0);
     assert!(out.trim_start().starts_with('['), "{out}");
 
-    let (status, _, _) = run(&temp_dir("intruder"), &["pair", &listen, "--name", "intruder"], "000000\n");
+    let (status, _, _) = run(&intruder_data, &["pair", &listen, "--name", "intruder"], "000000\n");
     assert_ne!(status, 0, "a wrong code is refused");
 
     let (status, _, _) = run(&host_data, &["share", "--revoke", "e2e-laptop"], "");
@@ -111,7 +115,7 @@ fn share_pair_send_and_revoke_between_two_data_folders() {
 #[test]
 fn session_host_process_keeps_jobs_for_the_next_window() {
     let data = temp_dir("session-host");
-    let mut procs = Kill(Vec::new());
+    let mut procs = Kill(Vec::new(), vec![data.clone()]);
     procs.0.push(Command::new(mrt()).arg("session-host").env("MRT_DATA_DIR", &data).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
     let file = data.join("session-host.json");
     wait_for_file(&file);

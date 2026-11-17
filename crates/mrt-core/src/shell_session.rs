@@ -596,6 +596,10 @@ impl Scratch {
     fn create(kind: &ShellKind, load_user: bool) -> anyhow::Result<Self> {
         let dir =
             std::env::temp_dir().join(format!("mrt-session-{}", uuid::Uuid::new_v4().simple()));
+        static PRUNED: std::sync::Once = std::sync::Once::new();
+        PRUNED.call_once(|| {
+            prune_stale_scratch_dirs(&std::env::temp_dir(), STALE_SCRATCH_AGE);
+        });
         std::fs::create_dir_all(&dir)?;
         let script = generate_shell_integration_script(kind.clone());
         let (init_name, init_body, command_name) = match kind {
@@ -668,6 +672,35 @@ impl Scratch {
             cmd_end,
         })
     }
+}
+
+/// Scratch folders older than this are left over from sessions that ended without
+/// cleaning up (a crash, a killed process, or a shell still holding the folder on
+/// Windows) and are removed the first time a session starts.
+const STALE_SCRATCH_AGE: Duration = Duration::from_secs(12 * 60 * 60);
+
+/// Removes `mrt-session-*` folders under `temp` last modified more than `age` ago.
+/// Returns how many were removed.
+fn prune_stale_scratch_dirs(temp: &Path, age: Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(temp) else { return 0 };
+    let now = std::time::SystemTime::now();
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with("mrt-session-") {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|elapsed| elapsed >= age);
+        if old && entry.path().is_dir() && std::fs::remove_dir_all(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 impl Drop for Scratch {
@@ -1149,6 +1182,21 @@ impl Perform for Normalizer {
 mod tests {
     use super::*;
     use crate::pty::discover_shells;
+
+    #[test]
+    fn stale_scratch_folders_are_pruned() {
+        let temp = std::env::temp_dir().join(format!("mrt-prune-test-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(temp.join("mrt-session-old")).unwrap();
+        std::fs::create_dir_all(temp.join("other-folder")).unwrap();
+        std::fs::write(temp.join("mrt-session-old").join("init.sh"), b"x").unwrap();
+        // Nothing is old enough yet.
+        assert_eq!(prune_stale_scratch_dirs(&temp, Duration::from_secs(3600)), 0);
+        // With a zero age everything counts as stale, but only mrt-session-* folders go.
+        assert_eq!(prune_stale_scratch_dirs(&temp, Duration::ZERO), 1);
+        assert!(!temp.join("mrt-session-old").exists());
+        assert!(temp.join("other-folder").exists());
+        std::fs::remove_dir_all(&temp).unwrap();
+    }
 
     fn normalize(input: &[u8]) -> Vec<Piece> {
         let mut parser = vte::Parser::new();

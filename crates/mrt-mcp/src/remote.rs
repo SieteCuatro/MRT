@@ -72,7 +72,7 @@ fn unhex(text: &str) -> Option<Vec<u8>> {
 
 /// Default location of the pair store.
 pub fn pair_store_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "MRT").map(|d| d.data_local_dir().join("remote.json"))
+    mrt_core::data_dir().map(|dir| dir.join("remote.json"))
 }
 
 impl PairStore {
@@ -94,6 +94,34 @@ impl PairStore {
     pub fn ephemeral() -> Result<Self> {
         let keys = Builder::new(PAIRED_PATTERN.parse()?).generate_keypair()?;
         Ok(PairStore { private_key: hex(&keys.private), public_key: hex(&keys.public), ..Default::default() })
+    }
+
+    /// Saves only the paired guests, keeping what another MRT process (`mrt pair`)
+    /// wrote to the file meanwhile.
+    pub fn save_guests(&self) -> Result<()> {
+        self.save_part(true)
+    }
+
+    /// Saves only the paired hosts (see [`save_guests`](Self::save_guests)).
+    pub fn save_hosts(&self) -> Result<()> {
+        self.save_part(false)
+    }
+
+    fn save_part(&self, guests: bool) -> Result<()> {
+        let Some(path) = &self.path else { return Ok(()) };
+        let on_disk = std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str::<PairStore>(&t).ok());
+        match on_disk {
+            Some(mut merged) => {
+                if guests {
+                    merged.guests = self.guests.clone();
+                } else {
+                    merged.hosts = self.hosts.clone();
+                }
+                merged.path = Some(path.clone());
+                merged.save()
+            }
+            None => self.save(),
+        }
     }
 
     pub fn save(&self) -> Result<()> {
@@ -313,7 +341,7 @@ async fn handle_guest(mut stream: TcpStream, host: &ShareHost) -> Result<()> {
                 let mut store = host.store.lock().map_err(|_| anyhow!("store lock"))?;
                 store.guests.retain(|g| g.key != hex(&key));
                 store.guests.push(PairedDevice { name: name.clone(), key: hex(&key), address: None });
-                store.save()?;
+                store.save_guests()?;
             }
             channel.send(&serde_json::to_vec(&serde_json::json!({ "approved": approved, "host": host.host_name }))?).await?;
             return Ok(());
@@ -408,6 +436,21 @@ mod tests {
         let guest = PairStore::ephemeral().unwrap();
         assert!(pair_with_host(&address, "123456", "phone", &guest).await.is_err());
         assert!(host.store.lock().unwrap().guests.is_empty());
+    }
+
+    #[test]
+    fn saving_one_side_keeps_the_other() {
+        let path = std::env::temp_dir().join(format!("mrt-remote-{}", uuid::Uuid::new_v4())).join("remote.json");
+        let mut host_view = PairStore::load(&path).unwrap();
+        let mut guest_view = PairStore::load(&path).unwrap();
+        guest_view.hosts.push(PairedDevice { name: "box".into(), key: "aa".into(), address: Some("box:7682".into()) });
+        guest_view.save_hosts().unwrap();
+        host_view.guests.push(PairedDevice { name: "laptop".into(), key: "bb".into(), address: None });
+        host_view.save_guests().unwrap();
+        let both = PairStore::load(&path).unwrap();
+        assert_eq!(both.hosts.len(), 1);
+        assert_eq!(both.guests.len(), 1);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]

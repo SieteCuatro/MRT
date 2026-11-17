@@ -27,7 +27,7 @@ pub use config::{
     load_config, ConfigError, ConfigSources, ConfigWatcher, HookEntry, LoadedConfig,
     McpServerEntry, MrtConfig, NamedActionEntry, NotificationsConfig, SafetyConfig, HOOK_EVENTS,
 };
-pub use platform::{attach_parent_console_if_cli, hydrate_login_environment};
+pub use platform::{attach_parent_console_if_cli, data_dir, hydrate_login_environment, DATA_DIR_ENV_VAR};
 pub use pty::{
     discover_shells, execute_command_in_shell, execute_command_streaming,
     execute_command_streaming_with_pid, InteractivePty, ShellKind, ShellProfile,

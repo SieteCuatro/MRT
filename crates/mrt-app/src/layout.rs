@@ -50,7 +50,7 @@ pub struct SavedSplit {
 
 /// `layout.json` in MRT's local data folder (next to the history database).
 pub fn layout_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "MRT").map(|dirs| dirs.data_local_dir().join("layout.json"))
+    mrt_core::data_dir().map(|dir| dir.join("layout.json"))
 }
 
 pub fn load(path: &Path) -> Option<SavedLayout> {

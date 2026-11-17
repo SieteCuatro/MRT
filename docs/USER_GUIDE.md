@@ -54,7 +54,7 @@ The binary is `target/release/mrt` (`mrt.exe` on Windows).
 
 **Closing keeps running work alive.** If you close the window while commands, full-screen programs or agents' PTYs are running, MRT keeps running in the background (on Windows the window is hidden, elsewhere minimized) and a notification says so. Run `mrt` (or `mrt quick`) to get the same window back, with its tabs, finished blocks and live output. `mrt quit`, `:quit`, or closing the window when nothing runs, ends MRT. Turn this off with `terminal.keep_running_on_close = false`.
 
-**The shells live in a separate process.** MRT runs tab commands in a **session host**, `mrt session-host`, which the window starts in the background (no console window) and which keeps each tab's persistent shell. If the window closes or crashes, the host's shells and running commands go on; the next window reattaches and shows those commands, running or finished, with all their output, in the same tabs (the saved layout keeps the tab ids). `cd`, variables and activated environments also carry over to the next window. `mrt quit` stops the host as well; otherwise it exits on its own after 30 minutes with nothing running and no window. Full-screen programs (`vim`, `htop`, `:tui`) still run in the window process. Turn the host off with `terminal.session_server = false`.
+**The shells live in a separate process.** MRT runs tab commands in a **session host**, `mrt session-host`, which the window starts in the background (no console window) and which keeps each tab's persistent shell. If the window closes or crashes, the host's shells and running commands go on; the next window reattaches and shows those commands, running or finished, with all their output, in the same tabs (the saved layout keeps the tab ids). `cd`, variables and activated environments also carry over to the next window. Full-screen programs (`vim`, `htop`, `:tui`, programs in panes) and agents' PTYs run in the host too: after a crash or close, the next window puts each program back in its tab with its screen rebuilt. `mrt quit` stops the host as well; otherwise it exits on its own after 30 minutes with nothing running and no window. Turn the host off with `terminal.session_server = false`.
 
 **Upgrades never cut running sessions.** When a new MRT version starts while an older one runs, it asks the older one to quit if it is idle (the new one then reopens the saved layout), and otherwise brings the older window to the front and leaves it running until its commands finish.
 
@@ -513,6 +513,7 @@ MRT's window is exposed to screen readers through AccessKit (Windows UI Automati
 | `CODEX_HOME` | Where `mrt agent setup` finds Codex CLI's `config.toml` (default `~/.codex`). |
 | `VISUAL`, `EDITOR` | Editor used when you `Ctrl+click` a `file:line` link (`VISUAL` wins). Examples: `code`, `subl`, `nvim`. |
 | `RUST_LOG` | Log level for the GUI's stderr logs (default `info`), e.g. `RUST_LOG=debug`. |
+| `MRT_DATA_DIR` | Use this folder for MRT's data files (history, layout, bridge, session host, pairing) instead of the platform's data folder: for portable installs, or to keep test runs apart. |
 
 With no AI variables set, MRT uses its offline heuristic engine, so `#` prompts and **Diagnose** always work.
 

@@ -401,7 +401,7 @@ pub async fn serve(listener: TcpListener, token: String, state: Arc<HostState>, 
 
 /// `session-host.json` in the data folder.
 pub fn host_file() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "MRT").map(|d| d.data_local_dir().join("session-host.json"))
+    mrt_core::data_dir().map(|dir| dir.join("session-host.json"))
 }
 
 /// 64 hex characters from two random (v4) UUIDs.

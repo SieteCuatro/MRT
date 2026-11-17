@@ -181,7 +181,7 @@ impl CompanionHost {
         let token: String = raw.iter().map(|b| format!("{b:02x}")).collect();
         let Ok(mut store) = self.store.lock() else { return (500, json!({ "error": "store" })) };
         store.guests.push(PairedDevice { name: name.clone(), key: format!("web:{}", sha256_hex(token.as_bytes())), address: None });
-        let _ = store.save();
+        let _ = store.save_guests();
         (200, json!({ "token": token, "device": name }))
     }
 }

@@ -822,9 +822,9 @@ impl MrtGuiApp {
         let history_result = if cfg!(test) {
             Ok(None)
         } else {
-            directories::ProjectDirs::from("", "", "MRT")
+            mrt_core::data_dir()
                 .ok_or_else(|| anyhow::anyhow!("Unable to locate the application data directory"))
-                .and_then(|dirs| Ok(Some(crate::history::HistoryWorker::start(dirs.data_local_dir().join("history.sqlite")))))
+                .and_then(|dir| Ok(Some(crate::history::HistoryWorker::start(dir.join("history.sqlite")))))
         };
         let (history, history_error) = match history_result {
             Ok(store) => (store, None),

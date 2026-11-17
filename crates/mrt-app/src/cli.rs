@@ -364,6 +364,21 @@ pub fn handoff_to_running_instance() -> Handoff {
 
 /// Runs `mrt <subcommand> ...` and returns the process exit code.
 pub fn run(args: &[String]) -> i32 {
+    // `--host NAME` runs the subcommand on a paired host (`mrt pair`).
+    let mut args = args.to_vec();
+    let host = match args.iter().position(|a| a == "--host") {
+        Some(i) if i + 1 < args.len() => {
+            let host = args.remove(i + 1);
+            args.remove(i);
+            Some(host)
+        }
+        Some(_) => {
+            eprintln!("mrt: --host needs a paired host name");
+            return EXIT_USAGE;
+        }
+        None => None,
+    };
+    let args = &args[..];
     let inv = match parse_args(args) {
         Ok(inv) => inv,
         Err(message) => {
@@ -379,7 +394,14 @@ pub fn run(args: &[String]) -> i32 {
             return EXIT_TOOL_ERROR;
         }
     };
-    match runtime.block_on(call_tool(name, arguments)) {
+    let result = match &host {
+        Some(host) => runtime.block_on(async {
+            let mut channel = crate::remote_cli::connect(host).await.map_err(|e| (e.to_string(), EXIT_NO_WINDOW))?;
+            crate::remote_cli::call_remote(&mut channel, name, arguments).await.map_err(|e| (e.to_string(), EXIT_TOOL_ERROR))
+        }),
+        None => runtime.block_on(call_tool(name, arguments)),
+    };
+    match result {
         Ok((text, is_error)) => {
             let (out, code) = render(&inv, &text, is_error);
             if code == EXIT_TOOL_ERROR && !inv.json {

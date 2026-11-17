@@ -12,6 +12,7 @@ mod hooks;
 mod keymap;
 mod layout;
 mod notifications;
+mod remote_cli;
 mod server;
 mod shell_pool;
 mod term_input;
@@ -31,6 +32,11 @@ fn main() -> Result<()> {
     if args.get(1).map(String::as_str) == Some("agent") {
         attach_parent_console_if_cli();
         return agent_setup::run_cli(&args[2..]);
+    }
+
+    if let Some(sub @ ("share" | "pair" | "attach")) = args.get(1).map(String::as_str) {
+        attach_parent_console_if_cli();
+        std::process::exit(remote_cli::run(sub, &args[2..]));
     }
 
     if args.get(1).map(String::as_str) == Some("server") {
@@ -71,6 +77,8 @@ fn main() -> Result<()> {
         println!("  mrt agent remove    Undo `mrt agent setup` (same flags)");
         println!();
         println!("{}", cli::USAGE);
+        println!();
+        println!("{}", remote_cli::USAGE);
         println!();
         println!("  mrt server          Run a headless session server (tabs, blocks, PTYs) for the CLI and agents");
         return Ok(());

@@ -20,6 +20,8 @@ pub enum CliCommand {
     Send { command: String, shell: Option<String>, cwd: Option<String> },
     Capture { lines: Option<usize>, blocks: usize },
     Split { direction: SplitArg },
+    /// `mrt quick [show|hide|toggle]`: the quick terminal.
+    Quick { action: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -36,7 +38,7 @@ pub struct CliInvocation {
     pub json: bool,
 }
 
-pub const SUBCOMMANDS: &[&str] = &["list", "send", "capture", "split"];
+pub const SUBCOMMANDS: &[&str] = &["list", "send", "capture", "split", "quick"];
 
 pub const USAGE: &str = "\
 Control a running MRT window:
@@ -47,6 +49,9 @@ Control a running MRT window:
   mrt capture [-t TAB] [-n LINES] [-b BLOCKS] [--json]
                                           Print the last blocks of a tab (default 1 block)
   mrt split [-t TAB] h|v|off [--json]     Split a tab side by side (h), stacked (v), or unsplit
+  mrt quick [show|hide|toggle]            Bring MRT to the front or minimize it (default: toggle);
+                                          starts MRT when it is not running. Bind it to a global
+                                          hotkey in your OS for a quick terminal
 
 TAB is a tab index, UUID, or title substring (default: the active tab).
 Exit codes: 0 ok, the command's code for `send`, 2 usage error,
@@ -113,6 +118,14 @@ pub fn parse_args(args: &[String]) -> Result<CliInvocation, String> {
             };
             CliCommand::Split { direction }
         }
+        "quick" => {
+            let action = match rest.as_slice() {
+                [] => "toggle".to_string(),
+                [a] if matches!(a.as_str(), "show" | "hide" | "toggle") => a.clone(),
+                _ => return Err("quick takes show, hide or toggle".into()),
+            };
+            CliCommand::Quick { action }
+        }
         "list" | "capture" => return Err(format!("unexpected argument {:?}", rest[0])),
         other => return Err(format!("unknown subcommand {other}")),
     };
@@ -155,6 +168,11 @@ pub fn tool_request(inv: &CliInvocation) -> (&'static str, Value) {
             };
             args.insert("input_text".into(), json!(line));
             args.insert("submit_input".into(), json!(true));
+            "mrt_control_gui"
+        }
+        CliCommand::Quick { action } => {
+            args.clear();
+            args.insert("window".into(), json!(action));
             "mrt_control_gui"
         }
     };
@@ -225,7 +243,7 @@ pub fn render(inv: &CliInvocation, text: &str, is_error: bool) -> (String, i32) 
             }
             (out, 0)
         }
-        (CliCommand::Split { .. }, _) if !is_error => (String::new(), 0),
+        (CliCommand::Split { .. } | CliCommand::Quick { .. }, _) if !is_error => (String::new(), 0),
         _ => (text.to_string(), if is_error { EXIT_TOOL_ERROR } else { 0 }),
     }
 }
@@ -291,6 +309,16 @@ pub fn run(args: &[String]) -> i32 {
             }
             code
         }
+        // A quick-terminal key with no MRT running starts one.
+        Err((_, EXIT_NO_WINDOW)) if matches!(&inv.command, CliCommand::Quick { action } if action != "hide") => {
+            match std::env::current_exe().and_then(|exe| std::process::Command::new(exe).spawn()) {
+                Ok(_) => 0,
+                Err(e) => {
+                    eprintln!("mrt: could not start MRT: {e}");
+                    EXIT_NO_WINDOW
+                }
+            }
+        }
         Err((message, code)) => {
             eprintln!("mrt: {message}");
             code
@@ -324,6 +352,12 @@ mod tests {
         );
         assert_eq!(parse_args(&args("split v")).unwrap().command, CliCommand::Split { direction: SplitArg::Vertical });
         assert!(parse_args(&args("split")).is_err());
+        assert_eq!(parse_args(&args("quick")).unwrap().command, CliCommand::Quick { action: "toggle".into() });
+        assert_eq!(
+            tool_request(&parse_args(&args("quick show")).unwrap()),
+            ("mrt_control_gui", json!({ "window": "show" }))
+        );
+        assert!(parse_args(&args("quick spin")).is_err());
         assert!(parse_args(&args("send")).is_err());
         assert!(parse_args(&args("list extra")).is_err());
         assert!(parse_args(&args("capture -n many")).is_err());

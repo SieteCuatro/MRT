@@ -85,6 +85,9 @@ pub enum GuiUiCommand {
         force: bool,
         tree: bool,
     },
+    /// Shows, hides (minimizes) or toggles the window: `"show"`, `"hide"` or `"toggle"`
+    /// (the quick terminal, `mrt quick`).
+    SetWindow { action: String },
 }
 
 #[derive(Clone)]
@@ -455,7 +458,8 @@ impl MrtMcpServerState {
                         "mosaic_columns": { "type": "integer", "description": "Optional column count (1..=6) for Mosaic grid mode" },
                         "mosaic_layout": { "type": "string", "enum": ["grid", "columns", "rows", "focus"], "description": "Optional Mosaic arrangement: even grid, side-by-side columns, stacked rows, or focus (active terminal large, others beside it)" },
                         "explorer": { "type": "boolean", "description": "Optional toggle for the left Folder Explorer side panel" },
-                        "toolbox": { "type": ["boolean", "string"], "description": "Optional: true/false toggles the Toolbox side panel; \"network\" or \"task_manager\" opens it on that tab; \"hidden\" closes it" }
+                        "toolbox": { "type": ["boolean", "string"], "description": "Optional: true/false toggles the Toolbox side panel; \"network\" or \"task_manager\" opens it on that tab; \"hidden\" closes it" },
+                        "window": { "type": "string", "enum": ["show", "hide", "toggle"], "description": "Optional: bring the MRT window to the front, minimize it, or toggle between the two (quick terminal)" }
                     }
                 }),
             },
@@ -1840,6 +1844,9 @@ pub async fn execute_mrt_mcp_tool(
                     tab: Some(tab.clone()),
                 }),
                 _ => {}
+            }
+            if let Some(action) = args.get("window").and_then(|v| v.as_str()) {
+                state.notify_gui(GuiUiCommand::SetWindow { action: action.to_ascii_lowercase() });
             }
             McpToolCallResult::text(
                 serde_json::to_string_pretty(&json!({

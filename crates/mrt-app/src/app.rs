@@ -510,6 +510,9 @@ pub struct MrtGuiApp {
     pub(crate) layout_next_check: Instant,
     /// Keyboard selection in the active tab's output, while copy mode is on.
     pub(crate) copy_mode: Option<crate::copy_mode::CopyMode>,
+    /// A window action from `mrt quick` / `mrt_control_gui` (`show`, `hide`, `toggle`),
+    /// applied in the next frame.
+    pub(crate) pending_window: Option<String>,
 }
 
 /// The egui context, set once the window exists, so background threads can wake
@@ -684,6 +687,7 @@ impl MrtGuiApp {
             layout_saved: None,
             layout_next_check: Instant::now(),
             copy_mode: None,
+            pending_window: None,
         };
         app.apply_config_side_effects();
         if !cfg!(test) && app.config_state.config.terminal.restore_layout {
@@ -2079,6 +2083,7 @@ impl MrtGuiApp {
                         }
                     }
                 }
+                GuiUiCommand::SetWindow { action } => self.pending_window = Some(action),
                 GuiUiCommand::RequestProcessKill { pids, force, tree } => {
                     if let Some(tab) = self.tabs.get(self.active_tab) {
                         let (tab_id, cwd) = (tab.id, tab.cwd.clone());
@@ -3764,6 +3769,34 @@ impl MrtGuiApp {
         crate::hooks::fire(&self.runtime, hooks, &self.shells[idx], &event);
     }
 
+    /// Quick terminal: shows the window in front (as a drop-down across the top of the
+    /// screen when `terminal.quick_dropdown` is on) or minimizes it. The window is
+    /// minimized rather than hidden, so it can always be brought back from the taskbar.
+    fn apply_window_action(&mut self, ctx: &egui::Context) {
+        let Some(action) = self.pending_window.take() else { return };
+        let (focused, minimized, monitor) =
+            ctx.input(|i| (i.viewport().focused.unwrap_or(false), i.viewport().minimized.unwrap_or(false), i.viewport().monitor_size));
+        let show = match action.as_str() {
+            "show" => true,
+            "hide" => false,
+            _ => minimized || !focused,
+        };
+        if show {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            let terminal = &self.config_state.config.terminal;
+            if let (true, Some(monitor)) = (terminal.quick_dropdown, monitor) {
+                let height = monitor.y * (terminal.quick_height_percent.clamp(20, 100) as f32 / 100.0);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(0.0, 0.0)));
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(monitor.x, height)));
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        } else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        }
+    }
+
     /// Handles copy-mode keys (taking them away from the prompt) and draws its panel.
     fn update_copy_mode(&mut self, ctx: &egui::Context) {
         let Some(mut mode) = self.copy_mode.take() else { return };
@@ -4384,6 +4417,7 @@ impl eframe::App for MrtGuiApp {
         self.process_mcp_ui_commands();
         self.handle_keybindings(ctx);
         self.update_copy_mode(ctx);
+        self.apply_window_action(ctx);
         self.process_tui_session(ctx);
         self.maybe_spawn_process_tick();
         if let Some(idx) = self.notifier.update(ctx, &self.tabs, self.active_tab, self.mosaic) {

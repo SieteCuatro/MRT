@@ -172,6 +172,10 @@ pub struct TerminalConfig {
     pub max_block_output_mb: u64,
     /// Save the tabs, splits, shells and folders and reopen them at the next start.
     pub restore_layout: bool,
+    /// `mrt quick` shows the window as a drop-down across the top of the screen.
+    pub quick_dropdown: bool,
+    /// Height of the drop-down, in percent of the screen (20–100).
+    pub quick_height_percent: u8,
 }
 
 impl Default for TerminalConfig {
@@ -187,6 +191,8 @@ impl Default for TerminalConfig {
             font_fallback: Vec::new(),
             max_block_output_mb: 32,
             restore_layout: true,
+            quick_dropdown: false,
+            quick_height_percent: 45,
         }
     }
 }

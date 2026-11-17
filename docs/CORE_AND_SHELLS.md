@@ -187,6 +187,8 @@ let screen = term.snapshot();                          // cells, cursor, modes, 
 | `snapshot() -> TermSnapshot` | Visible cells (`rows` x `cols` `TermCell`s), cursor, modes and title. |
 | `row_cells(row)` | One visible row as `TermCell`s. |
 | `screen_text()` | Visible screen as plain text, one line per row, trailing spaces trimmed, wide-character spacers skipped. |
+| `text_with_colors()` | History and main screen as text with SGR color sequences (no cursor movement), leading/trailing empty lines dropped. Used for a finished TUI session's command block. |
+| `scrollback_with_colors()`, `clear_scrollback()` | History as colored lines, and dropping it (`CSI 3 J`). The GUI uses them before resizing on Windows. |
 | `scrollback_len()`, `scrollback_lines()`, `scrollback_row_cells(i)` | History that scrolled off the primary screen, oldest first. The alternate screen has no history. |
 | `cursor() -> TermCursor` | 0-based `row`/`col`, `visible` (`CSI ?25 h/l`), and `shape` (`Block`, `Underline`, `Beam` from `CSI n SP q`). |
 | `modes() -> TermModes` | What the input side needs: `app_cursor` (DECCKM), `app_keypad`, `bracketed_paste` (2004), `mouse` (`MouseMode::None/Click/Drag/Motion` for 1000/1002/1003), `sgr_mouse` (1006), `utf8_mouse` (1005), `focus_reporting` (1004), `alternate_scroll` (1007), `alt_screen`. |

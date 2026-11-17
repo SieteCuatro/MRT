@@ -67,6 +67,67 @@ impl TermColor {
     }
 }
 
+/// The SGR parameters that select `cell`'s style from the default style.
+fn sgr_params(cell: &TermCell) -> Vec<String> {
+    let mut params = Vec::new();
+    let flags = [
+        (cell.bold, "1"),
+        (cell.dim, "2"),
+        (cell.italic, "3"),
+        (cell.underline, "4"),
+        (cell.inverse, "7"),
+        (cell.hidden, "8"),
+        (cell.strikeout, "9"),
+    ];
+    params.extend(flags.iter().filter(|(on, _)| *on).map(|(_, p)| p.to_string()));
+    let color = |c: TermColor, base: u8, bright: u8, ext: u8| -> Option<String> {
+        match c {
+            TermColor::DefaultFg | TermColor::DefaultBg => None,
+            TermColor::Indexed(i) if i < 8 => Some((base + i).to_string()),
+            TermColor::Indexed(i) if i < 16 => Some((bright + i - 8).to_string()),
+            TermColor::Indexed(i) => Some(format!("{ext};5;{i}")),
+            TermColor::Rgb(rgb) => Some(format!("{ext};2;{};{};{}", rgb.r, rgb.g, rgb.b)),
+        }
+    };
+    params.extend(color(cell.fg, 30, 90, 38));
+    params.extend(color(cell.bg, 40, 100, 48));
+    params
+}
+
+/// One row as text with SGR sequences, trailing default-styled blanks removed.
+fn cells_to_sgr(cells: &[TermCell]) -> String {
+    // A space shows nothing unless it has a background, is inverse, or draws a line.
+    let is_blank = |c: &TermCell| {
+        c.ch == ' '
+            && c.zero_width.is_empty()
+            && matches!(c.bg, TermColor::DefaultBg)
+            && !c.inverse
+            && !c.underline
+            && !c.strikeout
+    };
+    let end = cells.iter().rposition(|c| !c.wide_spacer && !is_blank(c)).map_or(0, |i| i + 1);
+    let mut out = String::new();
+    let mut current: Vec<String> = Vec::new();
+    for cell in cells[..end].iter().filter(|c| !c.wide_spacer) {
+        let params = sgr_params(cell);
+        if params != current {
+            out.push_str("\x1b[0");
+            for p in &params {
+                out.push(';');
+                out.push_str(p);
+            }
+            out.push('m');
+            current = params;
+        }
+        out.push(cell.ch);
+        out.extend(cell.zero_width.iter());
+    }
+    if !current.is_empty() {
+        out.push_str("\x1b[0m");
+    }
+    out
+}
+
 /// The xterm 256-color palette entry for `index`.
 pub fn xterm_palette(index: u8) -> AnsiColor {
     const ANSI16: [(u8, u8, u8); 16] = [
@@ -525,6 +586,34 @@ impl TerminalEmulator {
             .collect()
     }
 
+    /// History and screen as text with SGR color sequences, oldest line first:
+    /// what the terminal shows, without the cursor movement that produced it.
+    /// Trailing blank cells and leading/trailing empty lines are dropped. Used to keep
+    /// a finished session as a colored command block.
+    pub fn text_with_colors(&self) -> String {
+        let mut lines = self.scrollback_with_colors();
+        lines.extend((0..self.rows()).filter_map(|r| self.row_cells(r)).map(|cells| cells_to_sgr(&cells)));
+        while lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        // Clearing the screen pushes blank lines into the history; drop the leading ones.
+        let first = lines.iter().position(|l| !l.is_empty()).unwrap_or(lines.len());
+        lines[first..].join("\n")
+    }
+
+    /// Scrollback history with SGR color sequences, oldest line first.
+    pub fn scrollback_with_colors(&self) -> Vec<String> {
+        (0..self.scrollback_len())
+            .filter_map(|i| self.scrollback_row_cells(i))
+            .map(|cells| cells_to_sgr(&cells))
+            .collect()
+    }
+
+    /// Drops the scrollback history (the visible screen is kept).
+    pub fn clear_scrollback(&mut self) {
+        self.feed(b"\x1b[3J");
+    }
+
     /// One scrollback line as cells; `index` 0 is the oldest line.
     pub fn scrollback_row_cells(&self, index: usize) -> Option<Vec<TermCell>> {
         let history = self.scrollback_len();
@@ -616,6 +705,40 @@ mod tests {
 
     fn lines(e: &TerminalEmulator) -> Vec<String> {
         e.screen_text().split('\n').map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn text_with_colors_keeps_styles_and_drops_cursor_movement() {
+        let mut e = emu(20, 4);
+        // Cursor positioning (as ConPTY emits) must not turn into blank lines.
+        e.feed(b"\x1b[2J\x1b[H\x1b[31mred\x1b[0m plain\r\n\x1b[1;42mok\x1b[0m");
+        assert_eq!(e.text_with_colors(), "\x1b[0;31mred\x1b[0m plain\n\x1b[0;1;42mok\x1b[0m");
+        // Stripping the SGR sequences gives the screen text.
+        assert_eq!(crate::vt::parse_ansi_text(&e.text_with_colors()).1, "red plain\nok");
+    }
+
+    #[test]
+    fn clear_scrollback_keeps_the_screen_and_stops_history_pulling_on_grow() {
+        let mut e = emu(10, 2);
+        e.feed(b"one\r\ntwo\r\nthree");
+        assert_eq!(e.scrollback_with_colors(), ["one"]);
+        e.clear_scrollback();
+        assert_eq!(e.scrollback_len(), 0);
+        assert_eq!(lines(&e), ["two", "three"]);
+        // Growing now adds blank rows at the bottom instead of pulling history back in,
+        // which is how conhost resizes behind ConPTY.
+        e.resize(10, 4);
+        assert_eq!(lines(&e), ["two", "three", "", ""]);
+    }
+
+    #[test]
+    fn text_with_colors_includes_scrollback_and_extended_colors() {
+        let mut e = emu(10, 2);
+        e.feed(b"one\r\ntwo\r\n\x1b[38;5;208mthree\x1b[0m");
+        assert_eq!(e.text_with_colors(), "one\ntwo\n\x1b[0;38;5;208mthree\x1b[0m");
+        let mut empty = emu(10, 3);
+        empty.feed(b"\x1b[2J");
+        assert_eq!(empty.text_with_colors(), "");
     }
 
     #[test]

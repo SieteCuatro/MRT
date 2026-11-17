@@ -238,8 +238,9 @@ pub struct ActiveTuiSession {
     pub start_time: std::time::Instant,
     /// The screen the program draws on, fed with the PTY's output every frame.
     pub term: TerminalEmulator,
-    /// The program switched to the alternate screen at least once (a full-screen TUI).
-    pub used_alt_screen: bool,
+    /// History (with colors) moved out of `term` before Windows resizes; see
+    /// `render_tui_overlay`.
+    pub saved_history: Vec<String>,
 }
 
 /// Lines of history the TUI overlay's emulator keeps.
@@ -248,21 +249,21 @@ const TUI_SCROLLBACK_LINES: usize = 5_000;
 const TUI_INITIAL_SIZE: (u16, u16) = (120, 35);
 
 impl ActiveTuiSession {
-    /// Text to store in the command block when the session ends. A full-screen
-    /// program's raw output is mostly cursor movement, so in that case the block
-    /// gets what the primary screen shows (history plus screen) as plain text;
-    /// otherwise the raw transcript, which keeps its colors.
+    /// Text to store in the command block when the session ends: what the terminal
+    /// shows (history plus the main screen) with its colors. The raw transcript is
+    /// mostly cursor movement (full-screen programs, and ConPTY on Windows), which
+    /// would turn into blank lines in a block.
     fn final_output(&self) -> String {
-        if !self.used_alt_screen {
-            let transcript = self.pty.read_transcript();
-            return if transcript.is_empty() { self.pty.drain_output() } else { transcript };
+        let current = self.term.text_with_colors();
+        if self.saved_history.is_empty() {
+            return current;
         }
-        let mut lines = self.term.scrollback_lines();
-        lines.extend(self.term.screen_text().lines().map(str::to_string));
-        while lines.last().is_some_and(|l| l.trim().is_empty()) {
-            lines.pop();
+        let mut text = self.saved_history.join("\n");
+        if !current.is_empty() {
+            text.push('\n');
+            text.push_str(&current);
         }
-        lines.join("\n")
+        text
     }
 }
 
@@ -2167,7 +2168,7 @@ impl MrtGuiApp {
                         command: tui_cmd,
                         start_time: std::time::Instant::now(),
                         term: TerminalEmulator::new(cols, rows, TUI_SCROLLBACK_LINES),
-                        used_alt_screen: false,
+                        saved_history: Vec::new(),
                     });
                 }
                 Err(e) => {
@@ -2760,7 +2761,6 @@ impl MrtGuiApp {
         if session.term.sync_deadline().is_some_and(|deadline| Instant::now() >= deadline) {
             session.term.flush_sync();
         }
-        session.used_alt_screen |= session.term.is_alt_screen();
         // Answers to the program's queries (device attributes, cursor position, size).
         let replies = session.term.take_replies();
         if !replies.is_empty() {
@@ -2800,7 +2800,6 @@ impl MrtGuiApp {
                 let rest = session.pty.drain_output();
                 if !rest.is_empty() {
                     session.term.feed(rest.as_bytes());
-                    session.used_alt_screen |= session.term.is_alt_screen();
                 }
                 let output = session.final_output();
                 let duration_ms = session.start_time.elapsed().as_millis() as u64;
@@ -2841,8 +2840,10 @@ impl MrtGuiApp {
         let screen_rect = ctx.screen_rect();
         let window_focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         let mut exit_clicked = false;
+        // The dimmed backdrop sits in the Middle layer, above the app's panels;
+        // the terminal window goes in the Foreground layer so it is drawn on top.
         egui::Area::new(egui::Id::new("tui_overlay_modal"))
-            .order(egui::Order::Foreground)
+            .order(egui::Order::Middle)
             .fixed_pos(egui::pos2(0.0, 0.0))
             .show(ctx, |ui| {
                 ui.painter().rect_filled(
@@ -2862,6 +2863,7 @@ impl MrtGuiApp {
 
                 egui::Window::new(format!("📺 {title}"))
                     .id(egui::Id::new("tui_overlay_window"))
+                    .order(egui::Order::Foreground)
                     .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                     .fixed_size(egui::vec2(win_width, win_height))
                     .collapsible(false)
@@ -2891,12 +2893,39 @@ impl MrtGuiApp {
                         let cell = crate::widgets::term_view::cell_size(ui, &font);
                         let (cols, rows) = crate::widgets::term_view::grid_dims(ui.available_size(), cell);
                         if (cols, rows) != (session.term.cols(), session.term.rows()) {
+                            // portable-pty opens ConPTY with PSEUDOCONSOLE_RESIZE_QUIRK: ConPTY
+                            // does not repaint after a resize and expects the terminal to resize
+                            // its copy the way conhost does, adding blank rows at the bottom.
+                            // alacritty instead pulls lines back from history when the screen
+                            // grows, which shifts the screen and leaves stale rows. Move the
+                            // history out first (it is kept for the command block).
+                            if cfg!(windows) && session.term.scrollback_len() > 0 {
+                                let history = session.term.scrollback_with_colors();
+                                session.saved_history.extend(history);
+                                session.term.clear_scrollback();
+                            }
                             session.term.resize(cols, rows);
                             session.term.set_cell_size_px(cell.x.round() as u16, cell.y.round() as u16);
                             let _ = session.pty.resize(cols, rows);
                         }
                         let snapshot = session.term.snapshot();
-                        crate::widgets::term_view::paint_terminal(ui, &snapshot, &font, cell, window_focused);
+                        let response =
+                            crate::widgets::term_view::paint_terminal(ui, &snapshot, &font, cell, window_focused);
+                        // Keep keyboard focus on the terminal so the command input underneath
+                        // does not also receive the keys, and so Tab, arrows and Esc stay with
+                        // the program instead of moving egui's focus.
+                        response.request_focus();
+                        ui.memory_mut(|m| {
+                            m.set_focus_lock_filter(
+                                response.id,
+                                egui::EventFilter {
+                                    tab: true,
+                                    horizontal_arrows: true,
+                                    vertical_arrows: true,
+                                    escape: true,
+                                },
+                            )
+                        });
                     });
             });
         if exit_clicked {

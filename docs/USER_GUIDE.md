@@ -190,7 +190,7 @@ Full-screen programs need a real terminal. MRT opens them in a full-screen PTY o
 - The overlay is a real terminal screen: the program can move the cursor, use colors and the alternate screen, and set the window title. The screen is sized to the overlay in whole characters and follows the window when you resize it.
 - Keys are sent the way xterm sends them: text, `Enter`, `Backspace`, `Tab` / `Shift+Tab`, `Esc`, arrows (application cursor mode when the program asks), `Home` / `End`, `Insert` / `Delete`, `PageUp` / `PageDown`, `F1`-`F12` (with Shift/Alt/Ctrl), and `Ctrl+` any letter. Pasted text is wrapped in bracketed-paste markers when the program enables them. Mouse input and `Alt+` letter are not sent yet.
 - The overlay closes when the program exits, or when you press `Ctrl+Q` (the `exit_tui` action; rebindable).
-- The session is saved as a normal command block in the tab: for a full-screen program, the text left on the main screen; otherwise the colored output.
+- The session is saved as a normal command block in the tab: what the terminal showed (its history and main screen) with colors. A full-screen program such as vim leaves nothing behind once it exits, so its block is empty.
 
 Agent CLIs such as `claude`, `codex`, `gemini` and `aider` are interactive, so start them with `:tui claude` (and so on). The tab then shows when the agent waits for your approval (see [Tab activity status](#tab-activity-status)).
 

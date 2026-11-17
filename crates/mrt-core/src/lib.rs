@@ -1,5 +1,6 @@
 pub mod block;
 pub mod config;
+pub mod links;
 pub mod platform;
 pub mod pty;
 pub mod safety;
@@ -9,7 +10,8 @@ pub mod shell_session;
 pub mod vt;
 
 pub use block::{
-    classify_output, CommandBlock, HttpExchangeSummary, StructuredOutput, ViewMode,
+    classify_output, ClipboardDecision, ClipboardRequest, CommandBlock, HttpExchangeSummary,
+    StructuredOutput, ViewMode,
 };
 pub use config::{
     load_config, ConfigError, ConfigSources, ConfigWatcher, LoadedConfig, McpServerEntry,
@@ -32,7 +34,11 @@ pub use shell_session::{
     CommandEvent, CommandHandle, CommandOutcome, ShellSession, ShellSessionError,
     ShellSessionOptions,
 };
-pub use vt::{parse_ansi_text, AnsiColor, AnsiSpan, VtParserState};
+pub use links::{classify_uri, detect_links, is_openable_uri, DetectedLink, LinkTarget};
+pub use vt::{
+    parse_ansi_rich, parse_ansi_text, parse_osc7_uri, AnsiColor, AnsiSpan, ParsedAnsi, VtEvent,
+    VtParserState,
+};
 pub use term::{
     xterm_palette, MouseMode, TermCell, TermColor, TermCursor, TermCursorShape, TermModes,
     TermSnapshot, TerminalEmulator,

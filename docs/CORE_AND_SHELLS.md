@@ -9,8 +9,9 @@
 | Module | File | Responsibility |
 | :--- | :--- | :--- |
 | **`pty`** | [`src/pty.rs`](../crates/mrt-core/src/pty.rs) | Multi-shell discovery (`ShellProfile`), per-command & streaming shell execution (`execute_command_in_shell`, `execute_command_streaming`, `execute_command_streaming_with_pid`), and streaming `portable-pty` sessions (`InteractivePty`). |
-| **`vt`** | [`src/vt.rs`](../crates/mrt-core/src/vt.rs) | ANSI / VT100 escape sequence state machine powered by `vte`, producing styled `AnsiSpan` vectors and stripped plain text. |
+| **`vt`** | [`src/vt.rs`](../crates/mrt-core/src/vt.rs) | ANSI / VT100 escape sequence state machine powered by `vte`, producing styled `AnsiSpan` vectors and stripped plain text, plus OSC 7 / OSC 8 / OSC 52 handling. |
 | **`term`** | [`src/term.rs`](../crates/mrt-core/src/term.rs) | Terminal grid emulator (`TerminalEmulator`) wrapping `alacritty_terminal`: turns PTY bytes into a screen of cells with cursor, scrollback, alternate screen, title, input modes, and replies for the PTY. Library only; not wired into the GUI yet. |
+| **`links`** | [`src/links.rs`](../crates/mrt-core/src/links.rs) | Detects plain-text URLs and `path:line[:col]` locations in output, classifies OSC 8 targets, and lists the URL schemes MRT will open. |
 | **`block`** | [`src/block.rs`](../crates/mrt-core/src/block.rs) | `CommandBlock` data model and automatic `StructuredOutput` detector (JSON, CSV/TSV Tables, Markdown, HTTP results). |
 | **`safety`** | [`src/safety.rs`](../crates/mrt-core/src/safety.rs) | Cross-shell destructive command classifier (`RiskLevel::Safe`, `Moderate`, `Critical`) powering the MRT Safety Approval Gate. |
 | **`shell_integration`** | [`src/shell_integration.rs`](../crates/mrt-core/src/shell_integration.rs) | OSC 133 / OSC 7 parsers and shell integration scripts for Bash, Git Bash, sh, Zsh, Fish, PowerShell, and CMD. |
@@ -54,6 +55,20 @@ On Windows, `execute_command_in_shell()` applies `.creation_flags(0x08000000)` (
 - **Text Styles**: Bold (`1`/`22`), Italic (`3`/`23`), Underline (`4`/`24`), and Reset (`0`).
 - **Simultaneous Plain Text Stripping**: Produces a clean `plain_text` string free of escape codes so `classify_output` can accurately parse JSON or CSV even if a CLI tool emitted ANSI color codes.
 
+`parse_ansi_rich(input) -> ParsedAnsi { spans, plain_text, events }` does the same pass and also handles OSC sequences (both `BEL` and `ESC \` (ST) terminators). `parse_ansi_text` is a thin wrapper over it, so existing callers are unchanged.
+- **OSC 7 (working directory)**: `OSC 7 ; file://host/path` becomes `VtEvent::WorkingDirectory { host, path }`. The same parsing is public as `vt::parse_osc7_uri(&str) -> Option<PathBuf>` for other modules. The path is percent-decoded and `/C:/...` becomes `C:/...`. Anything that is not a `file://host/path` URI, or has bad percent-escapes, is ignored.
+- **OSC 8 (hyperlinks)**: `OSC 8 ; params ; URI` sets `AnsiSpan::link` on every span until an `OSC 8 ;;` with an empty URI. `;` inside the URI is kept.
+- **Other OSC sequences** (window title, OSC 9, OSC 133, ...) are stripped from the text and not interpreted here.
+- **OSC 52 (clipboard write)**: `OSC 52 ; selection ; base64` becomes `VtEvent::ClipboardWrite { selection, text }`. Read requests (`?`), invalid base64 and payloads over 1 MiB (`MAX_CLIPBOARD_WRITE_BYTES`) are dropped. The parser never touches the clipboard; the GUI asks the user first.
+
+### Link detection (`links.rs`)
+
+`detect_links(text) -> Vec<DetectedLink>` scans whitespace-separated words and returns byte ranges with a `LinkTarget`:
+- **URLs**: `http://`, `https://`, `ftp://` and `file://`, anywhere in a word (`url=https://...`, `<https://...>`). Trailing punctuation and unbalanced closing brackets are trimmed.
+- **File locations**: `path:line` and `path:line:col` as printed by compilers, stack traces and `grep -n` (`src/main.rs:10:5`, `(/app/x.js:42:7)`, `C:\work\lib.rs:3`, `notes.md:12:match`). A path needs a separator or a file extension starting with a letter, so times (`12:30:45`), hosts (`localhost:8080`) and IPs (`127.0.0.1:8080`) are not links.
+
+`classify_uri` turns OSC 8 `file://` targets into `LinkTarget::File` (with `:line:col` or `#L12` suffixes), and `is_openable_uri` allows only `http`, `https`, `ftp`, `mailto` and `file`.
+
 ---
 
 ## 4. Command Blocks & Automatic Structured Output (`block.rs`)
@@ -63,6 +78,8 @@ Every command executed in MRT produces a `CommandBlock`. When a block completes,
 2. **CSV / TSV Table Detection (`StructuredOutput::Table`)**: If the output has 2+ non-empty lines with a consistent `,` or `\t` column count (at least 2 columns), MRT parses the header row and data rows into an interactive filterable **Table** view.
 3. **Markdown Detection (`StructuredOutput::Markdown`)**: If the output contains Markdown headings (`# `, `## `), fenced code blocks (```` ``` ````), and bullet lists, MRT renders it with formatted typography.
 4. **Fallback (`StructuredOutput::RawText`)**: Renders the styled `Vec<AnsiSpan>` in monospace.
+
+While a command streams, `CommandBlock::refresh_output()` re-parses `raw_output` and updates `ansi_spans`, `plain_output`, `reported_cwd` (last OSC 7 path) and `clipboard_requests` (OSC 52 writes, each `Pending`, `Approved` or `Denied`). Decisions already made are kept when more output arrives.
 
 Users can toggle any structured block between **Structured View** and **Raw ANSI View** at any time with a single click in the block header.
 

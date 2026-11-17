@@ -179,6 +179,61 @@ Full-screen programs need a real terminal. MRT opens them in a full-screen PTY o
 - The overlay closes when the program exits, or when you press `Ctrl+Q` (the `exit_tui` action; rebindable).
 - The session transcript is saved as a normal command block in the tab.
 
+Agent CLIs such as `claude`, `codex`, `gemini` and `aider` are interactive, so start them with `:tui claude` (and so on). The tab then shows when the agent waits for your approval (see [Tab activity status](#tab-activity-status)).
+
+### Tab activity status
+
+Every sidebar tab row and every Mosaic tile has a small activity indicator. Hover it for details (state, command, detected agent, message).
+
+| Indicator | State | Meaning |
+| :--- | :--- | :--- |
+| Grey dot | Idle | Nothing has run in this tab yet. |
+| Blue spinner | Running | A command is running. |
+| Blue ring + `42%` | Progress | The command reported progress (`OSC 9;4` or the MRT sequence below). The ring turns red or amber for error/warning progress. |
+| Pulsing amber dot + `input` | Waiting for input | The command appears to wait for you: an approval prompt, a `[y/N]` question, a password prompt. |
+| Green dot | Finished | The last command exited with code 0. |
+| Red dot | Failed | The last command exited with a non-zero code. |
+
+How MRT decides, in order:
+
+1. **The MRT status sequence** (below), if the program sent one.
+2. **Standard progress**: `ESC ] 9 ; 4 ; <state> ; <percent> BEL`, the sequence Windows Terminal and ConEmu understand. States: `0` remove, `1` normal, `2` error, `3` indeterminate (spinner), `4` warning. Tools such as `winget`, `cargo` (with `term.progress`) and many installers already emit it.
+3. **"Waiting for input" heuristics** (deliberately conservative):
+   - For a recognised agent CLI (`claude`, `codex`, `gemini`, `aider`, also via `npx`/`bunx`/`uvx`, or found in the process tree when the Task Manager is sampling): 1.5 s without output and one of the last lines reads like an approval prompt (`Do you want to proceed?`, `[y/n]`, `Esc to cancel`, a `>` input prompt).
+   - For any other command: 5 s without output and the last line is a question (`…?`, `[y/N]`, `(yes/no)`, `password:`, `Press Enter`).
+   - Any new output switches the tab back to Running.
+4. Otherwise the tab shows Running, and after exit, Finished or Failed.
+
+#### The MRT status sequence (for scripts and agents)
+
+Programs can set the tab state explicitly by printing:
+
+```text
+ESC ] 678 ; status=<value> [; progress=<0-100>] [; message=<text>] BEL
+```
+
+- `<value>`: `running`, `waiting`, `success` (or `done`), `failure` (or `error`), `idle`, or `clear` to drop an earlier status and return to automatic detection.
+- `progress=` shows a percentage (with `status=running`).
+- `message=` appears in the tooltip and in MCP output; put it last, since it may contain `;`.
+- `ST` (`ESC \`) works as the terminator too. Keys can come in any order; unknown keys are ignored.
+- The status lasts until the program sends another one or `status=clear`, or the command exits (then the exit code decides).
+
+Why 678: it spells "MRT" on a phone keypad, and no major terminal assigns it (xterm, VTE, iTerm2 use 1337, kitty 99/5113, VS Code 633, Windows Terminal/ConEmu 9, rxvt 777, FinalTerm 133). Terminals that do not know an OSC number ignore it, so a script can emit it unconditionally.
+
+Examples:
+
+```bash
+printf '\033]678;status=waiting;message=Approve the deploy in the browser\007'
+printf '\033]678;status=running;progress=40\007'
+printf '\033]678;status=clear\007'
+printf '\033]9;4;1;75\007'   # standard progress, 75%
+```
+
+```powershell
+$e = [char]27; $b = [char]7
+Write-Host -NoNewline "$e]678;status=waiting;message=Review the plan$b"
+```
+
 ---
 
 ## 5. Data Files and Locations

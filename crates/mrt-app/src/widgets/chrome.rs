@@ -2,36 +2,9 @@
 //! command-palette search pill, the brand mark and the centered stream column.
 
 use crate::theme::{Palette, Radius, STREAM_MAX_WIDTH};
+use crate::widgets::activity::{activity_color, activity_short_label, paint_activity_indicator};
+use mrt_core::ActivitySnapshot;
 use egui::{Align2, Color32, FontId, Rect, Response, Rounding, Sense, Stroke, Ui};
-
-/// Status of a terminal tab, shown as a dot in the sidebar.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TabStatus {
-    Idle,
-    Running,
-    Succeeded,
-    Failed,
-}
-
-impl TabStatus {
-    pub fn color(self) -> Color32 {
-        match self {
-            TabStatus::Idle => Color32::from_rgb(63, 63, 70),
-            TabStatus::Running => Palette::ACCENT_AMBER,
-            TabStatus::Succeeded => Palette::ACCENT_GREEN,
-            TabStatus::Failed => Palette::ACCENT_RED,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            TabStatus::Idle => "idle",
-            TabStatus::Running => "running",
-            TabStatus::Succeeded => "ok",
-            TabStatus::Failed => "failed",
-        }
-    }
-}
 
 /// Accent square holding a prompt glyph.
 pub fn brand_mark(ui: &mut Ui, size: f32) {
@@ -126,7 +99,7 @@ pub fn tab_row(
     ui: &mut Ui,
     title: &str,
     subtitle: &str,
-    status: TabStatus,
+    status: &ActivitySnapshot,
     active: bool,
     closable: bool,
     compact: bool,
@@ -135,6 +108,7 @@ pub fn tab_row(
     let height = if compact { 40.0 } else { 46.0 };
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), Sense::click());
     row_background(ui, rect, &response, active);
+    let time = ui.input(|i| i.time);
     let painter = ui.painter();
 
     if compact {
@@ -150,22 +124,27 @@ pub fn tab_row(
                 Palette::TEXT_SECONDARY
             },
         );
-        painter.circle_filled(
+        paint_activity_indicator(
+            painter,
             egui::pos2(rect.right() - 10.0, rect.top() + 10.0),
             3.5,
-            status.color(),
+            status,
+            time,
         );
-        let response = response.on_hover_text(format!("{title} · {subtitle}"));
+        let response = response.on_hover_text(format!("{title} · {subtitle}
+{}", status.tooltip()));
         return TabRowResponse {
             selected: response.clicked(),
             close: false,
         };
     }
 
-    painter.circle_filled(
+    paint_activity_indicator(
+        painter,
         egui::pos2(rect.left() + 16.0, rect.center().y),
-        4.0,
-        status.color(),
+        4.5,
+        status,
+        time,
     );
     let text_left = rect.left() + 32.0;
     let max_text = (rect.width() - 72.0).max(40.0);
@@ -205,6 +184,17 @@ pub fn tab_row(
         egui::vec2(24.0, 24.0),
     );
     let mut close = false;
+    if !(closable && response.hovered()) {
+        if let Some(label) = activity_short_label(status) {
+            painter.text(
+                egui::pos2(rect.right() - 10.0, rect.center().y),
+                Align2::RIGHT_CENTER,
+                label,
+                FontId::proportional(11.0),
+                activity_color(status),
+            );
+        }
+    }
     if closable && response.hovered() {
         let pointer_on_close = ui
             .ctx()
@@ -225,7 +215,7 @@ pub fn tab_row(
             close = true;
         }
     }
-    let response = response.on_hover_text(status.label());
+    let response = response.on_hover_text(status.tooltip());
     TabRowResponse {
         selected: response.clicked() && !close,
         close,

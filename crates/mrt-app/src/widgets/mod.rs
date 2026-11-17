@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod block_view;
 pub mod chrome;
 pub mod links;

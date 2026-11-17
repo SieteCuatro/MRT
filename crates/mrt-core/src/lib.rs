@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod block;
 pub mod config;
 pub mod links;
@@ -9,6 +10,10 @@ pub mod term;
 pub mod shell_session;
 pub mod vt;
 
+pub use activity::{
+    detect_agent_cli, parse_activity_signals, ActivitySignal, ActivitySnapshot, ActivityState,
+    ActivityTracker, ProgressTone, MRT_STATUS_OSC,
+};
 pub use block::{
     classify_output, ClipboardDecision, ClipboardRequest, CommandBlock, HttpExchangeSummary,
     StructuredOutput, ViewMode,

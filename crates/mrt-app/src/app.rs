@@ -3,10 +3,11 @@ use crate::theme::{
     apply_mrt_theme, chip, ghost_button, icon_button, panel_frame, primary_button, secondary_button, section_label,
     Palette, Radius,
 };
+use crate::widgets::activity::{activity_indicator, is_animated};
 use crate::widgets::block_view::{render_command_block, render_compact_block, BlockAction};
 use crate::widgets::mosaic::{mosaic_rects, MosaicLayout};
 use crate::widgets::chrome::{
-    brand_mark, centered_column, nav_row, palette_row, search_pill, tab_row, TabStatus,
+    brand_mark, centered_column, nav_row, palette_row, search_pill, tab_row,
 };
 use crate::widgets::runbooks::{
     render_runbooks_panel, ReplayStatusView, RunbookAction, RunbooksUiState,
@@ -20,7 +21,7 @@ use mrt_ai::{
     AiCommandProposal,
 };
 use mrt_core::{
-    assess_command, discover_shells, execute_command_streaming_with_pid, CommandBlock,
+    ActivitySnapshot, ActivityTracker, assess_command, discover_shells, execute_command_streaming_with_pid, CommandBlock,
     InteractivePty, RiskLevel, SafetyAssessment, ShellProfile, StructuredOutput,
 };
 use mrt_mcp::{
@@ -81,6 +82,8 @@ pub struct TerminalTab {
     pub split_direction: SplitDirection,
     pub secondary_pane: Option<SplitPane>,
     pub active_pane_idx: usize,
+    /// Running / progress / waiting-for-input / finished state shown on the tab.
+    pub activity: ActivityTracker,
 }
 
 impl TerminalTab {
@@ -100,6 +103,7 @@ impl TerminalTab {
             split_direction: SplitDirection::None,
             secondary_pane: None,
             active_pane_idx: 0,
+            activity: ActivityTracker::new(),
         }
     }
 
@@ -321,6 +325,7 @@ impl MrtGuiApp {
                 shell_name: first_shell.kind.short_label().to_string(),
                 cwd: first_tab.cwd.clone(),
                 blocks: Vec::new(),
+                activity: None,
             }];
         }
         if let Ok(mut active_guard) = mcp_state.active_tab_id.lock() {
@@ -631,6 +636,7 @@ impl MrtGuiApp {
         self.side_state
             .task_manager
             .apply_snapshot(snapshot.clone(), owned.clone());
+        self.observe_activity_processes(&snapshot);
 
         // Live `:top` block
         if let Some(live) = &self.live_top {
@@ -1290,7 +1296,7 @@ impl MrtGuiApp {
                                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                                         ui.dnd_drag_source(egui::Id::new(("terminal_drag", id)), id, |ui| {
                                             ui.horizontal(|ui| {
-                                                ui.label(RichText::new("●").size(9.0).color(status.color()));
+                                                activity_indicator(ui, &status);
                                                 let title = ui.add(
                                                     egui::Label::new(
                                                         RichText::new(format!("{}  {folder}", index + 1))
@@ -1594,6 +1600,7 @@ impl MrtGuiApp {
                         shell_name: shell.kind.short_label().to_string(),
                         cwd: t.cwd.clone(),
                         blocks: t.blocks.clone(),
+                        activity: Some(t.activity.snapshot(Instant::now())),
                     }
                 })
                 .collect();
@@ -1719,6 +1726,9 @@ impl MrtGuiApp {
         for (block_id, (tab_id, output)) in &self.running_output {
             let chunk = output.lock().map(|mut pending| std::mem::take(&mut *pending)).unwrap_or_default();
             if chunk.is_empty() { continue; }
+            if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == *tab_id) {
+                tab.activity.feed_output(&chunk, Instant::now());
+            }
             let found_in_primary = self.tabs.iter_mut().find(|tab| tab.id == *tab_id)
                 .and_then(|tab| tab.blocks.iter_mut().find(|block| block.id == *block_id));
             if let Some(block) = found_in_primary {
@@ -1749,7 +1759,7 @@ impl MrtGuiApp {
                     block,
                     updated_cwd,
                 } => {
-                    self.running_output.remove(&block.id);
+                    let was_streaming = self.running_output.remove(&block.id).is_some();
                     if let Ok(mut pids) = self.running_pids.lock() {
                         pids.remove(&block.id);
                     }
@@ -1778,6 +1788,9 @@ impl MrtGuiApp {
                         guard.push(block.clone());
                     }
                     if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+                        if was_streaming {
+                            tab.activity.command_finished(block.exit_code.unwrap_or(1), Instant::now());
+                        }
                         if let Some(new_cwd) = updated_cwd {
                             tab.cwd = new_cwd.clone();
                             if let Ok(mut guard) = self.mcp_host.local_server_state.cwd.lock() {
@@ -2083,6 +2096,9 @@ impl MrtGuiApp {
         if let Some(tui_cmd) = is_tui_command {
             match InteractivePty::spawn_with_command(&shell, &cwd, 120, 35, Some(&tui_cmd)) {
                 Ok(pty) => {
+                    if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+                        tab.activity.command_started(&tui_cmd, Instant::now());
+                    }
                     self.active_tui = Some(ActiveTuiSession {
                         pty: std::sync::Arc::new(pty),
                         tab_id,
@@ -2261,6 +2277,7 @@ impl MrtGuiApp {
         let timestamp = running.timestamp;
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
             tab.blocks.push(running);
+            tab.activity.command_started(&raw_input, Instant::now());
         }
         let output = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         self.running_output.insert(block_id, (tab_id, output.clone()));
@@ -2640,6 +2657,18 @@ impl MrtGuiApp {
         let mut close_session = false;
         let mut exit_code = 0;
 
+        // Feed new PTY output to the tab's activity tracker (the overlay reads the transcript).
+        let fresh = session.pty.drain_output();
+        if !fresh.is_empty() {
+            let tab_id = session.tab_id;
+            if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+                tab.activity.feed_output(&fresh, Instant::now());
+            }
+        }
+        let Some(ref session) = self.active_tui else {
+            return;
+        };
+
         // Check if the process exited on its own
         if let Ok(Some(code)) = session.pty.try_wait_exit() {
             close_session = true;
@@ -2672,6 +2701,7 @@ impl MrtGuiApp {
                 let duration_ms = session.start_time.elapsed().as_millis() as u64;
 
                 if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == session.tab_id) {
+                    tab.activity.command_finished(exit_code, Instant::now());
                     let shell_name = self
                         .shells
                         .get(tab.active_shell_idx)
@@ -2884,14 +2914,33 @@ fn forward_egui_event_to_pty(event: &egui::Event, pty: &InteractivePty) {
 }
 
 impl MrtGuiApp {
-    fn tab_status(tab: &TerminalTab) -> TabStatus {
-        if tab.blocks.iter().any(|b| b.exit_code.is_none()) {
-            TabStatus::Running
-        } else {
-            match tab.blocks.last().and_then(|b| b.exit_code) {
-                None => TabStatus::Idle,
-                Some(0) => TabStatus::Succeeded,
-                Some(_) => TabStatus::Failed,
+    fn tab_status(tab: &TerminalTab) -> ActivitySnapshot {
+        tab.activity.snapshot(Instant::now())
+    }
+
+    /// Lets each tab's activity tracker recognise agent CLIs (`claude`, `codex`, ...) started
+    /// through wrapper scripts, from the process tree of its running commands.
+    fn observe_activity_processes(&mut self, snapshot: &ProcessSnapshot) {
+        let mut roots: Vec<(Uuid, u32)> = Vec::new();
+        if let Ok(pids) = self.running_pids.lock() {
+            for (block_id, pid) in pids.iter() {
+                if let Some((tab_id, _)) = self.running_output.get(block_id) {
+                    roots.push((*tab_id, *pid));
+                }
+            }
+        }
+        if let Some(pid) = self.active_tui.as_ref().and_then(|s| s.pty.process_id().map(|p| (s.tab_id, p))) {
+            roots.push(pid);
+        }
+        for (tab_id, pid) in roots {
+            let names: Vec<&str> = snapshot
+                .get(pid)
+                .into_iter()
+                .chain(snapshot.descendants(pid).into_iter().map(|(_, e)| e))
+                .map(|e| e.name.as_str())
+                .collect();
+            if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+                tab.activity.observe_process_names(names);
             }
         }
     }
@@ -3176,7 +3225,7 @@ impl MrtGuiApp {
                     };
                     let status = Self::tab_status(tab);
                     let subtitle = if generic {
-                        format!("{shell} · {}", status.label())
+                        format!("{shell} · {}", status.state.label())
                     } else {
                         format!("{shell} · {folder}")
                     };
@@ -3184,7 +3233,7 @@ impl MrtGuiApp {
                         ui,
                         &title,
                         &subtitle,
-                        status,
+                        &status,
                         idx == self.active_tab,
                         closable,
                         compact,
@@ -4359,6 +4408,10 @@ impl eframe::App for MrtGuiApp {
         self.render_tui_overlay(ctx);
         self.render_key_indicator(ctx);
         self.sync_mcp_from_gui();
+        // Keep spinners turning and let quiet-period heuristics flip to "waiting".
+        if self.tabs.iter().any(|t| t.activity.running_commands() > 0 || is_animated(&Self::tab_status(t))) {
+            ctx.request_repaint_after(Duration::from_millis(150));
+        }
     }
 }
 
@@ -4654,6 +4707,39 @@ mod tests {
             remaining.ai_proposal.as_ref().unwrap().proposed_command,
             "echo second"
         );
+    }
+
+    #[test]
+    fn tab_activity_reaches_the_sidebar_status_and_mcp() {
+        let mut app = MrtGuiApp::new();
+        let now = Instant::now();
+        let tab = &mut app.tabs[0];
+        tab.activity.command_started("claude", now);
+        tab.activity.feed_output("\x1b]678;status=waiting;message=Approve edit\x07", now);
+        assert_eq!(
+            MrtGuiApp::tab_status(&app.tabs[0]).state,
+            mrt_core::ActivityState::WaitingForInput
+        );
+        app.sync_mcp_from_gui();
+        let host = app.mcp_host.clone();
+        let result = app
+            .runtime
+            .block_on(host.call_tool("mrt-native-mcp", "mrt_list_tabs", json!({})))
+            .unwrap();
+        let tabs: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let activity = &tabs[0]["activity"];
+        assert_eq!(activity["state"], "waiting_for_input");
+        assert_eq!(activity["agent"], "claude");
+        assert_eq!(activity["detail"], "Approve edit");
+
+        app.tabs[0].activity.command_finished(0, Instant::now());
+        app.sync_mcp_from_gui();
+        let result = app
+            .runtime
+            .block_on(host.call_tool("mrt-native-mcp", "mrt_get_session_state", json!({})))
+            .unwrap();
+        let state: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert_eq!(state["tabs"][0]["activity"]["state"], "succeeded");
     }
 
     #[test]

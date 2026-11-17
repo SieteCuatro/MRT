@@ -54,7 +54,7 @@ cargo test --workspace
 
 ## AI Providers
 
-MRT checks configured environment variables in the following order and falls back to the built-in offline heuristic engine if none are set or reachable:
+MRT checks configured environment variables in the following order (set `ai.provider` in the [config file](docs/USER_GUIDE.md#6-configuration-file) to try one first) and falls back to the built-in offline heuristic engine if none are set or reachable:
 
 | Provider | Environment Variable | Default Model |
 | :--- | :--- | :--- |
@@ -79,4 +79,4 @@ MRT checks configured environment variables in the following order and falls bac
 - [Roadmap](ROADMAP.md) — Planned milestones and project ideas.
 - [Contributing](CONTRIBUTING.md) — Development workflow and PR checklist.
 - [AI Agent Instructions](AGENTS.md) — Workspace context for coding agents.
-- [Configuration Example](mrt.example.toml) — Planned configuration schema (not loaded yet; MRT reads environment variables and GUI settings today).
+- [Configuration Example](mrt.example.toml) — Every setting MRT reads from `~/.config/mrt/config.toml` (`%APPDATA%\mrt\config.toml` on Windows) and a per-project `.mrt.toml`, reloaded live. See [User Guide §6](docs/USER_GUIDE.md#6-configuration-file).

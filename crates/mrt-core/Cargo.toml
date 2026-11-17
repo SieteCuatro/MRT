@@ -15,3 +15,5 @@ portable-pty.workspace = true
 vte.workspace = true
 chrono.workspace = true
 uuid.workspace = true
+toml = "1"
+directories = "6"

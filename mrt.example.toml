@@ -1,25 +1,34 @@
-# Modern Rust Terminal (MRT) Configuration Example
+# Modern Rust Terminal (MRT) configuration example
 # 100% Free for All — No Restrictions.
-# Note: TOML config loading (~/.config/mrt/config.toml or .mrt.toml) is a planned
-# reference schema; MRT currently reads settings from environment variables and GUI controls.
+#
+# Copy this file to one of these places (every setting is optional):
+#   Linux/macOS: ~/.config/mrt/config.toml   ($XDG_CONFIG_HOME/mrt/config.toml if set)
+#   Windows:     %APPDATA%\mrt\config.toml
+#   Anywhere:    point the MRT_CONFIG environment variable at the file
+# A `.mrt.toml` in the folder you start MRT from is merged on top (project settings win).
+# MRT reloads both files when they change. If a file has a syntax error, MRT keeps the
+# last good settings and shows the error at the top of the window.
 
 [terminal]
 default_shell = "auto" # "auto", "pwsh", "powershell", "cmd", "bash", "git-bash", "wsl", "zsh", "fish", "nu", "sh"
-font_size = 14.0
-scrollback_blocks = 500
-auto_detect_structured_output = true
+font_size = 14.0       # terminal (monospace) font size, 8–40
+# theme = "graphite-calm" # the built-in dark theme ("dark" and "default" are aliases)
+scrollback_blocks = 500              # reserved, not applied yet
+auto_detect_structured_output = true # reserved, not applied yet
 
 [safety]
-enabled = true
-require_approval_for_moderate = false
+enabled = true                       # false: never ask (blocked_patterns still apply)
+require_approval_for_moderate = false # true: also ask before every Moderate command
 require_approval_for_critical = true
+# Commands containing any of these (case-insensitive) are refused, never run.
+# A project .mrt.toml adds to this list; it cannot remove entries.
 blocked_patterns = [
     "rm -rf /",
     "format c:",
 ]
 
 [ai]
-# MRT supports ALL AI providers! Set any of these environment variables:
+# API keys are read from environment variables only — never put them in this file:
 # - GEMINI_API_KEY       (Google Gemini)
 # - ANTHROPIC_API_KEY    (Anthropic Claude)
 # - OPENAI_API_KEY       (OpenAI)
@@ -27,9 +36,15 @@ blocked_patterns = [
 # - DEEPSEEK_API_KEY     (DeepSeek)
 # - OPENROUTER_API_KEY   (OpenRouter — access 200+ models)
 # - OLLAMA_MODEL         (Local free models via Ollama, e.g., "qwen2.5-coder" or "llama3.2")
+# provider: "auto" tries every configured provider in the order above; naming one
+# ("gemini", "anthropic", "openai", "xai", "deepseek", "openrouter", "ollama") tries it
+# first; "offline" always uses the built-in heuristic engine.
 provider = "auto"
-ollama_endpoint = "http://localhost:11434"
+# model = "gpt-4o-mini"   # model for the chosen provider (OLLAMA_MODEL wins for Ollama)
+ollama_endpoint = "http://localhost:11434" # OLLAMA_HOST wins if set
 
+# MCP servers to connect at startup (stdio transport). A project .mrt.toml entry with
+# the same name replaces the user entry.
 [[mcp.servers]]
 name = "filesystem"
 transport = "stdio"
@@ -42,4 +57,13 @@ name = "mrt-loopback"
 transport = "stdio"
 command = "mrt"
 args = ["--mcp-server"]
+enabled = false # MRT's own tools are already built in; enable to test an external MRT process
+
+# Notify when a command that ran at least threshold_secs finishes.
+[notifications]
 enabled = true
+threshold_secs = 10
+
+# Keyboard shortcuts: "binding" = "action name" (reserved, not applied yet).
+[keybindings]
+# "ctrl+t" = "new_tab"

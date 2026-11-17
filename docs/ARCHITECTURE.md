@@ -37,6 +37,7 @@ flowchart LR
   - `StructuredOutput::HttpResult(HttpExchangeSummary)` — Rendered with status badge, latency, headers, and body tree.
   - `StructuredOutput::RawText` — Rendered with full ANSI styling.
 - **Safety Approval Gate (`safety.rs`)**: Classifies commands into `Safe`, `Moderate`, or `Critical` across Unix, PowerShell, Windows Batch, Git, SQL, Kubernetes, and process control (`kill`, `pkill`, `taskkill`, `Stop-Process`; OS-critical targets are Critical). Critical commands require explicit user confirmation in the GUI and are blocked when invoked unapproved via MCP.
+- **Configuration file (`config.rs`)**: Serde schema for `config.toml` / `.mrt.toml` with defaults for every field, layered merge (user file, then project file), and a metadata-polling `ConfigWatcher` that debounces changes. `mrt-app/src/config_runtime.rs` applies it to the GUI (first-tab shell, font size, Safety Gate options, AI preferences, startup MCP servers) and shows parse errors in a banner while keeping the last good config.
 - **PID tracking (`execute_command_streaming_with_pid`, `InteractivePty::process_id`)**: Reports the OS PID of each spawned shell and PTY so the Task Manager can mark MRT-owned processes and the block **Stop** button can stop a command's process tree.
 
 ### 2. `mrt-tools` — Built-in Network Tools & Task Manager

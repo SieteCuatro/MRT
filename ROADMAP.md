@@ -40,25 +40,25 @@ These items make MRT usable as a person's main terminal.
 - **Throughput benchmark.** *(implemented, #13; the workflow runs only when started by hand while Actions minutes are unavailable. First finding: Windows PowerShell streams output about 20× slower than `cmd`, see [docs/PERFORMANCE.md](docs/PERFORMANCE.md))* Add a benchmark that streams a large file (for example `cat` of 100 MB, and `yes | head -n 5000000`) and records time to finish and frames dropped. Run it in CI to catch regressions.
 - **Large output.** *(implemented: incremental parsing while streaming, a per-block output limit (`terminal.max_block_output_mb`), and blocks that draw their last 2,000 lines with "Show more"; see [docs/PERFORMANCE.md](docs/PERFORMANCE.md))* Store very long block output out of memory or truncate it with "show more", virtualize block rendering, and cap the repaint rate while output is streaming. *Done when:* a 1 GB log does not freeze the UI.
 - **Font handling.** *(implemented: `terminal.font_family` and `terminal.font_fallback` accept family names or font files, with platform symbol fonts after them; ligatures are not drawn because egui does not shape text)* Configurable font, fallback chain for missing glyphs, and optional ligatures. Get cell metrics right for Nerd Font icons.
-- **Images.** *(implemented in command blocks: iTerm2 OSC 1337, the kitty graphics protocol with direct transmission, and Sixel; not yet in the TUI grid)* The kitty graphics protocol, then Sixel. Show images inline in blocks and in the grid.
+- **Images.** *(implemented in command blocks and the TUI grid: iTerm2 OSC 1337, the kitty graphics protocol with direct transmission, and Sixel)* The kitty graphics protocol, then Sixel. Show images inline in blocks and in the grid.
 - **Idle cost.** *(implemented: worker and MCP events wake the UI, so it repaints once a second when idle instead of every 250 ms, and every 50 ms only while commands run)* Repaint only when something changes; today the app requests a repaint every 30 ms while busy. Measure CPU use when idle and set a target.
 
 ## Milestone 4 — Sessions that outlive the window
 
 Inspired by tmux and Rex. This also builds the base for the remote-connection plan below.
 
-- **Session server.** *(started: `mrt server` is a headless server for tabs, blocks and PTYs on the bridge, used by the CLI and agents; the GUI does not attach to it yet. Design for the rest, upgrades and remote connections: [docs/SESSION_SERVER.md](docs/SESSION_SERVER.md))* Move PTYs, shells, and running blocks into a background `mrt --server` process. The GUI becomes a client that attaches over the existing token-authenticated local bridge (`mrt-mcp::bridge`). *Done when:* closing the window mid-build and reopening it shows the same tabs, finished blocks, and live output.
-- **Layout restore.** *(implemented for the GUI: `layout.json`, `terminal.restore_layout`; restoring after a session-server restart waits for the session server)* Save tabs, splits, shells, and working directories, and restore them after the server itself restarts (fresh shells, same layout).
-- **Survive upgrades.** Hand running sessions from the old server to the new one when MRT updates, or keep the old server running until its sessions end.
+- **Session server.** *(implemented: closing the window with work running keeps MRT running in the background and `mrt` reopens the same window with its tabs, blocks and live output; `mrt server` is a headless server for the CLI and agents. A separate shell-owning server process the GUI attaches to is described in [docs/SESSION_SERVER.md](docs/SESSION_SERVER.md))* Move PTYs, shells, and running blocks into a background `mrt --server` process. The GUI becomes a client that attaches over the existing token-authenticated local bridge (`mrt-mcp::bridge`). *Done when:* closing the window mid-build and reopening it shows the same tabs, finished blocks, and live output.
+- **Layout restore.** *(implemented: `layout.json`, `terminal.restore_layout`; also used when a new MRT version replaces an idle older one)* Save tabs, splits, shells, and working directories, and restore them after the server itself restarts (fresh shells, same layout).
+- **Survive upgrades.** *(implemented by keeping the old instance: a new version replaces an idle older window and leaves one with running commands alone until they finish)* Hand running sessions from the old server to the new one when MRT updates, or keep the old server running until its sessions end.
 - **Command-line control.** *(implemented against the running window: `mrt list|send|capture|split` with `--json` and documented exit codes)* An `mrt` CLI that talks to the server with tmux-style targets: `mrt send`, `mrt capture`, `mrt split`, `mrt list`, all with `--json` and documented exit codes. These are thin wrappers around the existing MCP tools.
 
 ### Remote connections between MRT instances
 
 Attach to an existing MRT tab from a second computer running Windows, macOS, or Linux. A developer who starts a build on a Linux workstation can open that same tab on a Windows laptop, see earlier command blocks, follow live output, and enter the next command. Show the host name, shell, and working directory in the attached tab.
 
-- **Local network.** Pair two devices on the same LAN with host approval and share a selected tab over an encrypted connection. The host owns the shell, processes, and command blocks and can revoke access. Authenticate with a paired key, not only network identity.
-- **Reconnect milestone.** Start a build on the host, attach from the laptop, and disconnect the laptop mid-build. When it reconnects to the same tab, the build should have continued and the laptop should show the missed output exactly once, including the exit status if the build finished.
-- **Over the internet.** Extend tab attachment and reconnection to paired devices on different networks. Choose the internet transport after validating the LAN milestone.
+- **Local network.** *(implemented: `mrt share`, `mrt pair`, `mrt attach`, `--host`; SPAKE2 pairing code, host approval, Noise encryption, paired keys only, revocation)* Pair two devices on the same LAN with host approval and share a selected tab over an encrypted connection. The host owns the shell, processes, and command blocks and can revoke access. Authenticate with a paired key, not only network identity.
+- **Reconnect milestone.** *(implemented: `mrt attach` reconnects on its own and shows missed output once, with the exit status; covered by a test)* Start a build on the host, attach from the laptop, and disconnect the laptop mid-build. When it reconnects to the same tab, the build should have continued and the laptop should show the missed output exactly once, including the exit status if the build finished.
+- **Over the internet.** *(works through any reachable address, port forwarding or a VPN, with the same pairing and encryption; no relay service)* Extend tab attachment and reconnection to paired devices on different networks. Choose the internet transport after validating the LAN milestone.
 
 ## Milestone 5 — A terminal built for AI agents
 
@@ -74,7 +74,7 @@ MRT already has a 31-tool MCP server. These items make that easy to use and visi
 
 - **Configurable keybindings.** *(implemented, #12; read from the config file's `[keybindings]` table)* All actions bindable from the config file, including chained keys (`ctrl+a > c`) and key tables / modes (Ghostty 1.3, tmux prefix key).
 - **Named actions.** *(implemented: `[[actions]]` with palette entries, `key =` and `run:<name>` bindings)* User-defined actions in the config (a command, a runbook, or a sequence of MRT actions) that appear in the Command Palette and can be bound to keys.
-- **Copy mode.** *(implemented for command blocks: `copy_mode`, Ctrl+Shift+Space; not yet inside the TUI grid)* Move through scrollback with the keyboard, select, and copy, without the mouse.
+- **Copy mode.** *(implemented: `copy_mode`, Ctrl+Shift+Space, over command blocks and, as grid copy mode, inside full-screen programs)* Move through scrollback with the keyboard, select, and copy, without the mouse.
 - **Input to several panes.** *(implemented for programs running in the panes of a split tab: `:broadcast`; the prompt is not duplicated)* Optionally send typed input to every pane in a tab at once, with a clear on-screen indicator and the Safety Gate still checking each pane.
 - **Event hooks.** *(implemented: `[[hooks]]` for command_finished, command_failed, cwd_changed and tab_opened)* Run an action when a command fails, a tab opens, or a long command finishes.
 
@@ -83,8 +83,8 @@ MRT already has a 31-tool MCP server. These items make that easy to use and visi
 - Quick terminal: a drop-down window on a global hotkey. *(implemented as `mrt quick`, bound to an OS-level hotkey, with an optional drop-down placement; MRT does not register global hotkeys itself)*
 - Themes from a file, including importing common theme formats. *(implemented: MRT TOML, Windows Terminal, Alacritty, Ghostty and iTerm2 themes)*
 - Accessibility: screen-reader output for blocks and the grid, and high-contrast themes. *(implemented: AccessKit labels for blocks, screen text for the TUI grid, `high-contrast` theme)*
-- A mobile companion app that attaches to a session server (after Milestone 4). *(waits for the session server)*
-- Suspend/resume, priority changes, and service management in the Task Manager (needs `NtSuspendProcess` on Windows). *(suspend/resume and priority implemented: `:suspend`, `:resume`, `:priority` and Task Manager buttons; service management not yet)*
+- A mobile companion app that attaches to a session server (after Milestone 4). *(implemented as a web app: `mrt share --web`)*
+- Suspend/resume, priority changes, and service management in the Task Manager (needs `NtSuspendProcess` on Windows). *(implemented: `:suspend`, `:resume`, `:priority`, `:services` and `:service start|stop|restart`, with Task Manager buttons; service control always goes through the Safety Gate)*
 
 ## Shipped
 

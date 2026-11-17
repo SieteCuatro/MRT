@@ -27,6 +27,48 @@ pub struct SafetyAssessment {
 
 /// Evaluates a shell command across Bash, PowerShell, CMD/Batch, Git, SQL, and K8s
 /// to determine whether the Safety Approval Gate should intercept it before running.
+/// Services the OS needs to keep running; stopping or disabling them is Critical.
+pub const PROTECTED_SERVICES: &[&str] = &[
+    "windefend", "eventlog", "rpcss", "rpceptmapper", "lsm", "samss", "dcomlaunch", "plugplay", "power",
+    "winmgmt", "cryptsvc", "mpssvc", "bfe", "schedule", "profsvc", "systemd-", "dbus", "polkit", "networkmanager",
+    "systemd-journald", "systemd-logind", "com.apple.",
+];
+
+/// Starting, stopping, restarting, disabling or deleting a system service: always
+/// asks first, and is Critical for services the OS needs.
+fn assess_service_control(lower: &str) -> Option<(RiskLevel, String)> {
+    const VERBS: &[(&str, &[&str])] = &[
+        ("sc.exe ", &["start", "stop", "delete", "config", "pause"]),
+        ("sc ", &["start", "stop", "delete", "config", "pause"]),
+        ("net ", &["start", "stop"]),
+        ("systemctl ", &["start", "stop", "restart", "reload", "disable", "mask", "kill"]),
+        ("service ", &["start", "stop", "restart"]),
+        ("launchctl ", &["kill", "kickstart", "bootout", "unload", "disable", "stop"]),
+    ];
+    let cmdlets = ["stop-service", "start-service", "restart-service", "set-service", "remove-service", "suspend-service"];
+    let mut hit = cmdlets.iter().any(|c| lower.contains(c));
+    for segment in lower.split(['&', ';', '|']) {
+        let words: Vec<&str> = segment.split_whitespace().filter(|w| *w != "sudo").collect();
+        for (tool, verbs) in VERBS {
+            let tool = tool.trim();
+            // The tool must be the command of its segment (`echo service start` is not).
+            if words.first() == Some(&tool) && words.iter().skip(1).take(2).any(|w| verbs.contains(w)) {
+                hit = true;
+            }
+        }
+    }
+    if !hit {
+        return None;
+    }
+    let deletes = lower.contains(" delete") || lower.contains("remove-service") || lower.contains(" mask");
+    let protected = PROTECTED_SERVICES.iter().find(|name| lower.contains(*name));
+    Some(match (protected, deletes) {
+        (Some(name), _) => (RiskLevel::Critical, format!("Changes a service the operating system needs ({name})")),
+        (None, true) => (RiskLevel::Critical, "Deletes or masks a system service".to_string()),
+        (None, false) => (RiskLevel::Moderate, "Starts, stops or reconfigures a system service".to_string()),
+    })
+}
+
 pub fn assess_command(command: &str) -> SafetyAssessment {
     let lower = command.trim().to_lowercase();
 
@@ -63,6 +105,15 @@ pub fn assess_command(command: &str) -> SafetyAssessment {
                 requires_approval: true,
             };
         }
+    }
+
+    if let Some((risk, reason)) = assess_service_control(&lower) {
+        return SafetyAssessment {
+            command: command.to_string(),
+            risk,
+            reason,
+            requires_approval: true,
+        };
     }
 
     if let Some((risk, reason)) = assess_process_control(&lower) {
@@ -224,6 +275,20 @@ fn assess_process_control(lower: &str) -> Option<(RiskLevel, String)> {
 mod tests {
     use super::*;
     use crate::block::{classify_output, StructuredOutput};
+
+    #[test]
+    fn service_control_always_asks_and_protects_os_services() {
+        for cmd in ["sc.exe stop Spooler", "sudo systemctl restart nginx", "Restart-Service nginx", "net stop spooler", "launchctl kill TERM gui/501/com.x"] {
+            let a = assess_command(cmd);
+            assert!(a.requires_approval, "{cmd}");
+            assert!(a.risk >= RiskLevel::Moderate, "{cmd}");
+        }
+        assert_eq!(assess_command("sudo systemctl stop systemd-journald").risk, RiskLevel::Critical);
+        assert_eq!(assess_command("sc.exe stop WinDefend").risk, RiskLevel::Critical);
+        assert_eq!(assess_command("sc delete myservice").risk, RiskLevel::Critical);
+        assert_eq!(assess_command("systemctl status nginx").risk, RiskLevel::Safe, "reading is safe");
+        assert_eq!(assess_command("echo service start").risk, RiskLevel::Safe);
+    }
 
     #[test]
     fn test_process_control_commands_require_approval() {

@@ -38,7 +38,7 @@ pub struct CliInvocation {
     pub json: bool,
 }
 
-pub const SUBCOMMANDS: &[&str] = &["list", "send", "capture", "split", "quick"];
+pub const SUBCOMMANDS: &[&str] = &["list", "send", "capture", "split", "quick", "quit"];
 
 pub const USAGE: &str = "\
 Control a running MRT window:
@@ -52,6 +52,8 @@ Control a running MRT window:
   mrt quick [show|hide|toggle]            Bring MRT to the front or minimize it (default: toggle);
                                           starts MRT when it is not running. Bind it to a global
                                           hotkey in your OS for a quick terminal
+  mrt quit                                Close MRT, including a window kept running in the
+                                          background, and stop what still runs in it
 
 TAB is a tab index, UUID, or title substring (default: the active tab).
 Exit codes: 0 ok, the command's code for `send`, 2 usage error,
@@ -126,7 +128,8 @@ pub fn parse_args(args: &[String]) -> Result<CliInvocation, String> {
             };
             CliCommand::Quick { action }
         }
-        "list" | "capture" => return Err(format!("unexpected argument {:?}", rest[0])),
+        "quit" if rest.is_empty() => CliCommand::Quick { action: "quit".into() },
+        "list" | "capture" | "quit" => return Err(format!("unexpected argument {:?}", rest[0])),
         other => return Err(format!("unknown subcommand {other}")),
     };
     Ok(CliInvocation { command, target, json: json_out })
@@ -279,8 +282,103 @@ async fn call_tool_at(port: u16, token: &str, name: &str, arguments: Value) -> R
     Ok((text, result["isError"].as_bool().unwrap_or(false)))
 }
 
+/// What a new `mrt` window should do about an MRT that already runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Handoff {
+    /// No window answers (or only a headless `mrt server`): start normally.
+    Start,
+    /// The running window was brought to the front; this process exits.
+    Shown,
+    /// An idle window of another version was asked to quit; start (its layout is restored).
+    Replaced,
+    /// Another version is still running commands; it was shown and keeps running.
+    OlderBusy(String),
+}
+
+/// Decides the handoff from the running window's version, whether it is a GUI, and
+/// whether it is running something.
+pub fn decide_handoff(running_version: &str, our_version: &str, gui_attached: bool, busy: bool) -> Handoff {
+    if !gui_attached {
+        Handoff::Start
+    } else if running_version == our_version {
+        Handoff::Shown
+    } else if busy {
+        Handoff::OlderBusy(running_version.to_string())
+    } else {
+        Handoff::Replaced
+    }
+}
+
+/// Single instance and upgrades: a second `mrt` brings the running window back
+/// (including one kept running in the background after it was closed). A new
+/// version replaces an idle older window, and leaves one that still runs commands
+/// alone until they finish.
+pub fn handoff_to_running_instance() -> Handoff {
+    let Some((port, token)) = mrt_mcp::read_bridge_endpoint() else { return Handoff::Start };
+    let Ok(runtime) = tokio::runtime::Runtime::new() else { return Handoff::Start };
+    runtime.block_on(async move {
+        let initialize = mrt_mcp::JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!(1)),
+            method: "initialize".into(),
+            params: Some(json!({})),
+        };
+        let Ok(Some(response)) = mrt_mcp::try_forward_jsonrpc_to_gui(port, &token, &initialize).await else {
+            return Handoff::Start;
+        };
+        let version = response.result.as_ref().and_then(|r| r["serverInfo"]["version"].as_str()).unwrap_or("").to_string();
+        let gui_attached = match call_tool_at(port, &token, "mrt_control_gui", json!({})).await {
+            Ok((text, _)) => serde_json::from_str::<Value>(&text).ok().and_then(|v| v["gui_attached"].as_bool()).unwrap_or(false),
+            Err(_) => return Handoff::Start,
+        };
+        let busy = match call_tool_at(port, &token, "mrt_list_tabs", json!({})).await {
+            Ok((text, _)) => serde_json::from_str::<Value>(&text)
+                .ok()
+                .and_then(|v| v.as_array().cloned())
+                .unwrap_or_default()
+                .iter()
+                .any(|t| matches!(t["activity"]["state"].as_str(), Some("running" | "progress" | "waiting_for_input"))),
+            Err(_) => false,
+        };
+        let decision = decide_handoff(&version, env!("CARGO_PKG_VERSION"), gui_attached, busy);
+        match &decision {
+            Handoff::Start => {}
+            Handoff::Shown | Handoff::OlderBusy(_) => {
+                let _ = call_tool_at(port, &token, "mrt_control_gui", json!({ "window": "show" })).await;
+            }
+            Handoff::Replaced => {
+                let _ = call_tool_at(port, &token, "mrt_control_gui", json!({ "window": "quit" })).await;
+                // Wait for it to close (it saves its layout on the way out).
+                for _ in 0..50 {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    let ping = mrt_mcp::JsonRpcRequest { jsonrpc: "2.0".into(), id: Some(json!(2)), method: "ping".into(), params: None };
+                    if !matches!(mrt_mcp::try_forward_jsonrpc_to_gui(port, &token, &ping).await, Ok(Some(_))) {
+                        break;
+                    }
+                }
+            }
+        }
+        decision
+    })
+}
+
 /// Runs `mrt <subcommand> ...` and returns the process exit code.
 pub fn run(args: &[String]) -> i32 {
+    // `--host NAME` runs the subcommand on a paired host (`mrt pair`).
+    let mut args = args.to_vec();
+    let host = match args.iter().position(|a| a == "--host") {
+        Some(i) if i + 1 < args.len() => {
+            let host = args.remove(i + 1);
+            args.remove(i);
+            Some(host)
+        }
+        Some(_) => {
+            eprintln!("mrt: --host needs a paired host name");
+            return EXIT_USAGE;
+        }
+        None => None,
+    };
+    let args = &args[..];
     let inv = match parse_args(args) {
         Ok(inv) => inv,
         Err(message) => {
@@ -296,7 +394,14 @@ pub fn run(args: &[String]) -> i32 {
             return EXIT_TOOL_ERROR;
         }
     };
-    match runtime.block_on(call_tool(name, arguments)) {
+    let result = match &host {
+        Some(host) => runtime.block_on(async {
+            let mut channel = crate::remote_cli::connect(host).await.map_err(|e| (e.to_string(), EXIT_NO_WINDOW))?;
+            crate::remote_cli::call_remote(&mut channel, name, arguments).await.map_err(|e| (e.to_string(), EXIT_TOOL_ERROR))
+        }),
+        None => runtime.block_on(call_tool(name, arguments)),
+    };
+    match result {
         Ok((text, is_error)) => {
             let (out, code) = render(&inv, &text, is_error);
             if code == EXIT_TOOL_ERROR && !inv.json {
@@ -310,7 +415,7 @@ pub fn run(args: &[String]) -> i32 {
             code
         }
         // A quick-terminal key with no MRT running starts one.
-        Err((_, EXIT_NO_WINDOW)) if matches!(&inv.command, CliCommand::Quick { action } if action != "hide") => {
+        Err((_, EXIT_NO_WINDOW)) if matches!(&inv.command, CliCommand::Quick { action } if action != "hide" && action != "quit") => {
             match std::env::current_exe().and_then(|exe| std::process::Command::new(exe).spawn()) {
                 Ok(_) => 0,
                 Err(e) => {
@@ -417,6 +522,15 @@ mod tests {
             let err = call_tool_at(port, "wrong-token", "mrt_list_tabs", json!({})).await.unwrap_err();
             assert_eq!(err.1, EXIT_NO_WINDOW);
         });
+    }
+
+    #[test]
+    fn handoff_decisions() {
+        assert_eq!(decide_handoff("0.9.0", "0.9.0", false, true), Handoff::Start, "a headless server does not stop a window");
+        assert_eq!(decide_handoff("0.9.0", "0.9.0", true, true), Handoff::Shown);
+        assert_eq!(decide_handoff("0.8.0", "0.9.0", true, false), Handoff::Replaced);
+        assert_eq!(decide_handoff("0.8.0", "0.9.0", true, true), Handoff::OlderBusy("0.8.0".into()));
+        assert_eq!(parse_args(&args("quit")).unwrap().command, CliCommand::Quick { action: "quit".into() });
     }
 
     #[test]

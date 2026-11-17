@@ -1,6 +1,7 @@
 pub mod activity;
 pub mod block;
 pub mod config;
+pub mod grid_images;
 pub mod images;
 pub mod links;
 pub mod platform;

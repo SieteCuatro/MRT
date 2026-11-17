@@ -218,7 +218,8 @@ impl Action {
         match self {
             Action::ExitTui => context.tui_active,
             // A program with the keyboard keeps Ctrl+F (e.g. less, vim, readline).
-            Action::Find | Action::CopyMode => !context.tui_active,
+            // Copy mode works in block output and, as grid copy mode, inside programs.
+            Action::Find => !context.tui_active,
             _ => true,
         }
     }

@@ -15,6 +15,7 @@ The Cargo workspace contains 5 modular crates:
   - `vt.rs`: Parses ANSI/VT100 escape sequences via `vte` into colored `AnsiSpan` segments and stripped plain text; `parse_ansi_rich` also returns OSC 7 (working directory), OSC 8 (hyperlinks on spans), and OSC 52 (clipboard requests, never applied automatically) as `VtEvent`s. `VtStream` parses streamed output chunk by chunk (used by `CommandBlock::append_output`, which also enforces the per-block output limit).
   - `images.rs`: Inline images for blocks: iTerm2 `OSC 1337 File=`, kitty graphics (APC, direct transmission only) and Sixel, decoded to RGBA with size limits (`InlineImage` in `ParsedAnsi::images` / `CommandBlock::images`).
   - `theme_file.rs`: Theme files (MRT TOML, Windows Terminal, Alacritty, Ghostty, iTerm2) and the process-wide 16-color ANSI palette.
+  - `grid_images.rs`: Image sequences taken out of the PTY stream (`GraphicsSplitter`) and placed in the `TerminalEmulator` grid.
   - `links.rs`: Detects plain-text URLs and `path:line[:col]` locations in output and classifies OSC 8 targets (which URL schemes MRT will open).
   - `term.rs`: Terminal grid emulator (`TerminalEmulator`) wrapping `alacritty_terminal` behind an MRT-owned API: `feed` PTY bytes, `resize`, `snapshot` of cells (colors, attributes, wide chars), cursor, scrollback, title, alternate screen, input modes (app cursor, bracketed paste, mouse), and `take_replies` for DA/CPR answers to the PTY. Used by the GUI's TUI overlay.
   - `block.rs`: Defines `CommandBlock` and `classify_output` (auto-detecting JSON trees, CSV/TSV tables, Markdown, and HTTP responses).
@@ -32,11 +33,13 @@ The Cargo workspace contains 5 modular crates:
   - `ws_inspector.rs`: Built-in `:ws` WebSocket inspector with live frame logging and test probe sender.
   - `bug_reporter.rs`: Built-in `:report` / `:bug` Markdown bug report generator with automatic secret token redaction.
   - `process_control.rs`: `:suspend`, `:resume`, `:priority` (NtSuspendProcess / SetPriorityClass on Windows, SIGSTOP / setpriority on Unix), with Critical targets refused.
+  - `service_inspector.rs`: `:services` listing (sc.exe / systemctl / launchctl) and `:service` actions as platform commands for the Safety Gate.
   - `process_inspector.rs`: Built-in Task Manager backend (`sysinfo`): `:ps` / `:top` process tables, `:proc` details, `:kill` planning with Safety Gate classification and tree termination, `:watch-proc` watches, MRT-owned process labels, and process snapshot diffs.
   - `structured_diff.rs`: Canonical JSON diffs (key order invariant), listening port snapshot delta detection, and process snapshot deltas.
 - **`crates/mrt-mcp`**:
   - `protocol.rs`: JSON-RPC 2.0 and Model Context Protocol (MCP) types.
   - `bridge.rs`: Token-authenticated localhost TCP bridge (`mcp-bridge.json`) so external `mrt --mcp-server` processes transparently control a running MRT GUI window.
+  - `remote.rs` & `companion.rs`: Remote connections (`mrt share`: SPAKE2 pairing, Noise-encrypted relay to the bridge, paired keys only) and the HTTPS phone companion (`mrt share --web`).
   - `server.rs`: MRT as an MCP Server (`mrt --mcp-server` or live GUI bridge), exposing 31 tools across session & multi-tab control (`mrt_get_session_state`, `mrt_list_tabs`, `mrt_create_tab`, `mrt_switch_tab`, `mrt_close_tab`, `mrt_configure_tab`), command execution & block inspection/diffing/triage (`mrt_run_command`, `mrt_list_blocks`, `mrt_get_block`, `mrt_search_blocks`, `mrt_compare_blocks`, `mrt_diagnose_block`, `mrt_clear_blocks`), interactive PTYs (`mrt_pty_spawn`, `mrt_pty_write`, `mrt_pty_read`, `mrt_pty_resize`, `mrt_pty_list`, `mrt_pty_kill`), live GUI control (`mrt_control_gui`), AI translation (`mrt_ai_translate`), and internet & diagnostic tools (`mrt_http_request`, `mrt_web_fetch`, `mrt_inspect_ports`, `mrt_inspect_dns`, `mrt_generate_bug_report`, `mrt_inspect_ws`), and the Task Manager (`mrt_list_processes`, `mrt_inspect_process`, `mrt_kill_process`, `mrt_compare_process_snapshots`), plus 5 MCP resources.
   - `client.rs`: MRT as an MCP Host, connecting to in-process loopback and external `stdio` or Streamable HTTP MCP servers through one shared session layer (with one-click presets for Filesystem, Git, Memory, SQLite, Fetch).
   - `transport.rs`: `stdio` and Streamable HTTP transports (JSON/SSE responses, `Mcp-Session-Id`, `MCP-Protocol-Version`, GET listen stream, `Last-Event-ID` resume, redacted custom headers).
@@ -46,6 +49,7 @@ The Cargo workspace contains 5 modular crates:
 - **`crates/mrt-app`**:
   - `main.rs`: Entrypoint (`#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]`), CLI flag handler (`--mcp-server`, `--version`, `--help`, and the `mrt agent setup|show|remove` subcommand in `agent_setup.rs`), and `eframe` native GPU launcher.
   - `copy_mode.rs` & `hooks.rs`: Keyboard copy mode over a tab's blocks, and `[[hooks]]` event commands run in the background (`CREATE_NO_WINDOW`, `MRT_*` environment). Named `[[actions]]` (`run:<name>`) and pane broadcast (`:broadcast`) live in `app.rs`.
+  - `remote_cli.rs`: `mrt share`, `mrt pair`, `mrt attach` and `--host`.
   - `server.rs`: `mrt server`, a headless session server on the bridge (design for GUI attach, upgrades and remote sessions: `docs/SESSION_SERVER.md`).
   - `cli.rs` & `layout.rs`: `mrt list|send|capture|split` over the MCP bridge (thin wrappers around MCP tools, documented exit codes), and saving / restoring the window layout (`layout.json`, `terminal.restore_layout`).
   - `config_runtime.rs`: Loads the config file at startup, polls it for changes, and applies it to the GUI (font size, default shell, AI preferences, startup MCP servers, keymap, notification settings) with an in-window notice for errors.

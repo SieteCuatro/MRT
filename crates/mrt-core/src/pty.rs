@@ -361,44 +361,52 @@ async fn execute_command_impl(
         }
         let mut stdout = child.stdout.take().context("Missing stdout pipe")?;
         let mut stderr = child.stderr.take().context("Missing stderr pipe")?;
-        let mut stdout_raw = Vec::new();
-        let mut stderr_raw = Vec::new();
+        // Streaming keeps one copy of the output (`combined`, normalized and capped as it
+        // grows) instead of raw stdout/stderr buffers plus several copies after exit.
         let mut stdout_pending = Vec::new();
         let mut stderr_pending = Vec::new();
         let mut combined = String::new();
-        let mut out_buffer = [0u8; 8192];
-        let mut err_buffer = [0u8; 8192];
+        let mut out_buffer = vec![0u8; STREAM_READ_BUFFER];
+        let mut err_buffer = vec![0u8; STREAM_READ_BUFFER];
+        let max_output = crate::block::max_block_output_bytes();
         let mut out_open = true;
         let mut err_open = true;
         use tokio::io::AsyncReadExt;
         while out_open || err_open {
-            let (bytes, raw, pending) = tokio::select! {
+            let (bytes, pending) = tokio::select! {
                 result = stdout.read(&mut out_buffer), if out_open => {
                     let count = result.context("Failed to read stdout")?;
                     out_open = count != 0;
-                    (&out_buffer[..count], &mut stdout_raw, &mut stdout_pending)
+                    (&out_buffer[..count], &mut stdout_pending)
                 }
                 result = stderr.read(&mut err_buffer), if err_open => {
                     let count = result.context("Failed to read stderr")?;
                     err_open = count != 0;
-                    (&err_buffer[..count], &mut stderr_raw, &mut stderr_pending)
+                    (&err_buffer[..count], &mut stderr_pending)
                 }
             };
-            raw.extend_from_slice(bytes);
             pending.extend_from_slice(bytes);
             let text = decode_output(pending, bytes.is_empty());
             if !text.is_empty() {
                 callback(&text);
-                combined.push_str(&text);
+                if text.contains("\r\n") {
+                    combined.push_str(&text.replace("\r\n", "\n"));
+                } else {
+                    combined.push_str(&text);
+                }
+                if max_output > 0 && combined.len() > max_output + max_output / 4 {
+                    crate::block::keep_tail(&mut combined, max_output);
+                }
             }
         }
         let status = child.wait().await?;
+        // A `\r\n` split across two reads is the only pair left to normalize.
+        if combined.contains("\r\n") {
+            combined = combined.replace("\r\n", "\n");
+        }
         (
-            std::process::Output {
-                status,
-                stdout: stdout_raw,
-                stderr: stderr_raw,
-            },
+            // Streamed output lives in `combined` only; stdout_raw / stderr_raw stay empty.
+            std::process::Output { status, stdout: Vec::new(), stderr: Vec::new() },
             Some(combined),
         )
     } else {
@@ -435,7 +443,10 @@ async fn execute_command_impl(
     Ok(CommandExecutionResult {
         stdout_raw,
         stderr_raw,
-        combined_output: streamed_output.unwrap_or(combined).replace("\r\n", "\n"),
+        combined_output: match streamed_output {
+            Some(streamed) => streamed,
+            None => combined.replace("\r\n", "\n"),
+        },
         exit_code,
         duration_ms: start.elapsed().as_millis() as u64,
         updated_cwd: None,
@@ -455,6 +466,9 @@ pub(crate) fn apply_terminal_env(cmd: &mut CommandBuilder) {
     cmd.env("TERM_PROGRAM", "MRT");
     cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
 }
+
+/// Read size for streamed command output (64 KiB: fewer reads and callbacks than 8 KiB).
+const STREAM_READ_BUFFER: usize = 64 * 1024;
 
 // Retain incomplete UTF-8 between reads, separately for each output stream.
 fn decode_output(pending: &mut Vec<u8>, eof: bool) -> String {
@@ -801,9 +815,10 @@ mod directory_tests {
             .unwrap()
             .unwrap();
         assert_eq!(result.exit_code, 7);
-        assert!(result.stdout_raw.contains("first"));
-        assert!(result.stdout_raw.contains("last"));
-        assert!(result.stderr_raw.contains("error"));
+        assert!(result.combined_output.contains("first"));
+        assert!(result.combined_output.contains("last"));
+        assert!(result.combined_output.contains("error"));
+        assert!(result.stdout_raw.is_empty(), "streamed output is kept once, in combined_output");
         assert_eq!(result.combined_output, chunks.replace("\r\n", "\n"));
     }
 

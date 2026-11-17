@@ -196,9 +196,88 @@ pub fn render(ctx: &egui::Context, mode: &CopyMode, blocks: &[CommandBlock]) {
         });
 }
 
+/// Copy mode inside a full-screen program's grid: a keyboard cursor over the visible
+/// screen, with the same keys as block copy mode (`h` `j` `k` `l` or arrows, `0` / `$`
+/// for the line's start / end, `g` / `G`, `v` to select, `y` / Enter to copy, Esc).
+/// Keys go to MRT, not the program, until it ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GridCopy {
+    /// (column, row) of the cursor.
+    pub cursor: (u16, u16),
+    pub anchor: Option<(u16, u16)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GridOutcome {
+    Stay,
+    /// Copy the selection (or the cursor line when nothing is selected) and leave.
+    Copy { whole_line: bool },
+    Exit,
+}
+
+impl GridCopy {
+    pub fn new(col: u16, row: u16) -> Self {
+        Self { cursor: (col, row), anchor: None }
+    }
+
+    /// The selection to shade: from the anchor to the cursor, or the cursor cell.
+    pub fn selection(&self) -> crate::widgets::term_view::Selection {
+        crate::widgets::term_view::Selection { anchor: self.anchor.unwrap_or(self.cursor), head: self.cursor }
+    }
+
+    pub fn apply(&mut self, key: egui::Key, modifiers: egui::Modifiers, cols: u16, rows: u16) -> GridOutcome {
+        use egui::Key as K;
+        let (max_c, max_r) = (cols.saturating_sub(1), rows.saturating_sub(1));
+        let (c, r) = &mut self.cursor;
+        match key {
+            K::ArrowLeft | K::H => *c = c.saturating_sub(1),
+            K::ArrowRight | K::L => *c = (*c + 1).min(max_c),
+            K::ArrowUp | K::K => *r = r.saturating_sub(1),
+            K::ArrowDown | K::J => *r = (*r + 1).min(max_r),
+            K::Num0 | K::Home => *c = 0,
+            K::Num4 if modifiers.shift => *c = max_c,
+            K::End => *c = max_c,
+            K::G if modifiers.shift => *r = max_r,
+            K::G => *r = 0,
+            K::PageUp => *r = r.saturating_sub(rows / 2),
+            K::PageDown => *r = (*r + rows / 2).min(max_r),
+            K::V | K::Space => {
+                self.anchor = match self.anchor {
+                    Some(_) => None,
+                    None => Some(self.cursor),
+                }
+            }
+            K::Y | K::Enter => return GridOutcome::Copy { whole_line: self.anchor.is_none() },
+            K::Escape | K::Q => return GridOutcome::Exit,
+            _ => {}
+        }
+        GridOutcome::Stay
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grid_copy_moves_selects_and_copies() {
+        let none = egui::Modifiers::NONE;
+        let mut grid = GridCopy::new(5, 2);
+        grid.apply(egui::Key::H, none, 80, 24);
+        grid.apply(egui::Key::K, none, 80, 24);
+        assert_eq!(grid.cursor, (4, 1));
+        grid.apply(egui::Key::Num4, egui::Modifiers::SHIFT, 80, 24);
+        assert_eq!(grid.cursor, (79, 1), "$ goes to the end of the line");
+        grid.apply(egui::Key::G, egui::Modifiers::SHIFT, 80, 24);
+        assert_eq!(grid.cursor.1, 23);
+        assert_eq!(grid.apply(egui::Key::Y, none, 80, 24), GridOutcome::Copy { whole_line: true });
+        grid.apply(egui::Key::V, none, 80, 24);
+        grid.apply(egui::Key::K, none, 80, 24);
+        let sel = grid.selection();
+        assert_eq!((sel.anchor, sel.head), ((79, 23), (79, 22)));
+        assert_eq!(grid.apply(egui::Key::Enter, none, 80, 24), GridOutcome::Copy { whole_line: false });
+        assert_eq!(grid.apply(egui::Key::Escape, none, 80, 24), GridOutcome::Exit);
+    }
 
     fn blocks() -> Vec<CommandBlock> {
         vec![

@@ -176,6 +176,12 @@ pub struct TerminalConfig {
     pub quick_dropdown: bool,
     /// Height of the drop-down, in percent of the screen (20–100).
     pub quick_height_percent: u8,
+    /// Windows: run plain native programs typed in a PowerShell tab through `cmd.exe`,
+    /// which passes large output ~20× faster than Windows PowerShell.
+    pub fast_native_output: bool,
+    /// Closing the window while commands, programs or PTYs run keeps MRT running in
+    /// the background; `mrt` (or `mrt quick`) brings the same window back.
+    pub keep_running_on_close: bool,
 }
 
 impl Default for TerminalConfig {
@@ -193,6 +199,8 @@ impl Default for TerminalConfig {
             restore_layout: true,
             quick_dropdown: false,
             quick_height_percent: 45,
+            fast_native_output: false,
+            keep_running_on_close: true,
         }
     }
 }
@@ -233,6 +241,10 @@ pub struct SafetyConfig {
     pub require_approval_for_critical: bool,
     /// Case-insensitive substrings; a command containing one is refused outright.
     pub blocked_patterns: Vec<String>,
+    /// Let paired remote devices (the `mrt share --web` companion) answer the Safety
+    /// Gate prompt. Off by default: any program that can reach the local bridge could
+    /// otherwise approve its own commands.
+    pub remote_approvals: bool,
 }
 
 impl Default for SafetyConfig {
@@ -242,6 +254,7 @@ impl Default for SafetyConfig {
             require_approval_for_moderate: false,
             require_approval_for_critical: true,
             blocked_patterns: Vec::new(),
+            remote_approvals: false,
         }
     }
 }

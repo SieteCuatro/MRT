@@ -48,6 +48,26 @@ The binary is `target/release/mrt` (`mrt.exe` on Windows).
 | `agent remove [same flags]` | Removes exactly what `agent setup` added. |
 | `list`, `send`, `capture`, `split` | Control a running MRT window from another terminal or a script (see [Controlling MRT from the command line](#controlling-mrt-from-the-command-line)). |
 
+### Closing the window, and upgrades
+
+**One MRT per user.** Starting `mrt` while it already runs brings the open window to the front instead of opening a second one.
+
+**Closing keeps running work alive.** If you close the window while commands, full-screen programs or agents' PTYs are running, MRT keeps running in the background (on Windows the window is hidden, elsewhere minimized) and a notification says so. Run `mrt` (or `mrt quick`) to get the same window back, with its tabs, finished blocks and live output. `mrt quit`, `:quit`, or closing the window when nothing runs, ends MRT. Turn this off with `terminal.keep_running_on_close = false`.
+
+**Upgrades never cut running sessions.** When a new MRT version starts while an older one runs, it asks the older one to quit if it is idle (the new one then reopens the saved layout), and otherwise brings the older window to the front and leaves it running until its commands finish.
+
+### Remote connections (`mrt share`, `mrt pair`, `mrt attach`)
+
+Attach to an MRT on another computer (Windows, macOS or Linux), follow its tabs and run commands there.
+
+1. On the host, with MRT running: `mrt share` (add `--web` for the phone companion). It listens on `0.0.0.0:7682` (`--listen ADDR:PORT` to change) and prints a **6-digit pairing code**.
+2. On your other computer: `mrt pair <host>` and type the code. The host asks *Allow device "laptop"…? [y/N]*; answer `y`.
+3. From then on: `mrt attach <host> [-t TAB]` follows the tab live (missed output is shown once when the connection comes back) and sends each line you type to the host tab as if typed there, so the host's Safety Gate still asks. `mrt list --host <host>`, `mrt send --host <host> …`, `mrt capture --host <host>` and `mrt split --host <host>` work as well.
+
+Security: pairing uses the code with SPAKE2, so it is never sent; every connection is end-to-end encrypted with Noise (X25519, ChaCha20-Poly1305, BLAKE2s) and accepted only from paired device keys, never by IP address or name. `mrt share --list` shows paired devices, and `mrt share --revoke <name>` removes one (its open connections end at their next request). `--no-pairing` shares without accepting new devices. Over the internet the same works through any address the guest can reach (a forwarded port, a VPN such as Tailscale or WireGuard); there is no relay service.
+
+**Phone companion.** `mrt share --web` also serves a small web app at `https://<host>:7683/` with a self-signed certificate: `mrt share` prints its SHA-256 fingerprint, which you can compare in the browser's certificate details before accepting it. Pair with the same code (and approval). The page lists the tabs with their activity, shows the selected tab's blocks live, has a command box, and shows the pending Safety Gate prompt with **Approve** / **Deny**. Approving from the phone only works with `safety.remote_approvals = true` (off by default, because any program that can reach MRT's local bridge could otherwise approve its own commands); every remote answer is recorded in the tab. Revoke a phone with `mrt share --revoke "web: <name>"`.
+
 ### Controlling MRT from the command line
 
 These subcommands talk to the open MRT window through the same token-authenticated local bridge that MCP agents use. `TAB` is a tab index, UUID or title substring; without `-t` the active tab is used. Every subcommand accepts `--json` to print the raw JSON result.
@@ -60,6 +80,7 @@ These subcommands talk to the open MRT window through the same token-authenticat
 | `mrt split [-t TAB] h\|v\|off` | Splits the tab side by side (`h`), stacked (`v`), or removes the split. |
 | `mrt server` | Runs a headless **session server**: it keeps tabs, command blocks and interactive PTYs (`mrt_pty_*`) alive between CLI and agent calls, without a window, until Ctrl+C. It does not start while a window is open; the window does not attach to it yet ([design](SESSION_SERVER.md)). |
 | `mrt quick [show\|hide\|toggle]` | Brings the window to the front or minimizes it (see [Quick terminal](#quick-terminal)). |
+| `mrt quit` | Closes MRT, including a window kept running in the background, and stops what still runs in it. |
 
 Exit codes: `0` success, the command's own code for `send`, `2` wrong arguments, `69` no MRT window is running, `70` MRT reported an error (for example an unknown tab).
 
@@ -145,7 +166,7 @@ Programs can show images in a command block with any of the three common protoco
 | kitty graphics (`ESC _ G …`) | `chafa -f kitty`, `timg -pk` | Direct transmission only (`t=d`); PNG (`f=100`), RGB and RGBA, zlib (`o=z`), chunked data (`m=1`), and `a=t` + `a=p` placement. MRT never reads files or shared memory a program names, and does not answer `a=q` queries, so tools that require a reply (`kitty +kitten icat`) may wait or fall back. |
 | Sixel (`ESC P … q`) | `img2sixel`, `chafa -f sixels`, `lsix` | Color registers in RGB or HLS, repeats and transparent backgrounds (`P2=1`). |
 
-Images appear where they were printed, scaled down to the block's width and at most 600 points high. Images larger than 8192 pixels on a side, or payloads over 64 MiB, are refused with a short note in the output. Images are not saved in history, and full-screen programs in the TUI overlay (`:tui`) do not show them yet.
+Images appear where they were printed, scaled down to the block's width and at most 600 points high. Images larger than 8192 pixels on a side, or payloads over 64 MiB, are refused with a short note in the output. Images are not saved in history. Full-screen programs (the TUI overlay and pane programs) show them too: an image appears at the cursor, takes the cells its size needs, and scrolls with the text; it is dropped when the program switches between the normal and alternate screen. After the scrollback limit is reached, older images may drift.
 
 ### Remote tabs (SSH)
 
@@ -237,6 +258,8 @@ Bindings are matched exactly first; a binding with no `shift`/`alt` also fires w
 Keys a binding consumes are not sent to the shell or TUI program; everything else passes through unchanged.
 
 ### Copy mode
+
+Inside a full-screen program (`vim`, `htop`, `:tui …`), `Ctrl+Shift+Space` starts **grid copy mode** instead: a cursor over the program's screen that moves with `h` `j` `k` `l` or the arrows, `0` / `$` (line start / end), `g` / `G` and `PgUp` / `PgDn`; `v` starts a selection, `y` or `Enter` copies it (or the cursor's line), `Esc` leaves. While it is on, keys go to MRT, not the program.
 
 `Ctrl+Shift+Space` starts copy mode on the last line of the active tab's last block. A panel at the bottom shows the lines around the cursor and what is selected; the prompt does not receive keys while it is open.
 
@@ -389,6 +412,8 @@ MRT stores its files in the per-user local data directory:
 | :--- | :--- |
 | `history.sqlite` | Every completed command block (command, output, shell, folder, exit code) and your saved runbooks. **Search history** searches it; queries of 3+ characters use the FTS5 trigram index, shorter ones a plain substring match. Output can contain secrets that commands printed; delete the file to wipe history. |
 | `layout.json` | The window's tabs, splits, shells, folders and remote (SSH) tabs, saved while MRT runs and when it closes, and reopened at the next start with fresh shells (`terminal.restore_layout`). Command blocks are not restored; they are in `history.sqlite`. Delete the file to start with one tab. |
+| `remote.json` | This device's key pair for remote connections, the devices allowed to attach (`guests`) and the hosts it paired with (`hosts`). Written `0600` on macOS/Linux. Delete it to forget all pairings. |
+| `companion-cert.pem`, `companion-key.pem` | The phone companion's self-signed TLS certificate and key. |
 | `mcp-bridge.json` | Port and per-session token of the running GUI's MCP bridge. Written at startup (`0600` on macOS/Linux) and removed on exit. A stale file left after a crash is ignored when no GUI answers. |
 
 `mrt agent setup` writes to the coding agents' own files (`~/.claude.json`, `~/.codex/config.toml`, `~/.gemini/settings.json` and `skills/mrt/SKILL.md` folders; see the [MCP Guide](MCP_GUIDE.md#21-one-command-setup-for-coding-agents-mrt-agent-setup)). Before changing an existing file it saves a copy next to it as `<file>.mrt-backup-<date>-<time>`.
@@ -416,9 +441,12 @@ MRT reads two optional [TOML](https://toml.io) files. Every setting is optional:
 | `terminal.font_size` | `13.0` | Terminal (monospace) font size, clamped to 8–40. Applied live. |
 | `terminal.font_family` | platform default | Monospace font: a family name installed on this computer (`"JetBrains Mono"`, `"CaskaydiaCove Nerd Font"`) or a path to a `.ttf` / `.otf` / `.ttc` file. Family names are matched against the font file names in the system and user font folders, preferring the regular face. A font that is not found is reported in the config banner and the default is used. Applied live. |
 | `terminal.font_fallback` | `[]` | Fonts tried, in order, for characters the main font lacks (Nerd Font icons, symbols, CJK), same syntax as `font_family`. Platform symbol fonts (Segoe UI Symbol, Apple Symbols, Noto Sans Symbols 2 / DejaVu Sans) are tried after them. Ligatures are not drawn. Applied live. |
+| `terminal.keep_running_on_close` | `true` | Closing the window while something runs keeps MRT running in the background; `mrt` brings the window back. |
+| `safety.remote_approvals` | `false` | Let the phone companion answer the Safety Gate prompt. |
 | `terminal.restore_layout` | `true` | Reopen the last session's tabs, splits, shells and folders at startup (fresh shells; nothing is run). Remote tabs reconnect on their first command. A shell that is no longer installed becomes the default shell, and a folder that no longer exists becomes the start folder. |
 | `terminal.max_block_output_mb` | `32` | Output kept per command block, in MiB. Older output is dropped from the front and the block says how much; `0` keeps everything (up to 4096). Applies to commands started after the change. |
 | `terminal.theme` | `graphite-calm` | `graphite-calm` (aliases `dark`, `default`), `high-contrast`, or a theme file: a path, or a name looked up next to the config file and in its `themes/` folder (`.toml` optional). See [Themes](#themes). Applied live. |
+| `terminal.fast_native_output` | `false` | Windows only. A plain native program typed in a PowerShell tab (for example `cargo build`, with no pipes, variables or quotes, and not a PowerShell alias like `curl`) runs through `cmd.exe`, which passes large output about 20× faster than Windows PowerShell. Variables and functions defined in the PowerShell session do not apply to those commands. |
 | `terminal.quick_dropdown`, `terminal.quick_height_percent` | `false`, `45` | With `true`, `mrt quick` shows the window as a drop-down across the top of the screen at this height. |
 | `terminal.persistent_shell` | `true` | Run each tab's commands in one long-lived shell so state carries over (see [§2](#2-the-prompt)). `false` runs every command in a new shell process. Applied on reload; turning it off ends the running shells. |
 | `terminal.scrollback_blocks`, `terminal.auto_detect_structured_output` | `500`, `true` | Reserved; parsed but not applied yet. |

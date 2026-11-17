@@ -261,6 +261,10 @@ pub struct ActiveTuiSession {
     /// Text selected by dragging (when the program does not take the mouse, or with
     /// Shift), and whether a selection drag is in progress.
     pub selection: Option<crate::widgets::term_view::Selection>,
+    /// Keyboard copy mode over the grid (`copy_mode` while the program has the keyboard).
+    pub grid_copy: Option<crate::copy_mode::GridCopy>,
+    /// Textures of the inline images in the grid, by image id.
+    pub image_textures: HashMap<u64, egui::TextureHandle>,
     pub selecting: bool,
     /// `None` for the full-screen overlay; `Some(0)` / `Some(1)` for a session drawn
     /// inside the primary / secondary pane of a split tab.
@@ -293,6 +297,8 @@ impl ActiveTuiSession {
             mouse_cell: None,
             wheel_accum: 0.0,
             selection: None,
+            grid_copy: None,
+            image_textures: HashMap::new(),
             selecting: false,
             pane,
         }
@@ -317,9 +323,58 @@ impl ActiveTuiSession {
         fresh
     }
 
+    /// Starts copy mode at the program's cursor.
+    fn start_grid_copy(&mut self) {
+        let cursor = self.term.snapshot().cursor;
+        let grid = crate::copy_mode::GridCopy::new(cursor.col, cursor.row);
+        self.selection = Some(grid.selection());
+        self.grid_copy = Some(grid);
+    }
+
+    /// Copy-mode keys: they move the selection instead of reaching the program.
+    fn grid_copy_keys(&mut self, ctx: &egui::Context) {
+        let Some(mut grid) = self.grid_copy.take() else { return };
+        let keys: Vec<(egui::Key, egui::Modifiers)> = ctx.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::Key { key, pressed: true, modifiers, .. } => Some((*key, *modifiers)),
+                    _ => None,
+                })
+                .collect()
+        });
+        let (cols, rows) = (self.term.cols(), self.term.rows());
+        for (key, modifiers) in keys {
+            match grid.apply(key, modifiers, cols, rows) {
+                crate::copy_mode::GridOutcome::Stay => {}
+                crate::copy_mode::GridOutcome::Copy { whole_line } => {
+                    let selection = if whole_line {
+                        let row = grid.cursor.1;
+                        crate::widgets::term_view::Selection { anchor: (0, row), head: (cols.saturating_sub(1), row) }
+                    } else {
+                        grid.selection()
+                    };
+                    ctx.copy_text(crate::widgets::term_view::selection_text(&self.term.snapshot(), &selection));
+                    self.selection = None;
+                    return;
+                }
+                crate::copy_mode::GridOutcome::Exit => {
+                    self.selection = None;
+                    return;
+                }
+            }
+        }
+        self.selection = Some(grid.selection());
+        self.grid_copy = Some(grid);
+    }
+
     /// Sends this frame's keyboard input to the program. Keys bound to MRT actions
     /// (e.g. `exit_tui`) were already removed by `handle_keybindings`.
     fn forward_keys(&mut self, ctx: &egui::Context) -> Vec<u8> {
+        if self.grid_copy.is_some() {
+            self.grid_copy_keys(ctx);
+            return Vec::new();
+        }
         let modes = self.term.modes();
         // egui-winit turns Ctrl+C (Cmd+C on macOS) into `Event::Copy` with no key event.
         // It copies the selection when there is one, with Ctrl+Shift+C, and on macOS,
@@ -390,6 +445,28 @@ impl ActiveTuiSession {
                 cell,
                 focused && window_focused,
             );
+        // Inline images (iTerm2, kitty, Sixel) over the cells they cover.
+        let placements = self.term.images_on_screen();
+        if !placements.is_empty() || !self.image_textures.is_empty() {
+            let painter = ui.painter_at(response.rect);
+            let live: std::collections::HashSet<u64> = placements.iter().map(|p| p.id).collect();
+            self.image_textures.retain(|id, _| live.contains(id));
+            for placement in placements {
+                let texture = match self.image_textures.get(&placement.id) {
+                    Some(texture) => texture.clone(),
+                    None => {
+                        let Some(image) = self.term.image(placement.id) else { continue };
+                        let pixels = egui::ColorImage::from_rgba_unmultiplied([image.width as usize, image.height as usize], &image.rgba);
+                        let texture = ui.ctx().load_texture(format!("tui-image-{}", placement.id), pixels, egui::TextureOptions::LINEAR);
+                        self.image_textures.insert(placement.id, texture.clone());
+                        texture
+                    }
+                };
+                let min = response.rect.min + egui::vec2(placement.col as f32 * cell.x, placement.row as f32 * cell.y);
+                let rect = egui::Rect::from_min_size(min, egui::vec2(placement.cols as f32 * cell.x, placement.rows as f32 * cell.y));
+                painter.image(texture.id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+            }
+        }
         // Screen readers (AccessKit) get the visible screen as text; the closure only
         // runs when accessibility is active.
         let term = &self.term;
@@ -513,6 +590,62 @@ pub struct MrtGuiApp {
     /// A window action from `mrt quick` / `mrt_control_gui` (`show`, `hide`, `toggle`),
     /// applied in the next frame.
     pub(crate) pending_window: Option<String>,
+    /// A `:service` action turned into its shell command, submitted next frame through
+    /// the Safety Gate.
+    pub(crate) pending_service_command: Option<String>,
+    /// `mrt quit` / `:quit`: close even with work running.
+    pub(crate) quit_requested: bool,
+    /// When running blocks were last copied into the MCP mirror.
+    mirror_synced_at: std::cell::Cell<Option<Instant>>,
+}
+
+/// Windows PowerShell aliases that shadow a program of the same name (`curl` is
+/// `Invoke-WebRequest`, `sc` is `Set-Content`...): never sent to the fast path.
+const POWERSHELL_SHADOWING_ALIASES: &[&str] = &[
+    "curl", "wget", "sort", "where", "sc", "fc", "compare", "diff", "tee", "ls", "dir", "cat", "echo", "type",
+    "copy", "move", "del", "erase", "rd", "rmdir", "md", "mkdir", "cd", "cls", "start", "kill", "ps", "set",
+    "write", "r", "h", "history", "man", "mount", "select", "foreach", "measure",
+];
+
+/// Whether `command` is a plain call of a native program found on `path` (as an
+/// `.exe` or `.com`): one simple command line with no PowerShell syntax, so running it
+/// through `cmd.exe` gives the same result without Windows PowerShell's ~1 MiB/s
+/// output pipeline (`terminal.fast_native_output`).
+pub(crate) fn plain_native_invocation(command: &str, path: &std::ffi::OsStr) -> bool {
+    let command = command.trim();
+    if command.is_empty() || command.chars().any(|c| "|;&<>$(){}[]@`'\"%^,\n\r".contains(c)) {
+        return false;
+    }
+    let Some(program) = command.split_whitespace().next() else { return false };
+    let lower = program.to_ascii_lowercase();
+    let stem = lower.trim_end_matches(".exe").trim_end_matches(".com");
+    if program.starts_with('-') || program.contains(['/', '\\', ':']) || POWERSHELL_SHADOWING_ALIASES.contains(&stem) {
+        return false;
+    }
+    std::env::split_paths(path).any(|dir| {
+        ["exe", "com"].iter().any(|ext| {
+            let file = if lower.ends_with(&format!(".{ext}")) { dir.join(program) } else { dir.join(format!("{program}.{ext}")) };
+            file.is_file()
+        })
+    })
+}
+
+/// How often a running block's output is copied into the MCP mirror.
+const MIRROR_RUNNING_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Whether the mirror's copy of a block can stay: a finished block that has not
+/// changed since (same output, exit code, pin and AI fields), or a running block
+/// between refreshes.
+fn mirror_block_current(mirror: &CommandBlock, gui: &CommandBlock, refresh_running: bool) -> bool {
+    if gui.exit_code.is_none() {
+        return !refresh_running && mirror.exit_code.is_none();
+    }
+    mirror.exit_code == gui.exit_code
+        && mirror.plain_output.len() == gui.plain_output.len()
+        && mirror.pinned == gui.pinned
+        && mirror.ai_explanation == gui.ai_explanation
+        && mirror.ai_suggested_fix == gui.ai_suggested_fix
+        && mirror.view_mode == gui.view_mode
 }
 
 /// The egui context, set once the window exists, so background threads can wake
@@ -529,6 +662,59 @@ pub fn wake_ui() {
     if let Some(ctx) = UI_CONTEXT.get() {
         ctx.request_repaint();
     }
+}
+
+/// The native window (an `HWND` on Windows), so a window hidden in the background
+/// can be shown from another thread, where the UI loop may not run while hidden.
+static NATIVE_WINDOW: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+/// Set while the window is hidden because MRT kept running after it was closed.
+pub(crate) static IN_BACKGROUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Shows the native window directly (Windows), for a window hidden in the background.
+pub(crate) fn native_show_window() {
+    #[cfg(windows)]
+    {
+        #[link(name = "user32")]
+        extern "system" {
+            fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
+            fn SetForegroundWindow(hwnd: isize) -> i32;
+        }
+        let hwnd = NATIVE_WINDOW.load(std::sync::atomic::Ordering::Relaxed);
+        if hwnd != 0 {
+            // SAFETY: plain Win32 calls on the window MRT created; 9 is SW_RESTORE.
+            unsafe {
+                ShowWindow(hwnd, 9);
+                SetForegroundWindow(hwnd);
+            }
+        }
+    }
+}
+
+/// Like [`waking_channel`] for GUI commands, but a request to show (or quit) a window
+/// hidden in the background shows it right away, so the UI loop runs again.
+fn gui_command_channel() -> (Sender<GuiUiCommand>, Receiver<GuiUiCommand>) {
+    if cfg!(test) {
+        return channel();
+    }
+    let (tx, raw_rx) = channel::<GuiUiCommand>();
+    let (fwd_tx, rx) = channel::<GuiUiCommand>();
+    std::thread::Builder::new()
+        .name("mrt-ui-commands".into())
+        .spawn(move || {
+            while let Ok(command) = raw_rx.recv() {
+                if let GuiUiCommand::SetWindow { action } = &command {
+                    if action != "hide" && IN_BACKGROUND.load(std::sync::atomic::Ordering::Relaxed) {
+                        native_show_window();
+                    }
+                }
+                if fwd_tx.send(command).is_err() {
+                    break;
+                }
+                wake_ui();
+            }
+        })
+        .expect("spawn UI command thread");
+    (tx, rx)
 }
 
 /// A channel whose receiver wakes the UI for every message: a thread forwards
@@ -570,7 +756,7 @@ impl MrtGuiApp {
         let shells = discover_shells();
         let initial_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-        let (gui_cmd_tx, gui_cmd_rx) = waking_channel();
+        let (gui_cmd_tx, gui_cmd_rx) = gui_command_channel();
         let mut mcp_state = MrtMcpServerState::default();
         mcp_state.gui_tx = Some(gui_cmd_tx);
 
@@ -688,6 +874,9 @@ impl MrtGuiApp {
             layout_next_check: Instant::now(),
             copy_mode: None,
             pending_window: None,
+            pending_service_command: None,
+            quit_requested: false,
+            mirror_synced_at: std::cell::Cell::new(None),
         };
         app.apply_config_side_effects();
         if !cfg!(test) && app.config_state.config.terminal.restore_layout {
@@ -1091,6 +1280,23 @@ impl MrtGuiApp {
     }
 
     /// Resolves a kill request against a fresh snapshot; the result opens the Safety Gate.
+    /// `:services [filter]`: a table of system services.
+    fn spawn_services_list(&mut self, tab_id: Uuid, cwd: PathBuf, raw_input: String, filter: String) {
+        let tx = self.tx.clone();
+        self.busy_count += 1;
+        self.runtime.spawn(async move {
+            let started = Instant::now();
+            let block = match mrt_tools::list_services(&filter).await {
+                Ok(services) => {
+                    let (structured, text) = mrt_tools::services_to_table(&services);
+                    CommandBlock::new_structured(&raw_input, "mrt-proc", cwd.display().to_string(), text, structured, 0, started.elapsed().as_millis() as u64)
+                }
+                Err(e) => CommandBlock::new_completed(&raw_input, "mrt-proc", cwd.display().to_string(), e.to_string(), 1, 0),
+            };
+            let _ = tx.send(AsyncWorkerEvent::BlockCompleted { tab_id, block, updated_cwd: None });
+        });
+    }
+
     /// `:suspend`, `:resume`, `:priority`: resolved like `:kill`; Critical targets are
     /// refused and the rest changed at once (each change can be undone).
     fn spawn_process_control(&mut self, tab_id: Uuid, cwd: PathBuf, raw_input: String, request: mrt_tools::ControlRequest) {
@@ -1307,6 +1513,21 @@ impl MrtGuiApp {
             match rest.trim().parse::<u32>() {
                 Ok(pid) => self.spawn_proc_command(tab_id, cwd, raw_input.to_string(), pid),
                 Err(_) => self.push_block(tab_id, Self::process_error_block(raw_input, &cwd, "Usage: :proc <pid>")),
+            }
+            return true;
+        }
+        if let Some(filter) = command_args(raw_input, ":services") {
+            self.spawn_services_list(tab_id, cwd, raw_input.to_string(), filter.trim().to_string());
+            return true;
+        }
+        if command_args(raw_input, ":service").is_some() {
+            match mrt_tools::parse_service_command(raw_input) {
+                // Submitted like typed input: the Safety Gate always asks for service control.
+                Ok((action, name)) => {
+                    let command = mrt_tools::service_shell_command(std::env::consts::OS, action, &name);
+                    self.pending_service_command = Some(command);
+                }
+                Err(e) => self.push_block(tab_id, Self::process_error_block(raw_input, &cwd, e.to_string())),
             }
             return true;
         }
@@ -1965,7 +2186,27 @@ impl MrtGuiApp {
                 *guard = active.cwd.clone();
             }
         }
+        if let Ok(mut guard) = state.pending_approval.lock() {
+            *guard = self.pending_safety.as_ref().map(|p| {
+                serde_json::json!({
+                    "command": p.assessment.command,
+                    "risk": p.assessment.risk.label(),
+                    "reason": p.assessment.reason,
+                    "tab_id": p.tab_id,
+                })
+            });
+        }
         if let Ok(mut tabs_guard) = state.tabs.lock() {
+            // This runs every frame. Copying every block every frame cost O(all output)
+            // per frame, so blocks the mirror already has unchanged are moved over, and a
+            // running block is copied at most every MIRROR_RUNNING_INTERVAL.
+            let now = Instant::now();
+            let refresh_running = self.mirror_synced_at.get().is_none_or(|t| now.duration_since(t) >= MIRROR_RUNNING_INTERVAL);
+            if refresh_running {
+                self.mirror_synced_at.set(Some(now));
+            }
+            let mut previous: HashMap<Uuid, Vec<CommandBlock>> =
+                tabs_guard.drain(..).map(|t| (t.id, t.blocks)).collect();
             *tabs_guard = self
                 .tabs
                 .iter()
@@ -1974,14 +2215,28 @@ impl MrtGuiApp {
                         .shells
                         .get(t.active_shell_idx)
                         .unwrap_or(&self.shells[0]);
+                    let mut old: HashMap<Uuid, CommandBlock> = previous
+                        .remove(&t.id)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|b| (b.id, b))
+                        .collect();
+                    let blocks = t
+                        .blocks
+                        .iter()
+                        .map(|b| match old.remove(&b.id) {
+                            Some(kept) if mirror_block_current(&kept, b, refresh_running) => kept,
+                            _ => b.clone(),
+                        })
+                        .collect();
                     McpTabSession {
                         id: t.id,
                         title: t.title.clone(),
                         shell_id: shell.id.clone(),
                         shell_name: shell.kind.short_label().to_string(),
                         cwd: t.cwd.clone(),
-                        blocks: t.blocks.clone(),
-                        activity: Some(t.activity.snapshot(Instant::now())),
+                        blocks,
+                        activity: Some(t.activity.snapshot(now)),
                         sandbox_root: t.sandbox_root.clone(),
                     }
                 })
@@ -2084,6 +2339,22 @@ impl MrtGuiApp {
                     }
                 }
                 GuiUiCommand::SetWindow { action } => self.pending_window = Some(action),
+                GuiUiCommand::SafetyDecision { approve, device } => {
+                    if self.config_state.config.safety.remote_approvals && self.pending_safety.is_some() {
+                        let tab_id = self.pending_safety.as_ref().map(|p| p.tab_id);
+                        let command = self.pending_safety.as_ref().map(|p| p.assessment.command.clone()).unwrap_or_default();
+                        if approve {
+                            self.approve_pending_command();
+                        } else {
+                            self.deny_pending_command();
+                        }
+                        if let Some(tab_id) = tab_id {
+                            let cwd = self.tabs.iter().find(|t| t.id == tab_id).map(|t| t.cwd.clone()).unwrap_or_default();
+                            let verb = if approve { "approved" } else { "denied" };
+                            self.push_block(tab_id, Self::process_error_block(":safety", &cwd, format!("Safety Gate: `{command}` was {verb} from {device}.")));
+                        }
+                    }
+                }
                 GuiUiCommand::RequestProcessKill { pids, force, tree } => {
                     if let Some(tab) = self.tabs.get(self.active_tab) {
                         let (tab_id, cwd) = (tab.id, tab.cwd.clone());
@@ -2483,6 +2754,11 @@ impl MrtGuiApp {
             }
         }
 
+        if raw_input == ":quit" {
+            self.pending_window = Some("quit".into());
+            return;
+        }
+
         if raw_input == ":assist" || raw_input.starts_with(":assist ") {
             let question = raw_input.trim_start_matches(":assist").trim();
             let question = if question.is_empty() {
@@ -2592,6 +2868,20 @@ impl MrtGuiApp {
         }
 
         self.spawn_shell_command(tab_id, shell, cwd, raw_input);
+    }
+
+    /// Cancels the pending Safety Gate prompt (and a runbook waiting on it).
+    fn deny_pending_command(&mut self) {
+        let cancelled_tab = self.pending_safety.as_ref().map(|p| p.tab_id);
+        self.pending_safety = None;
+        if let Some(replay) = &self.active_replay {
+            if Some(replay.tab_id) == cancelled_tab && replay.waiting_block_id.is_none() {
+                let name = replay.runbook_name.clone();
+                let step = replay.next_step_idx;
+                let total = replay.steps.len();
+                self.stop_runbook_replay(Some(format!("Runbook '{name}' stopped at step {step}/{total}: cancelled at Safety Gate.")));
+            }
+        }
     }
 
     fn approve_pending_command(&mut self) {
@@ -2748,6 +3038,7 @@ impl MrtGuiApp {
     }
 
     fn spawn_shell_command(&mut self, tab_id: Uuid, shell: ShellProfile, cwd: PathBuf, raw_input: String) -> Uuid {
+        let shell = self.fast_native_shell(tab_id, &shell, &raw_input).unwrap_or(shell);
         let mut running = CommandBlock::new_completed(&raw_input, shell.kind.short_label(), cwd.display().to_string(), "", 0, 0);
         running.exit_code = None;
         let block_id = running.id;
@@ -3711,6 +4002,27 @@ impl MrtGuiApp {
         }
     }
 
+    /// With `terminal.fast_native_output`, a plain native program typed in a Windows
+    /// PowerShell or pwsh tab runs through `cmd.exe` instead (see
+    /// [`plain_native_invocation`]). Not for remote or sandbox tabs.
+    fn fast_native_shell(&self, tab_id: Uuid, shell: &ShellProfile, command: &str) -> Option<ShellProfile> {
+        if !cfg!(windows) || !self.config_state.config.terminal.fast_native_output {
+            return None;
+        }
+        if !matches!(shell.kind, mrt_core::ShellKind::WindowsPowerShell | mrt_core::ShellKind::PowerShellCore) {
+            return None;
+        }
+        let tab = self.tabs.iter().find(|t| t.id == tab_id)?;
+        if tab.remote.is_some() || tab.sandbox_root.is_some() {
+            return None;
+        }
+        let path = std::env::var_os("PATH")?;
+        if !plain_native_invocation(command, &path) {
+            return None;
+        }
+        self.shells.iter().find(|s| matches!(s.kind, mrt_core::ShellKind::CmdBatch)).cloned()
+    }
+
     /// Runs an `[[actions]]` entry: one shell command is submitted like typed input;
     /// several lines (or MRT `:` commands) run in order as a runbook in the active tab.
     pub(crate) fn run_named_action(&mut self, id: &str) {
@@ -3769,6 +4081,38 @@ impl MrtGuiApp {
         crate::hooks::fire(&self.runtime, hooks, &self.shells[idx], &event);
     }
 
+    /// Whether closing the window now would stop something: running commands, programs
+    /// in the TUI overlay or panes, or PTYs that agents started.
+    pub(crate) fn has_running_work(&self) -> usize {
+        let ptys = self.mcp_host.local_server_state.ptys.lock().map(|p| p.len()).unwrap_or(0);
+        self.running_output.len() + usize::from(self.active_tui.is_some()) + self.pane_tuis.len() + ptys
+    }
+
+    /// Closing the window with work running keeps MRT going in the background
+    /// (`terminal.keep_running_on_close`): the window is hidden (minimized outside
+    /// Windows) and `mrt` / `mrt quick` brings the same window back.
+    fn handle_close_request(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|i| i.viewport().close_requested()) || self.quit_requested {
+            return;
+        }
+        let running = self.has_running_work();
+        if !self.config_state.config.terminal.keep_running_on_close || running == 0 {
+            return;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        if cfg!(windows) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        } else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        }
+        IN_BACKGROUND.store(true, std::sync::atomic::Ordering::Relaxed);
+        let mut note = notify_rust::Notification::new();
+        note.summary("MRT keeps running")
+            .body(&format!("{running} command(s) or program(s) still running. Run `mrt` to bring the window back, or `mrt quit` to stop them."))
+            .appname("MRT");
+        let _ = note.show();
+    }
+
     /// Quick terminal: shows the window in front (as a drop-down across the top of the
     /// screen when `terminal.quick_dropdown` is on) or minimizes it. The window is
     /// minimized rather than hidden, so it can always be brought back from the taskbar.
@@ -3776,10 +4120,17 @@ impl MrtGuiApp {
         let Some(action) = self.pending_window.take() else { return };
         let (focused, minimized, monitor) =
             ctx.input(|i| (i.viewport().focused.unwrap_or(false), i.viewport().minimized.unwrap_or(false), i.viewport().monitor_size));
+        if action == "quit" {
+            self.quit_requested = true;
+            IN_BACKGROUND.store(false, std::sync::atomic::Ordering::Relaxed);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        let hidden = IN_BACKGROUND.swap(false, std::sync::atomic::Ordering::Relaxed);
         let show = match action.as_str() {
             "show" => true,
             "hide" => false,
-            _ => minimized || !focused,
+            _ => hidden || minimized || !focused,
         };
         if show {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
@@ -4052,9 +4403,22 @@ impl MrtGuiApp {
             Action::ToggleMosaic => self.mosaic = !self.mosaic,
             Action::OpenTaskManager => self.open_task_manager(None),
             Action::Find => self.find.open(),
-            Action::CopyMode => {
-                self.copy_mode = self.tabs.get(self.active_tab).and_then(|t| crate::copy_mode::CopyMode::new(&t.blocks));
-            }
+            Action::CopyMode => match self.focused_tui() {
+                // Inside a full-screen program: copy mode over its grid.
+                Some(FocusedTui::Overlay) => {
+                    if let Some(session) = self.active_tui.as_mut() {
+                        session.start_grid_copy();
+                    }
+                }
+                Some(FocusedTui::Pane(index)) => {
+                    if let Some(session) = self.pane_tuis.get_mut(index) {
+                        session.start_grid_copy();
+                    }
+                }
+                None => {
+                    self.copy_mode = self.tabs.get(self.active_tab).and_then(|t| crate::copy_mode::CopyMode::new(&t.blocks));
+                }
+            },
             Action::ToggleBroadcast => {
                 if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                     tab.broadcast = !tab.broadcast;
@@ -4395,8 +4759,17 @@ impl eframe::App for MrtGuiApp {
         self.persist_layout(true);
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.persist_layout(false);
+        if NATIVE_WINDOW.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(handle) = frame.window_handle() {
+                if let RawWindowHandle::Win32(win) = handle.as_raw() {
+                    NATIVE_WINDOW.store(win.hwnd.get(), std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+        self.handle_close_request(ctx);
         let first_frame = !self.focused_on_start;
         let mut focus_prompt = first_frame;
         let palette_was_open = self.show_command_palette;
@@ -4418,6 +4791,9 @@ impl eframe::App for MrtGuiApp {
         self.handle_keybindings(ctx);
         self.update_copy_mode(ctx);
         self.apply_window_action(ctx);
+        if let Some(command) = self.pending_service_command.take() {
+            self.submit_input(Some(command), false);
+        }
         self.process_tui_session(ctx);
         self.maybe_spawn_process_tick();
         if let Some(idx) = self.notifier.update(ctx, &self.tabs, self.active_tab, self.mosaic) {
@@ -5184,18 +5560,7 @@ impl eframe::App for MrtGuiApp {
             if approve {
                 self.approve_pending_command();
             } else if cancel {
-                let cancelled_tab = self.pending_safety.as_ref().map(|p| p.tab_id);
-                self.pending_safety = None;
-                if let Some(replay) = &self.active_replay {
-                    if Some(replay.tab_id) == cancelled_tab && replay.waiting_block_id.is_none() {
-                        let name = replay.runbook_name.clone();
-                        let step = replay.next_step_idx;
-                        let total = replay.steps.len();
-                        self.stop_runbook_replay(Some(format!(
-                            "Runbook '{name}' stopped at step {step}/{total}: cancelled at Safety Gate."
-                        )));
-                    }
-                }
+                self.deny_pending_command();
             }
         }
 
@@ -6072,6 +6437,49 @@ error: test failed
         let answer = block.ai_explanation.as_deref().unwrap_or("");
         assert!(answer.contains("`cargo test` failed (exit code 101)"), "{answer}");
         assert!(answer.contains("earlier run"), "{answer}");
+    }
+
+    #[test]
+    fn remote_safety_decisions_need_the_setting() {
+        let mut app = MrtGuiApp::new();
+        // Never runs: every Moderate command waits for approval in this test.
+        app.config_state.config.safety.require_approval_for_moderate = true;
+        app.submit_input(Some("del notes.txt".into()), false);
+        assert!(app.pending_safety.is_some());
+        app.sync_mcp_from_gui();
+        let mirrored = app.mcp_host.local_server_state.pending_approval.lock().unwrap().clone().unwrap();
+        assert_eq!(mirrored["command"], "del notes.txt");
+
+        let send = |app: &mut MrtGuiApp, approve: bool| {
+            app.mcp_host.local_server_state.gui_tx.as_ref().unwrap()
+                .send(GuiUiCommand::SafetyDecision { approve, device: "web: phone".into() }).unwrap();
+            app.process_mcp_ui_commands();
+        };
+        send(&mut app, false);
+        assert!(app.pending_safety.is_some(), "ignored while safety.remote_approvals is off");
+        app.config_state.config.safety.remote_approvals = true;
+        send(&mut app, false);
+        assert!(app.pending_safety.is_none(), "denied from the phone");
+        assert!(app.tabs[0].blocks.last().unwrap().plain_output.contains("denied from web: phone"));
+    }
+
+    #[test]
+    fn plain_native_invocations_are_recognised() {
+        let dir = std::env::temp_dir().join(format!("mrt-path-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("cargo.exe"), b"").unwrap();
+        std::fs::write(dir.join("curl.exe"), b"").unwrap();
+        std::fs::write(dir.join("build.bat"), b"").unwrap();
+        let path = std::env::join_paths([dir.clone()]).unwrap();
+        assert!(plain_native_invocation("cargo build --release", &path));
+        assert!(plain_native_invocation("cargo.exe test", &path));
+        assert!(!plain_native_invocation("cargo build | Select-String warn", &path), "PowerShell pipeline");
+        assert!(!plain_native_invocation("cargo build $args", &path), "variable");
+        assert!(!plain_native_invocation("cargo build \"a b\"", &path), "quoting differs between shells");
+        assert!(!plain_native_invocation("curl https://x", &path), "alias of Invoke-WebRequest");
+        assert!(!plain_native_invocation("build", &path), ".bat is not a native program");
+        assert!(!plain_native_invocation("Get-ChildItem", &path), "cmdlet");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

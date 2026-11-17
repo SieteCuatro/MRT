@@ -375,7 +375,17 @@ pub struct TerminalEmulator {
     term: Term<Listener>,
     parser: ansi::Processor,
     listener: Listener,
+    /// Takes image sequences out of the stream (alacritty has no graphics).
+    graphics: crate::grid_images::GraphicsSplitter,
+    /// Decodes them (keeps kitty's chunk and `a=t` state between sequences).
+    graphics_decoder: crate::vt::VtStream,
+    images: Vec<crate::grid_images::GridImage>,
+    next_image_id: u64,
+    images_on_alt_screen: bool,
 }
+
+/// Most images kept per emulator; older ones are dropped.
+const MAX_GRID_IMAGES: usize = 64;
 
 impl std::fmt::Debug for TerminalEmulator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -415,13 +425,84 @@ impl TerminalEmulator {
             term,
             parser: ansi::Processor::new(),
             listener,
+            graphics: crate::grid_images::GraphicsSplitter::default(),
+            graphics_decoder: crate::vt::VtStream::new(),
+            images: Vec::new(),
+            next_image_id: 0,
+            images_on_alt_screen: false,
         }
     }
 
-    /// Feeds raw PTY output into the emulator.
+    /// Feeds raw PTY output into the emulator. Inline images (iTerm2, kitty, Sixel)
+    /// are placed at the cursor ([`images_on_screen`](Self::images_on_screen)).
     pub fn feed(&mut self, bytes: &[u8]) {
         self.flush_expired_sync();
-        self.parser.advance(&mut self.term, bytes);
+        for segment in self.graphics.split(bytes) {
+            match segment {
+                crate::grid_images::Segment::Text(text) => self.parser.advance(&mut self.term, &text),
+                crate::grid_images::Segment::Graphic(seq) => self.place_graphic(&seq),
+            }
+        }
+        // Switching between the primary and alternate screen leaves the images behind.
+        let alt = self.is_alt_screen();
+        if alt != self.images_on_alt_screen {
+            self.images.clear();
+            self.images_on_alt_screen = alt;
+        }
+    }
+
+    fn place_graphic(&mut self, seq: &[u8]) {
+        let decoded = self.graphics_decoder.feed(&String::from_utf8_lossy(seq));
+        // Decoding problems are shown as text, like in blocks.
+        if !decoded.plain_text.is_empty() {
+            let text = decoded.plain_text.replace('\n', "\r\n");
+            self.parser.advance(&mut self.term, text.as_bytes());
+        }
+        for image in decoded.images {
+            let cursor = self.cursor();
+            let (cell_w, cell_h) = {
+                let state = self.listener.state();
+                (state.cell_width_px, state.cell_height_px)
+            };
+            let (cols, rows) = crate::grid_images::image_cells(&image, cursor.col, self.cols(), self.rows(), cell_w, cell_h);
+            let line = self.scrollback_len() + cursor.row as usize;
+            self.next_image_id += 1;
+            self.images.push(crate::grid_images::GridImage { id: self.next_image_id, image, line, col: cursor.col, cols, rows });
+            if self.images.len() > MAX_GRID_IMAGES {
+                self.images.remove(0);
+            }
+            // Move below the image, as iTerm2 does, so following text does not cover it.
+            let mut advance = Vec::with_capacity(rows as usize * 2);
+            for _ in 0..rows {
+                advance.extend_from_slice(b"\r\n");
+            }
+            self.parser.advance(&mut self.term, &advance);
+        }
+    }
+
+    /// Images that are at least partly on the visible screen. `row` is relative to the
+    /// top of the screen and may be negative for an image scrolled partly off it.
+    pub fn images_on_screen(&self) -> Vec<crate::grid_images::GridImagePlacement> {
+        let top = self.scrollback_len() as i64;
+        let rows = self.rows() as i64;
+        self.images
+            .iter()
+            .filter_map(|img| {
+                let row = img.line as i64 - top;
+                (row + img.rows as i64 > 0 && row < rows).then(|| crate::grid_images::GridImagePlacement {
+                    id: img.id,
+                    row: row as i32,
+                    col: img.col,
+                    cols: img.cols,
+                    rows: img.rows,
+                })
+            })
+            .collect()
+    }
+
+    /// The image with `id`, for drawing.
+    pub fn image(&self, id: u64) -> Option<&crate::images::InlineImage> {
+        self.images.iter().find(|img| img.id == id).map(|img| &img.image)
     }
 
     /// When a program started a synchronized update (mode 2026) and has not
@@ -614,7 +695,14 @@ impl TerminalEmulator {
 
     /// Drops the scrollback history (the visible screen is kept).
     pub fn clear_scrollback(&mut self) {
+        let dropped = self.scrollback_len();
         self.feed(b"\x1b[3J");
+        // Images in the dropped history go with it; the rest move up.
+        self.images.retain_mut(|img| {
+            let kept = img.line >= dropped;
+            img.line = img.line.saturating_sub(dropped);
+            kept
+        });
     }
 
     /// One scrollback line as cells; `index` 0 is the oldest line.
@@ -701,6 +789,40 @@ fn convert_cell(cell: &Cell) -> TermCell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn png(w: u32, h: u32) -> String {
+        let mut out = Vec::new();
+        image::RgbaImage::from_pixel(w, h, image::Rgba([9, 9, 9, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        crate::shell_integration::base64_encode(&out)
+    }
+
+    #[test]
+    fn grid_images_are_placed_at_the_cursor_and_scroll_with_the_text() {
+        let mut term = TerminalEmulator::new(40, 10, 100);
+        term.set_cell_size_px(8, 16);
+        // A 16x32 px image is 2x2 cells.
+        let seq = format!("line one\r\n\x1b]1337;File=inline=1:{}\x07after", png(16, 32));
+        // Split the sequence across feeds.
+        let (a, b) = seq.as_bytes().split_at(30);
+        term.feed(a);
+        term.feed(b);
+        let placed = term.images_on_screen();
+        assert_eq!(placed.len(), 1);
+        assert_eq!((placed[0].row, placed[0].col, placed[0].cols, placed[0].rows), (1, 0, 2, 2));
+        assert_eq!(term.cursor().row, 3, "the cursor moved below the image");
+        assert!(term.screen_text().contains("after"));
+        assert!(!term.screen_text().contains("1337"), "the sequence never reached the grid");
+        assert_eq!(term.image(placed[0].id).unwrap().width, 16);
+        for i in 0..8 {
+            term.feed(format!("\r\nmore {i}").as_bytes());
+        }
+        let placed = term.images_on_screen();
+        assert_eq!(placed[0].row, -1, "scrolled up with the text, partly off screen");
+        term.feed(b"\x1b[?1049h");
+        assert!(term.images_on_screen().is_empty(), "the alternate screen starts without images");
+    }
 
     fn emu(cols: u16, rows: u16) -> TerminalEmulator {
         TerminalEmulator::new(cols, rows, 100)

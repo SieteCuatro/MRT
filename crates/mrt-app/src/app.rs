@@ -263,6 +263,8 @@ pub struct ActiveTuiSession {
     pub selection: Option<crate::widgets::term_view::Selection>,
     /// Keyboard copy mode over the grid (`copy_mode` while the program has the keyboard).
     pub grid_copy: Option<crate::copy_mode::GridCopy>,
+    /// Textures of the inline images in the grid, by image id.
+    pub image_textures: HashMap<u64, egui::TextureHandle>,
     pub selecting: bool,
     /// `None` for the full-screen overlay; `Some(0)` / `Some(1)` for a session drawn
     /// inside the primary / secondary pane of a split tab.
@@ -296,6 +298,7 @@ impl ActiveTuiSession {
             wheel_accum: 0.0,
             selection: None,
             grid_copy: None,
+            image_textures: HashMap::new(),
             selecting: false,
             pane,
         }
@@ -442,6 +445,28 @@ impl ActiveTuiSession {
                 cell,
                 focused && window_focused,
             );
+        // Inline images (iTerm2, kitty, Sixel) over the cells they cover.
+        let placements = self.term.images_on_screen();
+        if !placements.is_empty() || !self.image_textures.is_empty() {
+            let painter = ui.painter_at(response.rect);
+            let live: std::collections::HashSet<u64> = placements.iter().map(|p| p.id).collect();
+            self.image_textures.retain(|id, _| live.contains(id));
+            for placement in placements {
+                let texture = match self.image_textures.get(&placement.id) {
+                    Some(texture) => texture.clone(),
+                    None => {
+                        let Some(image) = self.term.image(placement.id) else { continue };
+                        let pixels = egui::ColorImage::from_rgba_unmultiplied([image.width as usize, image.height as usize], &image.rgba);
+                        let texture = ui.ctx().load_texture(format!("tui-image-{}", placement.id), pixels, egui::TextureOptions::LINEAR);
+                        self.image_textures.insert(placement.id, texture.clone());
+                        texture
+                    }
+                };
+                let min = response.rect.min + egui::vec2(placement.col as f32 * cell.x, placement.row as f32 * cell.y);
+                let rect = egui::Rect::from_min_size(min, egui::vec2(placement.cols as f32 * cell.x, placement.rows as f32 * cell.y));
+                painter.image(texture.id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+            }
+        }
         // Screen readers (AccessKit) get the visible screen as text; the closure only
         // runs when accessibility is active.
         let term = &self.term;

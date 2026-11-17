@@ -5311,7 +5311,13 @@ mod tests {
 
     /// Runs `cmd` in tab 0 with its first shell and waits for the block to finish.
     fn run_to_completion(app: &mut MrtGuiApp, cmd: &str) -> CommandBlock {
-        let block_id = app.spawn_shell_command(app.tabs[0].id, app.shells[0].clone(), app.tabs[0].cwd.clone(), cmd.to_string());
+        let shell = app.shells[0].clone();
+        run_in_shell(app, &shell, cmd)
+    }
+
+    /// Runs `cmd` in tab 0 with `shell` and waits for the block to finish.
+    fn run_in_shell(app: &mut MrtGuiApp, shell: &ShellProfile, cmd: &str) -> CommandBlock {
+        let block_id = app.spawn_shell_command(app.tabs[0].id, shell.clone(), app.tabs[0].cwd.clone(), cmd.to_string());
         let start = Instant::now();
         loop {
             if let Some(block) = app.tabs[0].blocks.iter().find(|b| b.id == block_id && b.exit_code.is_some()) {
@@ -5322,40 +5328,42 @@ mod tests {
         }
     }
 
+    /// Every installed shell with session support keeps state between commands, starting
+    /// from its very first command (the session starts while that command waits).
     #[test]
     fn persistent_shell_keeps_variables_and_directory_between_commands() {
         let mut app = MrtGuiApp::new();
         app.shell_pool.set_enabled(true);
-        let shell = app.shells[0].clone();
-        if !ShellSession::supports(&shell.kind) {
-            return;
+        let shells: Vec<ShellProfile> = app.shells.iter().filter(|s| ShellSession::supports(&s.kind)).cloned().collect();
+        for shell in shells {
+            let (set_var, print_var, print_cwd, _) = session_test_commands(&shell.kind);
+
+            run_in_shell(&mut app, &shell, set_var);
+            let block = run_in_shell(&mut app, &shell, print_var);
+            assert!(
+                block.plain_output.contains("value=kept-between-commands"),
+                "{:?}: variable lost between commands (session unavailable: {:?}); output: {:?}",
+                shell.kind,
+                app.shell_pool.unavailable_reason(app.tabs[0].id, &shell.id),
+                block.plain_output
+            );
+
+            let root = std::env::temp_dir().join(format!("mrt-session-test-{}", Uuid::new_v4()));
+            let target = root.join("mrt session cd");
+            std::fs::create_dir_all(&target).unwrap();
+            let cd = crate::shell_pool::cd_command(&shell.kind, &target).unwrap();
+            let block = run_in_shell(&mut app, &shell, &cd);
+            assert_eq!(block.exit_code, Some(0), "{:?}: cd failed: {:?}", shell.kind, block.plain_output);
+            assert!(
+                app.tabs[0].cwd.to_string_lossy().contains("mrt session cd"),
+                "{:?}: tab cwd not updated from the shell: {:?}",
+                shell.kind,
+                app.tabs[0].cwd
+            );
+            let block = run_in_shell(&mut app, &shell, print_cwd);
+            assert!(block.plain_output.contains("mrt session cd"), "{:?}: pwd output: {:?}", shell.kind, block.plain_output);
+            let _ = std::fs::remove_dir_all(&root);
         }
-        let (set_var, print_var, print_cwd, _) = session_test_commands(&shell.kind);
-
-        run_to_completion(&mut app, set_var);
-        let block = run_to_completion(&mut app, print_var);
-        assert!(
-            block.plain_output.contains("value=kept-between-commands"),
-            "variable lost between commands (session unavailable: {:?}); output: {:?}",
-            app.shell_pool.unavailable_reason(app.tabs[0].id, &shell.id),
-            block.plain_output
-        );
-
-        let root = std::env::temp_dir().join(format!("mrt-session-test-{}", Uuid::new_v4()));
-        let target = root.join("mrt session cd");
-        std::fs::create_dir_all(&target).unwrap();
-        let cd = crate::shell_pool::cd_command(&shell.kind, &target).unwrap();
-        let block = run_to_completion(&mut app, &cd);
-        assert_eq!(block.exit_code, Some(0), "cd failed: {:?}", block.plain_output);
-        assert!(
-            app.tabs[0].cwd.to_string_lossy().contains("mrt session cd"),
-            "tab cwd not updated from the shell: {:?}",
-            app.tabs[0].cwd
-        );
-        let block = run_to_completion(&mut app, print_cwd);
-        assert!(block.plain_output.contains("mrt session cd"), "pwd output: {:?}", block.plain_output);
-        drop(app);
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

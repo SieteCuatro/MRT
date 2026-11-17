@@ -67,11 +67,11 @@ The streaming generator is the benchmark binary itself, re-run through the shell
 
 ---
 
-## 2. Results (November 2026)
+## 2. Results (November 2026, measured under load)
 
 **Machine:** Intel Core i5-13420H (8 cores / 12 threads), Windows 11, Rust 1.98.1, release profile. Shells: `cmd.exe` and Windows PowerShell 5.1 (`pwsh` 7 was not installed).
 
-> **Caveat: the machine was busy.** Nine other MRT builds ran at the same time (40–50 `cargo`/`rustc` processes, 60–100 % CPU load). Absolute numbers are therefore pessimistic, probably by 2–3×. For example, `parse_ansi_text` on plain text measured 59 MiB/s under criterion and 193 MiB/s as best-of-5 in a quieter moment. The **ratios** and the **growth with size** are what matter here. Re-run on an idle machine for clean absolute numbers.
+> **Measured under load: compare ratios, not absolute MB/s.** Nine other MRT builds ran at the same time (40–50 `cargo`/`rustc` processes, 60–100 % CPU load). Absolute numbers are therefore pessimistic, probably by 2–3×. For example, `parse_ansi_text` on plain text measured 59 MiB/s under criterion and 193 MiB/s as best-of-5 in a quieter moment. The **ratios** and the **growth with size** are what matter here. Re-run on an idle machine for clean absolute numbers.
 
 ### Parsing and classification (criterion, median of 10 samples)
 

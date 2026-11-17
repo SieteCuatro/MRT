@@ -1,10 +1,14 @@
 # Changelog
 
-## Unreleased
+## v0.2.2 — 2026-11-17
 
 ### Fixed
 - **Linux binary on older distributions**: the Linux archive is now linked against glibc 2.17 (`scripts/release/build-linux.sh`, with cargo-zigbuild), so it runs on RHEL/CentOS 7, Ubuntu 14.04, Debian 8 and every newer distribution. v0.2.0 and v0.2.1 needed glibc 2.43. Tested headless on Ubuntu 14.04 (glibc 2.19) and with the window on Ubuntu 20.04 (glibc 2.31) and 26.04 (glibc 2.43).
 - Leftover `mrt-session-*` folders in the temp directory (from sessions that ended in a crash or a killed process) are removed when they are more than 12 hours old.
+
+### Notes
+- The CI and release workflows are still disabled; the Windows and Linux archives were built locally (Linux with `scripts/release/build-linux.sh`) and tested on Windows and Linux. There are no macOS archives.
+- The roadmap has a second list (Milestones 7–11) from a 2026 comparison with Warp, Ghostty, Kitty, Windows Terminal and Wave.
 
 ## v0.2.1 — 2026-11-17
 

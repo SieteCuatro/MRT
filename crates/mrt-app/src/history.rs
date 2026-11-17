@@ -23,6 +23,14 @@ pub struct Runbook {
 
 pub struct HistoryStore(Connection);
 
+/// A block as stored in history: without its styled spans, which hold a second copy
+/// of the text plus per-span overhead; they are rebuilt from `raw_output` on load.
+fn history_payload(block: &CommandBlock) -> Result<String> {
+    let mut value = serde_json::to_value(block)?;
+    value["ansi_spans"] = serde_json::Value::Array(Vec::new());
+    Ok(serde_json::to_string(&value)?)
+}
+
 impl HistoryStore {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -78,7 +86,7 @@ impl HistoryStore {
                 block.id.to_string(),
                 block.command,
                 block.plain_output,
-                serde_json::to_string(block)?
+                history_payload(block)?
             ],
         )?;
         Ok(())
@@ -103,7 +111,14 @@ impl HistoryStore {
         let mut statement = self.0.prepare(sql)?;
         let payloads = statement.query_map([parameter], |row| row.get::<_, String>(0))?;
         payloads
-            .map(|payload| Ok(serde_json::from_str(&payload?)?))
+            .map(|payload| {
+                let mut block: CommandBlock = serde_json::from_str(&payload?)?;
+                // Spans are not stored (see `history_payload`); rebuild them.
+                if block.ansi_spans.is_empty() && !block.raw_output.is_empty() {
+                    block.refresh_output();
+                }
+                Ok(block)
+            })
             .collect()
     }
 
@@ -142,6 +157,22 @@ impl HistoryStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_stores_no_spans_and_rebuilds_them() {
+        let path = std::env::temp_dir().join(format!("mrt-history-{}", uuid::Uuid::new_v4())).join("history.sqlite");
+        let store = HistoryStore::open(&path).unwrap();
+        let block = CommandBlock::new_completed("ls --color", "sh", "/", "[34mdir[0m file
+", 0, 1);
+        store.save(&block).unwrap();
+        let payload: String = store.0.query_row("SELECT payload FROM blocks", [], |r| r.get(0)).unwrap();
+        assert!(payload.contains("\"ansi_spans\":[]"), "{payload}");
+        let found = store.search("file").unwrap();
+        assert_eq!(found[0].ansi_spans, block.ansi_spans);
+        assert_eq!(found[0].plain_output, block.plain_output);
+        drop(store);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
 
     #[test]
     #[ignore = "manual local performance measurement"]

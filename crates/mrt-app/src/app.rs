@@ -513,6 +513,57 @@ pub struct MrtGuiApp {
     /// A window action from `mrt quick` / `mrt_control_gui` (`show`, `hide`, `toggle`),
     /// applied in the next frame.
     pub(crate) pending_window: Option<String>,
+    /// When running blocks were last copied into the MCP mirror.
+    mirror_synced_at: std::cell::Cell<Option<Instant>>,
+}
+
+/// Windows PowerShell aliases that shadow a program of the same name (`curl` is
+/// `Invoke-WebRequest`, `sc` is `Set-Content`...): never sent to the fast path.
+const POWERSHELL_SHADOWING_ALIASES: &[&str] = &[
+    "curl", "wget", "sort", "where", "sc", "fc", "compare", "diff", "tee", "ls", "dir", "cat", "echo", "type",
+    "copy", "move", "del", "erase", "rd", "rmdir", "md", "mkdir", "cd", "cls", "start", "kill", "ps", "set",
+    "write", "r", "h", "history", "man", "mount", "select", "foreach", "measure",
+];
+
+/// Whether `command` is a plain call of a native program found on `path` (as an
+/// `.exe` or `.com`): one simple command line with no PowerShell syntax, so running it
+/// through `cmd.exe` gives the same result without Windows PowerShell's ~1 MiB/s
+/// output pipeline (`terminal.fast_native_output`).
+pub(crate) fn plain_native_invocation(command: &str, path: &std::ffi::OsStr) -> bool {
+    let command = command.trim();
+    if command.is_empty() || command.chars().any(|c| "|;&<>$(){}[]@`'\"%^,\n\r".contains(c)) {
+        return false;
+    }
+    let Some(program) = command.split_whitespace().next() else { return false };
+    let lower = program.to_ascii_lowercase();
+    let stem = lower.trim_end_matches(".exe").trim_end_matches(".com");
+    if program.starts_with('-') || program.contains(['/', '\\', ':']) || POWERSHELL_SHADOWING_ALIASES.contains(&stem) {
+        return false;
+    }
+    std::env::split_paths(path).any(|dir| {
+        ["exe", "com"].iter().any(|ext| {
+            let file = if lower.ends_with(&format!(".{ext}")) { dir.join(program) } else { dir.join(format!("{program}.{ext}")) };
+            file.is_file()
+        })
+    })
+}
+
+/// How often a running block's output is copied into the MCP mirror.
+const MIRROR_RUNNING_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Whether the mirror's copy of a block can stay: a finished block that has not
+/// changed since (same output, exit code, pin and AI fields), or a running block
+/// between refreshes.
+fn mirror_block_current(mirror: &CommandBlock, gui: &CommandBlock, refresh_running: bool) -> bool {
+    if gui.exit_code.is_none() {
+        return !refresh_running && mirror.exit_code.is_none();
+    }
+    mirror.exit_code == gui.exit_code
+        && mirror.plain_output.len() == gui.plain_output.len()
+        && mirror.pinned == gui.pinned
+        && mirror.ai_explanation == gui.ai_explanation
+        && mirror.ai_suggested_fix == gui.ai_suggested_fix
+        && mirror.view_mode == gui.view_mode
 }
 
 /// The egui context, set once the window exists, so background threads can wake
@@ -688,6 +739,7 @@ impl MrtGuiApp {
             layout_next_check: Instant::now(),
             copy_mode: None,
             pending_window: None,
+            mirror_synced_at: std::cell::Cell::new(None),
         };
         app.apply_config_side_effects();
         if !cfg!(test) && app.config_state.config.terminal.restore_layout {
@@ -1966,6 +2018,16 @@ impl MrtGuiApp {
             }
         }
         if let Ok(mut tabs_guard) = state.tabs.lock() {
+            // This runs every frame. Copying every block every frame cost O(all output)
+            // per frame, so blocks the mirror already has unchanged are moved over, and a
+            // running block is copied at most every MIRROR_RUNNING_INTERVAL.
+            let now = Instant::now();
+            let refresh_running = self.mirror_synced_at.get().is_none_or(|t| now.duration_since(t) >= MIRROR_RUNNING_INTERVAL);
+            if refresh_running {
+                self.mirror_synced_at.set(Some(now));
+            }
+            let mut previous: HashMap<Uuid, Vec<CommandBlock>> =
+                tabs_guard.drain(..).map(|t| (t.id, t.blocks)).collect();
             *tabs_guard = self
                 .tabs
                 .iter()
@@ -1974,14 +2036,28 @@ impl MrtGuiApp {
                         .shells
                         .get(t.active_shell_idx)
                         .unwrap_or(&self.shells[0]);
+                    let mut old: HashMap<Uuid, CommandBlock> = previous
+                        .remove(&t.id)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|b| (b.id, b))
+                        .collect();
+                    let blocks = t
+                        .blocks
+                        .iter()
+                        .map(|b| match old.remove(&b.id) {
+                            Some(kept) if mirror_block_current(&kept, b, refresh_running) => kept,
+                            _ => b.clone(),
+                        })
+                        .collect();
                     McpTabSession {
                         id: t.id,
                         title: t.title.clone(),
                         shell_id: shell.id.clone(),
                         shell_name: shell.kind.short_label().to_string(),
                         cwd: t.cwd.clone(),
-                        blocks: t.blocks.clone(),
-                        activity: Some(t.activity.snapshot(Instant::now())),
+                        blocks,
+                        activity: Some(t.activity.snapshot(now)),
                         sandbox_root: t.sandbox_root.clone(),
                     }
                 })
@@ -2748,6 +2824,7 @@ impl MrtGuiApp {
     }
 
     fn spawn_shell_command(&mut self, tab_id: Uuid, shell: ShellProfile, cwd: PathBuf, raw_input: String) -> Uuid {
+        let shell = self.fast_native_shell(tab_id, &shell, &raw_input).unwrap_or(shell);
         let mut running = CommandBlock::new_completed(&raw_input, shell.kind.short_label(), cwd.display().to_string(), "", 0, 0);
         running.exit_code = None;
         let block_id = running.id;
@@ -3709,6 +3786,27 @@ impl MrtGuiApp {
         if let Some(shell) = self.shells.get(shell_idx).cloned() {
             self.spawn_shell_command(tab_id, shell, cwd, "hostname".to_string());
         }
+    }
+
+    /// With `terminal.fast_native_output`, a plain native program typed in a Windows
+    /// PowerShell or pwsh tab runs through `cmd.exe` instead (see
+    /// [`plain_native_invocation`]). Not for remote or sandbox tabs.
+    fn fast_native_shell(&self, tab_id: Uuid, shell: &ShellProfile, command: &str) -> Option<ShellProfile> {
+        if !cfg!(windows) || !self.config_state.config.terminal.fast_native_output {
+            return None;
+        }
+        if !matches!(shell.kind, mrt_core::ShellKind::WindowsPowerShell | mrt_core::ShellKind::PowerShellCore) {
+            return None;
+        }
+        let tab = self.tabs.iter().find(|t| t.id == tab_id)?;
+        if tab.remote.is_some() || tab.sandbox_root.is_some() {
+            return None;
+        }
+        let path = std::env::var_os("PATH")?;
+        if !plain_native_invocation(command, &path) {
+            return None;
+        }
+        self.shells.iter().find(|s| matches!(s.kind, mrt_core::ShellKind::CmdBatch)).cloned()
     }
 
     /// Runs an `[[actions]]` entry: one shell command is submitted like typed input;
@@ -6072,6 +6170,25 @@ error: test failed
         let answer = block.ai_explanation.as_deref().unwrap_or("");
         assert!(answer.contains("`cargo test` failed (exit code 101)"), "{answer}");
         assert!(answer.contains("earlier run"), "{answer}");
+    }
+
+    #[test]
+    fn plain_native_invocations_are_recognised() {
+        let dir = std::env::temp_dir().join(format!("mrt-path-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("cargo.exe"), b"").unwrap();
+        std::fs::write(dir.join("curl.exe"), b"").unwrap();
+        std::fs::write(dir.join("build.bat"), b"").unwrap();
+        let path = std::env::join_paths([dir.clone()]).unwrap();
+        assert!(plain_native_invocation("cargo build --release", &path));
+        assert!(plain_native_invocation("cargo.exe test", &path));
+        assert!(!plain_native_invocation("cargo build | Select-String warn", &path), "PowerShell pipeline");
+        assert!(!plain_native_invocation("cargo build $args", &path), "variable");
+        assert!(!plain_native_invocation("cargo build \"a b\"", &path), "quoting differs between shells");
+        assert!(!plain_native_invocation("curl https://x", &path), "alias of Invoke-WebRequest");
+        assert!(!plain_native_invocation("build", &path), ".bat is not a native program");
+        assert!(!plain_native_invocation("Get-ChildItem", &path), "cmdlet");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

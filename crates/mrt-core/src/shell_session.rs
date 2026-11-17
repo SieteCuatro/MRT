@@ -822,6 +822,12 @@ impl Shared {
                         if matches!(state.phase, Phase::Running | Phase::Draining) {
                             if let Some(active) = state.active.as_mut() {
                                 active.output.push_str(&text);
+                                // Keep memory bounded for huge outputs: the block keeps
+                                // only the end anyway (trim in steps, not per chunk).
+                                let max = crate::block::max_block_output_bytes();
+                                if max > 0 && active.output.len() > max + max / 4 {
+                                    crate::block::keep_tail(&mut active.output, max);
+                                }
                                 let _ = active.tx.send(CommandEvent::Output(text));
                             }
                         }

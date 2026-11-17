@@ -88,6 +88,16 @@ pub struct TerminalConfig {
     /// variables, aliases and activated environments persist between commands.
     /// `false` runs every command in a new shell process.
     pub persistent_shell: bool,
+    /// Monospace font: a font file path or a family name looked up in the system
+    /// font folders (`"JetBrains Mono"`, `"CaskaydiaCove Nerd Font"`). `None` uses
+    /// the platform default.
+    pub font_family: Option<String>,
+    /// Fonts tried, in order, for characters the main font lacks (icons, symbols,
+    /// CJK); same syntax as `font_family`. Platform symbol fonts follow them.
+    pub font_fallback: Vec<String>,
+    /// Output kept per command block, in MiB; older output is dropped from the
+    /// front. `0` keeps everything.
+    pub max_block_output_mb: u64,
 }
 
 impl Default for TerminalConfig {
@@ -99,11 +109,19 @@ impl Default for TerminalConfig {
             scrollback_blocks: 500,
             auto_detect_structured_output: true,
             persistent_shell: true,
+            font_family: None,
+            font_fallback: Vec::new(),
+            max_block_output_mb: 32,
         }
     }
 }
 
 impl TerminalConfig {
+    /// The per-block output limit in bytes (`0` = no limit), capped at 4 GiB.
+    pub fn max_block_output_bytes(&self) -> usize {
+        (self.max_block_output_mb.min(4096) as usize).saturating_mul(1024 * 1024)
+    }
+
     /// The font size clamped to [`FONT_SIZE_RANGE`] (NaN falls back to the default).
     pub fn effective_font_size(&self) -> f32 {
         if self.font_size.is_nan() {
@@ -257,6 +275,12 @@ impl MrtConfig {
                     "terminal.theme \"{theme}\" is unknown; using graphite-calm."
                 ));
             }
+        }
+        if self.terminal.max_block_output_mb > 4096 {
+            warnings.push(format!(
+                "terminal.max_block_output_mb {} is above 4096; using 4096.",
+                self.terminal.max_block_output_mb
+            ));
         }
         let provider = self.ai.provider.trim();
         if !KNOWN_AI_PROVIDERS.iter().any(|p| p.eq_ignore_ascii_case(provider)) {

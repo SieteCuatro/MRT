@@ -357,11 +357,81 @@ pub fn parse_ansi_rich(input: &str) -> ParsedAnsi {
     }
 }
 
+/// Incremental parser for output that arrives in chunks.
+///
+/// [`parse_ansi_rich`] parses a whole string, so re-parsing all output after
+/// every chunk costs O(n²) while a command streams. A `VtStream` keeps the
+/// parser state between chunks (an escape sequence split across two chunks is
+/// still recognised) and returns only what the new chunk added.
+pub struct VtStream {
+    parser: vte::Parser,
+    state: VtParserState,
+}
+
+impl Default for VtStream {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl VtStream {
+    pub fn new() -> Self {
+        Self {
+            parser: vte::Parser::new(),
+            state: VtParserState::default(),
+        }
+    }
+
+    /// Parses `chunk` and returns the spans, plain text and events it produced.
+    ///
+    /// Text after the last style change is returned as a finished span too, so a
+    /// long run in one style is not copied again on every chunk; the next chunk
+    /// starts a new span with the same style. Concatenating the returned spans of
+    /// every call gives the same text as [`parse_ansi_rich`] on the whole input.
+    pub fn feed(&mut self, chunk: &str) -> ParsedAnsi {
+        for byte in chunk.as_bytes() {
+            self.parser.advance(&mut self.state, *byte);
+        }
+        self.state.flush_current();
+        ParsedAnsi {
+            spans: std::mem::take(&mut self.state.spans),
+            plain_text: std::mem::take(&mut self.state.plain_text),
+            events: std::mem::take(&mut self.state.events),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const ST: &str = "\x1b\\";
+
+    #[test]
+    fn stream_matches_whole_parse_across_split_escapes() {
+        let input = "a\x1b[31mred\x1b[0m plain\n\x1b]8;;https://x.io\x1b\\link\x1b]8;;\x1b\\ \x1b]7;file:///tmp\x07end";
+        let whole = parse_ansi_rich(input);
+        // Feed one byte-ish piece at a time (on char boundaries) so every escape is split.
+        let mut stream = VtStream::new();
+        let mut spans = Vec::new();
+        let mut plain = String::new();
+        let mut events = Vec::new();
+        for (i, ch) in input.char_indices() {
+            let piece = &input[i..i + ch.len_utf8()];
+            let delta = stream.feed(piece);
+            spans.extend(delta.spans);
+            plain.push_str(&delta.plain_text);
+            events.extend(delta.events);
+        }
+        assert_eq!(plain, whole.plain_text);
+        assert_eq!(events, whole.events);
+        let text: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(text, whole.plain_text);
+        let red: String = spans.iter().filter(|s| s.fg.is_some()).map(|s| s.text.as_str()).collect();
+        assert_eq!(red, "red");
+        let linked: String = spans.iter().filter(|s| s.link.is_some()).map(|s| s.text.as_str()).collect();
+        assert_eq!(linked, "link");
+    }
 
     #[test]
     fn plain_parse_is_unchanged() {

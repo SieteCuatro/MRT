@@ -80,7 +80,9 @@ Every command executed in MRT produces a `CommandBlock`. When a block completes,
 3. **Markdown Detection (`StructuredOutput::Markdown`)**: If the output contains Markdown headings (`# `, `## `), fenced code blocks (```` ``` ````), and bullet lists, MRT renders it with formatted typography.
 4. **Fallback (`StructuredOutput::RawText`)**: Renders the styled `Vec<AnsiSpan>` in monospace.
 
-While a command streams, `CommandBlock::refresh_output()` re-parses `raw_output` and updates `ansi_spans`, `plain_output`, `reported_cwd` (last OSC 7 path) and `clipboard_requests` (OSC 52 writes, each `Pending`, `Approved` or `Denied`). Decisions already made are kept when more output arrives.
+While a command streams, the GUI calls `CommandBlock::append_output(chunk, &mut VtStream)`: a `vt::VtStream` keeps the `vte` parser state between chunks (an escape sequence split across chunks is still recognised) and returns only the spans, plain text and OSC events the chunk added, so streaming costs O(n) in total instead of re-parsing everything after every chunk. It updates `ansi_spans`, `plain_output`, `reported_cwd` (last OSC 7 path) and `clipboard_requests` (OSC 52 writes, each `Pending`, `Approved` or `Denied`). `refresh_output()` still re-parses the whole `raw_output` when needed, keeping decisions already made.
+
+**Output limit.** `block::set_max_block_output_bytes` (from `terminal.max_block_output_mb`, default `DEFAULT_MAX_BLOCK_OUTPUT_BYTES` = 32 MiB, `0` = none) bounds what a block keeps. `append_output` trims to three quarters of the limit once it is exceeded, cutting at a line start, and drops the same bytes from the spans; `new_completed` keeps the tail of the final output; `ShellSession` trims the output it collects for `CommandOutcome` the same way. `CommandBlock::truncated_bytes` records how much was dropped. `new_completed` skips `classify_output` above `STRUCTURED_CLASSIFY_LIMIT` (4 MiB).
 
 Users can toggle any structured block between **Structured View** and **Raw ANSI View** at any time with a single click in the block header.
 

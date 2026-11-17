@@ -38,10 +38,10 @@ These items make MRT usable as a person's main terminal.
 ## Milestone 3 — Rendering and performance
 
 - **Throughput benchmark.** *(implemented, #13; the workflow runs only when started by hand while Actions minutes are unavailable. First finding: Windows PowerShell streams output about 20× slower than `cmd`, see [docs/PERFORMANCE.md](docs/PERFORMANCE.md))* Add a benchmark that streams a large file (for example `cat` of 100 MB, and `yes | head -n 5000000`) and records time to finish and frames dropped. Run it in CI to catch regressions.
-- **Large output.** Store very long block output out of memory or truncate it with "show more", virtualize block rendering, and cap the repaint rate while output is streaming. *Done when:* a 1 GB log does not freeze the UI.
-- **Font handling.** Configurable font, fallback chain for missing glyphs, and optional ligatures. Get cell metrics right for Nerd Font icons.
+- **Large output.** *(implemented: incremental parsing while streaming, a per-block output limit (`terminal.max_block_output_mb`), and blocks that draw their last 2,000 lines with "Show more"; see [docs/PERFORMANCE.md](docs/PERFORMANCE.md))* Store very long block output out of memory or truncate it with "show more", virtualize block rendering, and cap the repaint rate while output is streaming. *Done when:* a 1 GB log does not freeze the UI.
+- **Font handling.** *(implemented: `terminal.font_family` and `terminal.font_fallback` accept family names or font files, with platform symbol fonts after them; ligatures are not drawn because egui does not shape text)* Configurable font, fallback chain for missing glyphs, and optional ligatures. Get cell metrics right for Nerd Font icons.
 - **Images.** The kitty graphics protocol, then Sixel. Show images inline in blocks and in the grid.
-- **Idle cost.** Repaint only when something changes; today the app requests a repaint every 30 ms while busy. Measure CPU use when idle and set a target.
+- **Idle cost.** *(implemented: worker and MCP events wake the UI, so it repaints once a second when idle instead of every 250 ms, and every 50 ms only while commands run)* Repaint only when something changes; today the app requests a repaint every 30 ms while busy. Measure CPU use when idle and set a target.
 
 ## Milestone 4 — Sessions that outlive the window
 

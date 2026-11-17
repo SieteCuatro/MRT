@@ -458,6 +458,8 @@ pub struct MrtGuiApp {
     runbooks_state: RunbooksUiState,
     active_replay: Option<ActiveRunbookReplay>,
     running_output: HashMap<Uuid, (Uuid, std::sync::Arc<std::sync::Mutex<String>>)>,
+    /// Parser state of each streaming block, so a chunk is parsed once (O(n) in total).
+    vt_streams: HashMap<Uuid, mrt_core::VtStream>,
     mosaic: bool,
     mosaic_columns: usize,
     mosaic_layout: MosaicLayout,
@@ -488,13 +490,62 @@ pub struct MrtGuiApp {
     pub(crate) find: crate::find::FindState,
 }
 
+/// The egui context, set once the window exists, so background threads can wake
+/// the UI ([`wake_ui`]) instead of the UI polling on a timer.
+static UI_CONTEXT: std::sync::OnceLock<egui::Context> = std::sync::OnceLock::new();
+
+/// Remembers the window's egui context for [`wake_ui`].
+pub fn set_ui_context(ctx: &egui::Context) {
+    let _ = UI_CONTEXT.set(ctx.clone());
+}
+
+/// Asks for a frame now, from any thread (no-op before the window exists and in tests).
+pub fn wake_ui() {
+    if let Some(ctx) = UI_CONTEXT.get() {
+        ctx.request_repaint();
+    }
+}
+
+/// A channel whose receiver wakes the UI for every message: a thread forwards
+/// messages from the returned sender to the returned receiver and calls
+/// [`wake_ui`]. The thread ends when every sender is dropped. Unit tests use a
+/// plain channel, because they send and then read in the same step.
+fn waking_channel<T: Send + 'static>() -> (Sender<T>, Receiver<T>) {
+    if cfg!(test) {
+        channel()
+    } else {
+        forwarding_channel()
+    }
+}
+
+fn forwarding_channel<T: Send + 'static>() -> (Sender<T>, Receiver<T>) {
+    let (tx, raw_rx) = channel::<T>();
+    let (fwd_tx, rx) = channel::<T>();
+    std::thread::Builder::new()
+        .name("mrt-ui-wake".into())
+        .spawn(move || {
+            while let Ok(message) = raw_rx.recv() {
+                if fwd_tx.send(message).is_err() {
+                    break;
+                }
+                wake_ui();
+            }
+        })
+        .expect("spawn UI wake thread");
+    (tx, rx)
+}
+
+/// Frame interval when nothing runs: only the config file watcher and relative
+/// times need it. Events from workers and the MCP bridge wake the UI at once.
+pub const IDLE_REPAINT: std::time::Duration = std::time::Duration::from_secs(1);
+
 impl MrtGuiApp {
     pub fn new() -> Self {
         let runtime = tokio::runtime::Runtime::new().expect("Tokio runtime initialization");
         let shells = discover_shells();
         let initial_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-        let (gui_cmd_tx, gui_cmd_rx) = channel();
+        let (gui_cmd_tx, gui_cmd_rx) = waking_channel();
         let mut mcp_state = MrtMcpServerState::default();
         mcp_state.gui_tx = Some(gui_cmd_tx);
 
@@ -536,7 +587,7 @@ impl MrtGuiApp {
         let process_sampler = mcp_state.process_sampler.clone();
         let mcp_host = McpHostManager::new(mcp_state);
 
-        let (tx, rx) = channel();
+        let (tx, rx) = waking_channel();
         // Unit tests use isolated stores and never read or write the user's history.
         let history_result = if cfg!(test) {
             Ok(None)
@@ -582,6 +633,7 @@ impl MrtGuiApp {
             runbooks_state: RunbooksUiState::default(),
             active_replay: None,
             running_output: HashMap::new(),
+            vt_streams: HashMap::new(),
             mosaic: false,
             mosaic_columns: 3,
             mosaic_layout: MosaicLayout::Grid,
@@ -1985,13 +2037,12 @@ impl MrtGuiApp {
             }
             let found_in_primary = self.tabs.iter_mut().find(|tab| tab.id == *tab_id)
                 .and_then(|tab| tab.blocks.iter_mut().find(|block| block.id == *block_id));
+            let stream = self.vt_streams.entry(*block_id).or_default();
             if let Some(block) = found_in_primary {
-                block.raw_output.push_str(&chunk);
-                block.refresh_output();
+                block.append_output(&chunk, stream);
             } else if let Some(sec) = self.tabs.iter_mut().find(|tab| tab.id == *tab_id).and_then(|tab| tab.secondary_pane.as_mut()) {
                 if let Some(block) = sec.blocks.iter_mut().find(|block| block.id == *block_id) {
-                    block.raw_output.push_str(&chunk);
-                    block.refresh_output();
+                    block.append_output(&chunk, stream);
                 }
             }
         }
@@ -2014,6 +2065,7 @@ impl MrtGuiApp {
                     updated_cwd,
                 } => {
                     let was_streaming = self.running_output.remove(&block.id).is_some();
+                    self.vt_streams.remove(&block.id);
                     if let Ok(mut pids) = self.running_pids.lock() {
                         pids.remove(&block.id);
                     }
@@ -3969,11 +4021,13 @@ impl eframe::App for MrtGuiApp {
             self.active_tab = idx;
         }
 
-        ctx.request_repaint_after(std::time::Duration::from_millis(if self.busy_count > 0 || self.history_pending > 0 {
-            50
+        // Running commands stream output through shared buffers (not the channel), so
+        // poll while busy; otherwise wait for an event or the idle tick.
+        ctx.request_repaint_after(if self.busy_count > 0 || self.history_pending > 0 || !self.running_output.is_empty() {
+            std::time::Duration::from_millis(50)
         } else {
-            250
-        }));
+            IDLE_REPAINT
+        });
 
         self.render_sidebar(ctx);
         self.render_header(ctx);
@@ -5565,6 +5619,18 @@ mod tests {
     /// A remote tab's commands go to the SSH session and never run on this machine: with
     /// an unreachable host the first block reports the connection failure instead of the
     /// local `hostname`.
+    #[test]
+    fn forwarding_channel_keeps_order_and_ends_with_its_senders() {
+        let (tx, rx) = forwarding_channel::<u32>();
+        for i in 0..100 {
+            tx.send(i).unwrap();
+        }
+        let got: Vec<u32> = (0..100).map(|_| rx.recv_timeout(Duration::from_secs(5)).unwrap()).collect();
+        assert_eq!(got, (0..100).collect::<Vec<_>>());
+        drop(tx);
+        assert!(rx.recv_timeout(Duration::from_secs(5)).is_err(), "closed once the sender is gone");
+    }
+
     #[test]
     fn remote_tab_never_runs_commands_locally() {
         let mut app = MrtGuiApp::new();

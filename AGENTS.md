@@ -12,7 +12,7 @@ The Cargo workspace contains 5 modular crates:
 
 - **`crates/mrt-core`**:
   - `pty.rs`: Discovers installed host shells (`pwsh`, `powershell`, `cmd`/Batch, `git-bash`, `wsl`, `bash`, `zsh`, `fish`, `nu`, `sh`) and executes commands or spawns `portable-pty` sessions. Uses `CREATE_NO_WINDOW` (`0x08000000`) on Windows so child processes never flash external console windows.
-  - `vt.rs`: Parses ANSI/VT100 escape sequences via `vte` into colored `AnsiSpan` segments and stripped plain text; `parse_ansi_rich` also returns OSC 7 (working directory), OSC 8 (hyperlinks on spans), and OSC 52 (clipboard requests, never applied automatically) as `VtEvent`s.
+  - `vt.rs`: Parses ANSI/VT100 escape sequences via `vte` into colored `AnsiSpan` segments and stripped plain text; `parse_ansi_rich` also returns OSC 7 (working directory), OSC 8 (hyperlinks on spans), and OSC 52 (clipboard requests, never applied automatically) as `VtEvent`s. `VtStream` parses streamed output chunk by chunk (used by `CommandBlock::append_output`, which also enforces the per-block output limit).
   - `links.rs`: Detects plain-text URLs and `path:line[:col]` locations in output and classifies OSC 8 targets (which URL schemes MRT will open).
   - `term.rs`: Terminal grid emulator (`TerminalEmulator`) wrapping `alacritty_terminal` behind an MRT-owned API: `feed` PTY bytes, `resize`, `snapshot` of cells (colors, attributes, wide chars), cursor, scrollback, title, alternate screen, input modes (app cursor, bracketed paste, mouse), and `take_replies` for DA/CPR answers to the PTY. Used by the GUI's TUI overlay.
   - `block.rs`: Defines `CommandBlock` and `classify_output` (auto-detecting JSON trees, CSV/TSV tables, Markdown, and HTTP responses).
@@ -42,6 +42,7 @@ The Cargo workspace contains 5 modular crates:
 - **`crates/mrt-app`**:
   - `main.rs`: Entrypoint (`#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]`), CLI flag handler (`--mcp-server`, `--version`, `--help`, and the `mrt agent setup|show|remove` subcommand in `agent_setup.rs`), and `eframe` native GPU launcher.
   - `config_runtime.rs`: Loads the config file at startup, polls it for changes, and applies it to the GUI (font size, default shell, AI preferences, startup MCP servers, keymap, notification settings) with an in-window notice for errors.
+  - `fonts.rs`: Font loading from `terminal.font_family` / `terminal.font_fallback` (family names resolved in the system font folders, or font file paths) plus platform symbol fallbacks.
   - `notifications.rs`: `CommandNotifier`: desktop notifications (`notify-rust`) for long commands that finish in the background, and unseen-results badges on tabs.
   - `find.rs`: Find in output (Ctrl+F): match ranges, per-block counts and the highlight the block renderer draws.
   - `shell_pool.rs`: One `ShellSession` per tab and shell. A command runs in its tab's session when the session is idle, otherwise (busy, starting, WSL/Nushell, integration failed, `terminal.persistent_shell = false`) in its own process; Stop sends Ctrl+C and then ends the shell's child processes, so the shell survives.

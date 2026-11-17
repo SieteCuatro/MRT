@@ -106,6 +106,12 @@ Commands that may be destructive open the **Safety Approval Gate** first (see [C
 | `:watch-proc <pid\|name> [--mem 2GB] [--cpu 90]` | Posts a notice when a process crosses a threshold, starts, or exits. |
 | `:watch-proc list \| clear \| stop <id>`, `:unwatch-proc <id\|all>` | Manages watches. |
 
+### Very long output
+
+A block draws its **last 2,000 lines**. When there are more, a line above the output says how much is hidden, with **Show 2,000 more** and **Show all** (laying out millions of lines can take a while). Find in output (`Ctrl+F`) still searches the whole block and reveals a hidden match when you go to it. Copy and the MCP tools also see the whole block.
+
+Each block keeps at most `terminal.max_block_output_mb` (32 MiB by default) of output; beyond that the oldest part is dropped and the block shows how much was not kept. Output over 4 MiB is not checked for JSON, CSV or Markdown and is shown as text. On Windows, Windows PowerShell itself passes native program output through at about 1 MiB/s (see [PERFORMANCE.md](PERFORMANCE.md)); use `cmd`, `pwsh` 7 or a POSIX shell for very large outputs.
+
 ### Remote tabs (SSH)
 
 `:ssh user@host` (any `ssh` options may follow, e.g. `-p 2222` or `-i ~/.ssh/key`) opens a tab whose commands run **on that host**, with the same command blocks, exit codes, Stop button and folder tracking as a local tab. MRT starts `ssh -tt -o BatchMode=yes` and types the shell integration into the remote Bash or Zsh as base64 `eval` lines; **nothing is written on the remote machine**. The tab runs `hostname` first, so its first block shows which machine it is on.
@@ -311,6 +317,9 @@ MRT reads two optional [TOML](https://toml.io) files. Every setting is optional:
 | :--- | :--- | :--- |
 | `terminal.default_shell` | `"auto"` | Shell of the first tab at startup: `auto` (first discovered shell) or a label from **+ New tab** (`pwsh`, `powershell`, `cmd`, `bash`, `git-bash`, `wsl`, `zsh`, `fish`, `nu`, `sh`). An unknown or missing shell falls back to `auto`. |
 | `terminal.font_size` | `13.0` | Terminal (monospace) font size, clamped to 8–40. Applied live. |
+| `terminal.font_family` | platform default | Monospace font: a family name installed on this computer (`"JetBrains Mono"`, `"CaskaydiaCove Nerd Font"`) or a path to a `.ttf` / `.otf` / `.ttc` file. Family names are matched against the font file names in the system and user font folders, preferring the regular face. A font that is not found is reported in the config banner and the default is used. Applied live. |
+| `terminal.font_fallback` | `[]` | Fonts tried, in order, for characters the main font lacks (Nerd Font icons, symbols, CJK), same syntax as `font_family`. Platform symbol fonts (Segoe UI Symbol, Apple Symbols, Noto Sans Symbols 2 / DejaVu Sans) are tried after them. Ligatures are not drawn. Applied live. |
+| `terminal.max_block_output_mb` | `32` | Output kept per command block, in MiB. Older output is dropped from the front and the block says how much; `0` keeps everything (up to 4096). Applies to commands started after the change. |
 | `terminal.theme` | built-in | `graphite-calm` (aliases `dark`, `default`) is the only theme today. |
 | `terminal.persistent_shell` | `true` | Run each tab's commands in one long-lived shell so state carries over (see [§2](#2-the-prompt)). `false` runs every command in a new shell process. Applied on reload; turning it off ends the running shells. |
 | `terminal.scrollback_blocks`, `terminal.auto_detect_structured_output` | `500`, `true` | Reserved; parsed but not applied yet. |

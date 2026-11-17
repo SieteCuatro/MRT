@@ -28,6 +28,8 @@ pub struct ConfigState {
     pub notice: Option<ConfigNotice>,
     /// Set when the font size must be re-applied to the egui context.
     pub style_dirty: bool,
+    /// Fonts last installed in the egui context; reinstalled when the config changes them.
+    applied_fonts: Option<crate::fonts::FontPrefs>,
 }
 
 impl ConfigState {
@@ -42,6 +44,7 @@ impl ConfigState {
             watcher,
             notice: None,
             style_dirty: true,
+            applied_fonts: None,
         };
         state.reload();
         state
@@ -110,6 +113,7 @@ impl MrtGuiApp {
         if !cfg!(test) {
             self.shell_pool.set_enabled(config.terminal.persistent_shell);
         }
+        mrt_core::set_max_block_output_bytes(config.terminal.max_block_output_bytes());
         let notifications = config.notifications();
         self.notifier.settings = crate::notifications::NotificationSettings {
             enabled: notifications.enabled,
@@ -149,6 +153,24 @@ impl MrtGuiApp {
     pub(crate) fn update_config(&mut self, ctx: &egui::Context) {
         if self.config_state.poll(Instant::now()) {
             self.apply_config_side_effects();
+        }
+        let prefs = crate::fonts::FontPrefs {
+            family: self.config_state.config.terminal.font_family.clone(),
+            fallback: self.config_state.config.terminal.font_fallback.clone(),
+        };
+        if self.config_state.applied_fonts.as_ref() != Some(&prefs) {
+            let (fonts, report) = crate::fonts::build_font_definitions(&prefs);
+            ctx.set_fonts(fonts);
+            if !report.missing.is_empty() {
+                self.config_state.notice = Some(ConfigNotice {
+                    text: format!(
+                        "Config: font not found: {}. Give a family name installed on this computer or a .ttf/.otf path.",
+                        report.missing.join(", ")
+                    ),
+                    is_error: false,
+                });
+            }
+            self.config_state.applied_fonts = Some(prefs);
         }
         if self.config_state.style_dirty {
             self.config_state.style_dirty = false;

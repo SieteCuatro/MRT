@@ -1,7 +1,8 @@
 use crate::theme::{chip, ghost_button, icon_button, primary_button, secondary_button, Palette, Radius};
 use crate::widgets::links::{render_spans_with_links, LinkRequest, SpanStyle};
 use egui::{Color32, RichText, Ui};
-use mrt_core::{ClipboardDecision, CommandBlock, HttpExchangeSummary, StructuredOutput, ViewMode};
+use mrt_core::{AnsiSpan, ClipboardDecision, CommandBlock, HttpExchangeSummary, StructuredOutput, ViewMode};
+use std::borrow::Cow;
 use mrt_tools::{compare_blocks_structured, ChangeType, StructuredDiffKind};
 use serde_json::Value;
 
@@ -350,10 +351,11 @@ pub fn render_compact_block(ui: &mut Ui, block: &CommandBlock) -> Option<BlockAc
             block.timestamp.format("%H:%M:%S")
         ));
     });
-    if block.ansi_spans.iter().any(|s| !s.text.trim().is_empty()) {
+    if !block.plain_output.trim().is_empty() {
+        let (_, spans) = tail_spans(&block.ansi_spans, block.plain_output.len(), COMPACT_LINES);
         if let Some(link_action) = render_spans_with_links(
             ui,
-            &block.ansi_spans,
+            &spans,
             &SpanStyle { font_size: 12.0, backgrounds: false },
             block_cwd(block),
             egui::Id::new(("link_error_compact", block.id)),
@@ -432,13 +434,107 @@ fn link_request_action(request: LinkRequest) -> BlockAction {
     }
 }
 
+/// Lines of a block's output drawn at first; "Show more" adds this many again.
+/// Laying out millions of lines every frame would freeze the window.
+pub const RENDERED_LINES_STEP: usize = 2_000;
+
+/// Lines drawn for a block in a Mosaic tile.
+const COMPACT_LINES: usize = 200;
+
+/// The last `lines` lines of `spans` (whose texts add up to `total_len` bytes),
+/// and the byte length of the text before them. The search runs from the end,
+/// so its cost depends on the lines kept, not on the size of the output.
+pub fn tail_spans(spans: &[AnsiSpan], total_len: usize, lines: usize) -> (usize, Cow<'_, [AnsiSpan]>) {
+    let mut newlines = 0;
+    let mut after = 0; // bytes of the spans after the current one
+    for (i, span) in spans.iter().enumerate().rev() {
+        for (pos, _) in span.text.rmatch_indices('\n') {
+            // A newline that ends the whole output does not start another line.
+            if after == 0 && pos + 1 == span.text.len() {
+                continue;
+            }
+            newlines += 1;
+            if newlines == lines {
+                let mut first = span.clone();
+                first.text = span.text[pos + 1..].to_string();
+                let mut tail = Vec::with_capacity(spans.len() - i);
+                tail.push(first);
+                tail.extend_from_slice(&spans[i + 1..]);
+                let prefix = total_len - after - (span.text.len() - pos - 1);
+                return (prefix, Cow::Owned(tail));
+            }
+        }
+        after += span.text.len();
+    }
+    (0, Cow::Borrowed(spans))
+}
+
+fn format_bytes(bytes: u64) -> String {
+    match bytes {
+        b if b >= 1 << 30 => format!("{:.1} GB", b as f64 / (1u64 << 30) as f64),
+        b if b >= 1 << 20 => format!("{:.1} MB", b as f64 / (1u64 << 20) as f64),
+        b if b >= 1 << 10 => format!("{:.1} KB", b as f64 / (1u64 << 10) as f64),
+        b => format!("{b} bytes"),
+    }
+}
+
 fn render_ansi_spans(ui: &mut Ui, block: &CommandBlock) -> Option<BlockAction> {
     let highlight = find_highlight(ui);
+    let shown_id = egui::Id::new(("block_shown_lines", block.id));
+    let mut shown: usize = ui.ctx().data(|d| d.get_temp(shown_id)).unwrap_or(RENDERED_LINES_STEP);
+    let mut current = highlight.as_ref().and_then(|h| h.current).filter(|(id, _)| *id == block.id).map(|(_, n)| n);
+    let (mut prefix, mut spans) = tail_spans(&block.ansi_spans, block.plain_output.len(), shown);
+    // The current find match may be in the hidden part: show enough lines to reach it.
+    if let (Some(h), Some(n)) = (&highlight, current) {
+        if prefix > 0 {
+            let hidden = crate::find::match_ranges(&block.plain_output[..prefix], &h.query);
+            if let Some(m) = hidden.get(n) {
+                let extra = block.plain_output[m.start..prefix].matches('\n').count() + 1;
+                shown += extra.div_ceil(RENDERED_LINES_STEP) * RENDERED_LINES_STEP;
+                ui.ctx().data_mut(|d| d.insert_temp(shown_id, shown));
+                (prefix, spans) = tail_spans(&block.ansi_spans, block.plain_output.len(), shown);
+            }
+            let before = crate::find::match_ranges(&block.plain_output[..prefix], &h.query).len();
+            current = current.map(|n| n.saturating_sub(before));
+        }
+    }
     let find = highlight.as_ref().map(|h| crate::widgets::links::FindView {
         query: &h.query,
-        current: h.current.filter(|(id, _)| *id == block.id).map(|(_, n)| n),
+        current,
         scroll: h.scroll,
     });
+    if block.truncated_bytes > 0 || prefix > 0 {
+        ui.horizontal_wrapped(|ui| {
+            if block.truncated_bytes > 0 {
+                ui.label(
+                    RichText::new(format!(
+                        "{} of earlier output was not kept (limit: terminal.max_block_output_mb).",
+                        format_bytes(block.truncated_bytes)
+                    ))
+                    .size(11.5)
+                    .color(Palette::TEXT_MUTED),
+                );
+            }
+            if prefix > 0 {
+                ui.label(
+                    RichText::new(format!("Showing the last {shown} lines; {} above.", format_bytes(prefix as u64)))
+                        .size(11.5)
+                        .color(Palette::TEXT_MUTED),
+                );
+                if ui.add(ghost_button(&format!("Show {RENDERED_LINES_STEP} more"))).clicked() {
+                    ui.ctx().data_mut(|d| d.insert_temp(shown_id, shown + RENDERED_LINES_STEP));
+                }
+                if ui
+                    .add(ghost_button("Show all"))
+                    .on_hover_text("Laying out a very long output can take a while")
+                    .clicked()
+                {
+                    ui.ctx().data_mut(|d| d.insert_temp(shown_id, usize::MAX));
+                }
+            }
+        });
+        ui.add_space(4.0);
+    }
     if block.ansi_spans.is_empty() {
         ui.label(
             RichText::new("(no output)")
@@ -449,7 +545,7 @@ fn render_ansi_spans(ui: &mut Ui, block: &CommandBlock) -> Option<BlockAction> {
     }
     render_spans_with_links(
         ui,
-        &block.ansi_spans,
+        &spans,
         &SpanStyle { font_size: 13.0, backgrounds: true },
         block_cwd(block),
         egui::Id::new(("link_error", block.id)),
@@ -942,4 +1038,40 @@ pub fn render_comparison(ui: &mut Ui, previous: &CommandBlock, current: &Command
         }
     });
     close
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spans(parts: &[&str]) -> Vec<AnsiSpan> {
+        parts.iter().map(|t| AnsiSpan { text: t.to_string(), ..AnsiSpan::default() }).collect()
+    }
+
+    fn text(spans: &[AnsiSpan]) -> String {
+        spans.iter().map(|s| s.text.as_str()).collect()
+    }
+
+    #[test]
+    fn tail_spans_keeps_the_last_lines_across_spans() {
+        let all = spans(&["a\nb", "\nc\n", "d\ne\n"]);
+        let total = text(&all).len();
+        let (prefix, tail) = tail_spans(&all, total, 2);
+        assert_eq!(text(&tail), "d\ne\n");
+        assert_eq!(prefix, "a\nb\nc\n".len());
+        let (prefix, tail) = tail_spans(&all, total, 4);
+        assert_eq!(text(&tail), "b\nc\nd\ne\n");
+        assert_eq!(prefix, 2);
+        let (prefix, tail) = tail_spans(&all, total, 10);
+        assert_eq!(prefix, 0);
+        assert_eq!(text(&tail), text(&all));
+    }
+
+    #[test]
+    fn tail_spans_without_a_final_newline() {
+        let all = spans(&["x\ny\nz"]);
+        let (prefix, tail) = tail_spans(&all, 5, 1);
+        assert_eq!(text(&tail), "z");
+        assert_eq!(prefix, 4);
+    }
 }

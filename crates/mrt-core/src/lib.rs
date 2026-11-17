@@ -15,8 +15,9 @@ pub use activity::{
     ActivityTracker, ProgressTone, MRT_STATUS_OSC,
 };
 pub use block::{
-    classify_output, ClipboardDecision, ClipboardRequest, CommandBlock, HttpExchangeSummary,
-    StructuredOutput, ViewMode,
+    classify_output, max_block_output_bytes, set_max_block_output_bytes, ClipboardDecision,
+    ClipboardRequest, CommandBlock, HttpExchangeSummary, StructuredOutput, ViewMode,
+    DEFAULT_MAX_BLOCK_OUTPUT_BYTES, STRUCTURED_CLASSIFY_LIMIT,
 };
 pub use config::{
     load_config, ConfigError, ConfigSources, ConfigWatcher, LoadedConfig, McpServerEntry,
@@ -42,7 +43,7 @@ pub use shell_session::{
 pub use links::{classify_uri, detect_links, is_openable_uri, DetectedLink, LinkTarget};
 pub use vt::{
     parse_ansi_rich, parse_ansi_text, parse_osc7_uri, AnsiColor, AnsiSpan, ParsedAnsi, VtEvent,
-    VtParserState,
+    VtParserState, VtStream,
 };
 pub use term::{
     xterm_palette, MouseMode, TermCell, TermColor, TermCursor, TermCursorShape, TermModes,

@@ -175,6 +175,14 @@ See the [Toolbox guide](TOOLBOX.md#6-task-manager--process-tools-process_inspect
 
 ---
 
+### 3.6 Agent sandbox tabs
+
+A tab opened with `:sandbox [folder]` is marked with `"sandbox": "<folder>"` in `mrt_list_tabs`. `mrt_run_command` aimed at it runs only commands the Safety Gate rates **Safe**, always from the sandbox folder (a `cwd` argument is ignored, and `cd` does not move the tab); anything else is refused with a message telling the agent to send it with `mrt_control_gui` (`input_text` + `submit_input`), so the user approves it in the window. This lets an agent work unattended without being able to change things outside the folder silently.
+
+### 3.7 Multi-step assistance (`:assist`)
+
+`:assist` in the GUI is MRT's own client of these tools: `mrt_ai::assist::run_assist` lets the configured model call the read-only tools in `ASSIST_TOOLS` (`mrt_list_tabs`, `mrt_list_blocks`, `mrt_get_block`, `mrt_search_blocks`, `mrt_compare_blocks`, `mrt_diagnose_block`, `mrt_inspect_ports`, `mrt_list_processes`) one at a time, each chosen from the previous results, and refuses any other tool. Without a provider, a built-in plan runs list → search for an earlier successful run → compare → diagnose. Suggested commands are only shown to the user.
+
 ## 4. MCP Resources Exposed by MRT
 
 External MCP clients can list and read five native MCP resources via `resources/list` and `resources/read`:

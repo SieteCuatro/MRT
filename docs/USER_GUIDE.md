@@ -99,6 +99,8 @@ Commands that may be destructive open the **Safety Approval Gate** first (see [C
 | `:unsplit` | Closes the split. |
 | `:clear` (or `cls`) | Removes all blocks from the tab (history in SQLite is kept). |
 | `:toolbox [network\|task-manager\|close]` | Shows the Toolbox panel, opens it on a tab, or hides it. With no argument it toggles. |
+| `:assist [question]` | Asks the assistant to investigate with MRT's read-only tools (blocks, tabs, ports, processes), choosing each next step from the last result. With no question it explains the latest failed command: it finds an earlier successful run of the same command, compares the two outputs and diagnoses. Each step appears in the block; the answer and any suggested fix appear in its AI panel, and **Apply fix** goes through the Safety Gate. Works offline; with an AI provider configured, the model drives the investigation (at most 6 tool calls). |
+| `:sandbox [folder]` | Opens an **agent sandbox tab** rooted at the folder (default: the current one). Its commands always start in that folder, and every command the Safety Gate does not rate Safe asks for approval, even with `safety.enabled = false`. Agents calling `mrt_run_command` on it can only run Safe commands. |
 | `:broadcast [on\|off]` | In a split tab, sends keys typed into one pane's program to the program in the other pane too (both panes show a **broadcast** marker). With no argument it toggles. Commands typed in the prompt are not duplicated. |
 | `:ssh <host> [ssh options]` | Opens a **remote tab**: its commands run on the host with blocks, exit codes and the remote folder (see [Remote tabs](#remote-tabs-ssh)). |
 

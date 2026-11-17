@@ -66,9 +66,9 @@ MRT already has a 31-tool MCP server. These items make that easy to use and visi
 
 - **Agent status on tabs.** *(implemented, #10)* Show what a tab's program is doing (running, waiting for input, finished, failed) on the tab and in the Mosaic grid. Read standard OSC 9;4 progress and OSC 133 states, plus a documented MRT escape code that agents can send. Recognise common agent CLIs (`claude`, `codex`, `gemini`, `aider`) and flag when one is waiting for approval.
 - **One-step agent setup.** *(implemented, #14)* `mrt agent setup` writes the MCP server entry and a short skill/instructions file for Claude Code, Codex, Gemini CLI, and other agents, and `mrt agent show` prints the instructions for any other tool. Undo with `mrt agent remove`.
-- **Multi-step MCP assistance.** Let the assistant use results from one tool call to choose the next. For example, it could inspect a failed command block, retrieve the previous run, and explain the differences. Route any proposed shell execution through the existing Safety Approval Gate.
+- **Multi-step MCP assistance.** *(implemented: `:assist`, model-driven with any provider or a built-in investigate-compare-diagnose plan offline; suggestions go through the Safety Gate)* Let the assistant use results from one tool call to choose the next. For example, it could inspect a failed command block, retrieve the previous run, and explain the differences. Route any proposed shell execution through the existing Safety Approval Gate.
 - **Remote MCP connections.** *(implemented, #11)* Add HTTP transport with support for streamed server events alongside the existing stdio client.
-- **Agent sandbox tab.** A tab type whose commands always go through the Safety Gate and whose working directory is fixed, for letting an agent work unattended.
+- **Agent sandbox tab.** *(implemented: `:sandbox [folder]`; non-Safe commands always need approval, agents' `mrt_run_command` runs only Safe ones)* A tab type whose commands always go through the Safety Gate and whose working directory is fixed, for letting an agent work unattended.
 
 ## Milestone 6 — Keyboard and scripting
 

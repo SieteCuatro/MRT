@@ -99,6 +99,7 @@ Commands that may be destructive open the **Safety Approval Gate** first (see [C
 | `:unsplit` | Closes the split. |
 | `:clear` (or `cls`) | Removes all blocks from the tab (history in SQLite is kept). |
 | `:toolbox [network\|task-manager\|close]` | Shows the Toolbox panel, opens it on a tab, or hides it. With no argument it toggles. |
+| `:broadcast [on\|off]` | In a split tab, sends keys typed into one pane's program to the program in the other pane too (both panes show a **broadcast** marker). With no argument it toggles. Commands typed in the prompt are not duplicated. |
 | `:ssh <host> [ssh options]` | Opens a **remote tab**: its commands run on the host with blocks, exit codes and the remote folder (see [Remote tabs](#remote-tabs-ssh)). |
 
 **Network and diagnostics** — details in the [Toolbox guide](TOOLBOX.md)
@@ -172,6 +173,7 @@ Click **🔔 Notifications** in the sidebar to turn desktop notifications off, c
 | `Esc` | Command Palette / Safety Gate | Closes the palette / cancels the pending command. |
 | `Ctrl+Q` | Interactive TUI mode | Ends the session and saves its transcript as a block. |
 | `Ctrl+F` | Anywhere except a running program | Opens **Find in output** (the `find` action; rebindable). |
+| `Ctrl+Shift+Space` | Anywhere except a running program | **Copy mode**: select output with the keyboard (the `copy_mode` action; rebindable). |
 | `Enter` / `Shift+Enter` | Find bar | Next / previous match. |
 | `Esc` | Find bar | Closes the find bar. |
 | `Ctrl+click` (`Cmd+click` on macOS) | Link in block output | Opens a URL in the browser, or a `file:line[:col]` path in your editor. |
@@ -224,8 +226,68 @@ Bindings are matched exactly first; a binding with no `shift`/`alt` also fires w
 | `toggle_explorer`, `toggle_history`, `toggle_runbooks`, `toggle_mcp_hub`, `toggle_toolbox`, `toggle_mosaic` | — | Show or hide that panel. |
 | `open_task_manager` | — | Opens the Toolbox on the Task Manager tab. |
 | `enter_table:<name>` / `exit_table` | — | Enters / leaves a key table. |
+| `copy_mode` | `Ctrl+Shift+Space` | Starts [copy mode](#copy-mode). |
+| `toggle_broadcast` | — | Same as `:broadcast`: keys typed into one pane's program also go to the other pane. |
+| `run:<name>` | — | Runs the `[[actions]]` entry `<name>` (see [Named actions](#named-actions)). |
 
 Keys a binding consumes are not sent to the shell or TUI program; everything else passes through unchanged.
+
+### Copy mode
+
+`Ctrl+Shift+Space` starts copy mode on the last line of the active tab's last block. A panel at the bottom shows the lines around the cursor and what is selected; the prompt does not receive keys while it is open.
+
+| Key | Does |
+| :--- | :--- |
+| `↑` `↓` or `k` `j` | Previous / next line (moving past a block's first or last line goes to the next block) |
+| `PgUp` `PgDn` | 20 lines up / down |
+| `Home` `End` or `g` `G` | First / last line of the block |
+| `[` `]` or `Shift+↑` `Shift+↓` | Previous / next block |
+| `v` or `Space` | Start or end a selection (within one block) |
+| `y` or `Enter` | Copy the selection, or the cursor line, and leave |
+| `Y` | Copy the whole block output and leave |
+| `c` | Copy the block's command and leave |
+| `Esc` or `q` | Leave without copying |
+
+### Named actions
+
+`[[actions]]` entries in the config file add your own actions to the Command Palette. Each runs one or more command lines in the active tab: shell commands, or MRT commands such as `:split-h`. Several lines run one after another like a runbook from the Runbooks panel (each shell command waits for the previous one; the Safety Gate checks each). An action can have its own `key`, or be bound in `[keybindings]` as `run:<name>` (names are matched ignoring case, with `-` read as `_`).
+
+```toml
+[[actions]]
+name = "tests"
+title = "Run the test suite"
+command = "cargo test --workspace"
+key = "ctrl+alt+t"
+
+[[actions]]
+name = "dev-layout"
+commands = [":split-h", "npm run dev"]
+```
+
+A project's `.mrt.toml` can add actions or replace the user file's action of the same name.
+
+### Event hooks
+
+`[[hooks]]` entries run a command in the background (through your default shell, without a window, stopped after 60 seconds) when something happens. Hooks never create blocks.
+
+| `event` | When |
+| :--- | :--- |
+| `command_finished` | A command block finished with exit code 0. |
+| `command_failed` | A command block finished with another exit code. |
+| `cwd_changed` | A command changed the tab's folder. |
+| `tab_opened` | A new tab was opened. |
+
+`match` limits a hook to commands containing that text (case-insensitive), and `min_duration_secs` to commands that ran at least that long. The hook's environment has `MRT_EVENT`, `MRT_COMMAND`, `MRT_EXIT_CODE`, `MRT_DURATION_MS`, `MRT_CWD` and `MRT_TAB` (the tab title).
+
+```toml
+[[hooks]]
+event = "command_failed"
+match = "cargo"
+min_duration_secs = 30
+run = "notify-send \"MRT\" \"$MRT_COMMAND failed ($MRT_EXIT_CODE)\""
+```
+
+Hooks run whatever you put in your config, with your permissions; a project `.mrt.toml` can add hooks too, so check a project's file before starting MRT in it.
 
 ### Links and clipboard requests in output
 

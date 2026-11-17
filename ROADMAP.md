@@ -73,10 +73,10 @@ MRT already has a 31-tool MCP server. These items make that easy to use and visi
 ## Milestone 6 — Keyboard and scripting
 
 - **Configurable keybindings.** *(implemented, #12; read from the config file's `[keybindings]` table)* All actions bindable from the config file, including chained keys (`ctrl+a > c`) and key tables / modes (Ghostty 1.3, tmux prefix key).
-- **Named actions.** User-defined actions in the config (a command, a runbook, or a sequence of MRT actions) that appear in the Command Palette and can be bound to keys.
-- **Copy mode.** Move through scrollback with the keyboard, select, and copy, without the mouse.
-- **Input to several panes.** Optionally send typed input to every pane in a tab at once, with a clear on-screen indicator and the Safety Gate still checking each pane.
-- **Event hooks.** Run an action when a command fails, a tab opens, or a long command finishes.
+- **Named actions.** *(implemented: `[[actions]]` with palette entries, `key =` and `run:<name>` bindings)* User-defined actions in the config (a command, a runbook, or a sequence of MRT actions) that appear in the Command Palette and can be bound to keys.
+- **Copy mode.** *(implemented for command blocks: `copy_mode`, Ctrl+Shift+Space; not yet inside the TUI grid)* Move through scrollback with the keyboard, select, and copy, without the mouse.
+- **Input to several panes.** *(implemented for programs running in the panes of a split tab: `:broadcast`; the prompt is not duplicated)* Optionally send typed input to every pane in a tab at once, with a clear on-screen indicator and the Safety Gate still checking each pane.
+- **Event hooks.** *(implemented: `[[hooks]]` for command_finished, command_failed, cwd_changed and tab_opened)* Run an action when a command fails, a tab opens, or a long command finishes.
 
 ## Ideas not yet scheduled
 

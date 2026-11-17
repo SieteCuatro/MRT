@@ -47,6 +47,12 @@ pub enum Action {
     OpenTaskManager,
     /// Open the find bar (search the active tab's output).
     Find,
+    /// Keyboard selection of blocks and lines in the active tab's output.
+    CopyMode,
+    /// Send what is typed in one pane of a split tab to both panes.
+    ToggleBroadcast,
+    /// Run a user-defined `[[actions]]` entry by name (`run:<name>`).
+    RunNamed(String),
     /// Enter the named key table.
     EnterTable(String),
     /// Leave the active key table.
@@ -56,6 +62,8 @@ pub enum Action {
 /// The simple (argument-free) actions, in Command Palette order.
 pub const PALETTE_ACTIONS: &[Action] = &[
     Action::Find,
+    Action::CopyMode,
+    Action::ToggleBroadcast,
     Action::SplitHorizontal,
     Action::SplitVertical,
     Action::Unsplit,
@@ -81,6 +89,8 @@ const SIMPLE_ACTIONS: &[(Action, &str, &str)] = &[
     ),
     (Action::ExitTui, "exit_tui", "Exit Interactive TUI mode"),
     (Action::Find, "find", "Find in output"),
+    (Action::CopyMode, "copy_mode", "Copy mode (select output with the keyboard)"),
+    (Action::ToggleBroadcast, "toggle_broadcast", "Type into both panes of a split (broadcast)"),
     (Action::NewTab, "new_tab", "New tab"),
     (Action::CloseTab, "close_tab", "Close tab"),
     (Action::NextTab, "next_tab", "Next tab"),
@@ -146,6 +156,7 @@ impl Action {
     pub fn name(&self) -> String {
         match self {
             Action::EnterTable(table) => format!("enter_table:{table}"),
+            Action::RunNamed(name) => format!("run:{name}"),
             other => SIMPLE_ACTIONS
                 .iter()
                 .find(|(a, _, _)| a == other)
@@ -158,6 +169,7 @@ impl Action {
     pub fn title(&self) -> String {
         match self {
             Action::EnterTable(table) => format!("Enter key table '{table}'"),
+            Action::RunNamed(name) => format!("Run '{name}'"),
             other => SIMPLE_ACTIONS
                 .iter()
                 .find(|(a, _, _)| a == other)
@@ -186,6 +198,12 @@ impl Action {
                 )),
             };
         }
+        if head == "run" {
+            return match arg {
+                Some(name) if !name.is_empty() => Ok(Action::RunNamed(name)),
+                _ => Err(format!("`{raw}` needs an action name from [[actions]], e.g. `run:tests`")),
+            };
+        }
         if arg.is_some() {
             return Err(format!("action `{head}` does not take an argument"));
         }
@@ -200,7 +218,7 @@ impl Action {
         match self {
             Action::ExitTui => context.tui_active,
             // A program with the keyboard keeps Ctrl+F (e.g. less, vim, readline).
-            Action::Find => !context.tui_active,
+            Action::Find | Action::CopyMode => !context.tui_active,
             _ => true,
         }
     }
@@ -534,6 +552,7 @@ const DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("ctrl+p", "toggle_command_palette"),
     ("ctrl+q", "exit_tui"),
     ("ctrl+f", "find"),
+    ("ctrl+shift+space", "copy_mode"),
 ];
 
 impl Keymap {

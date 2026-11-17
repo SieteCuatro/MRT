@@ -54,6 +54,78 @@ pub struct MrtConfig {
     /// `[keybindings]`: binding (e.g. `"ctrl+t"`) -> action name. The GUI keymap
     /// (`mrt-app/src/keymap.rs`) interprets it. Read it with [`MrtConfig::keybindings`].
     pub keybindings: HashMap<String, String>,
+    /// `[[actions]]`: user-defined actions for the Command Palette and keys.
+    pub actions: Vec<NamedActionEntry>,
+    /// `[[hooks]]`: commands MRT runs in the background when something happens.
+    pub hooks: Vec<HookEntry>,
+}
+
+/// One `[[actions]]` entry: a named list of command lines (shell commands or MRT
+/// `:` commands) run one after another in the active tab, like a runbook.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct NamedActionEntry {
+    pub name: String,
+    /// Palette title; defaults to the name.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// A single command line (shorthand for `commands = [..]`).
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub commands: Vec<String>,
+    /// Optional key binding, e.g. `"ctrl+alt+t"` (same syntax as `[keybindings]`).
+    #[serde(default)]
+    pub key: Option<String>,
+}
+
+impl NamedActionEntry {
+    /// The name as used in `run:<name>` (lowercase, `-` as `_`).
+    pub fn id(&self) -> String {
+        self.name.trim().to_ascii_lowercase().replace('-', "_")
+    }
+
+    /// `command` followed by `commands`, without empty lines.
+    pub fn command_lines(&self) -> Vec<String> {
+        self.command
+            .iter()
+            .chain(self.commands.iter())
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty())
+            .collect()
+    }
+}
+
+/// Events a `[[hooks]]` entry can react to.
+pub const HOOK_EVENTS: &[&str] = &["command_finished", "command_failed", "cwd_changed", "tab_opened"];
+
+/// One `[[hooks]]` entry: `run` is executed by the default shell, in the
+/// background, when `event` happens (and, for command events, when the command
+/// contains `match`). Details arrive in `MRT_*` environment variables.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct HookEntry {
+    pub event: String,
+    pub run: String,
+    /// Only for commands containing this text (case-insensitive).
+    #[serde(default, rename = "match")]
+    pub match_command: Option<String>,
+    /// Only for commands that ran at least this long.
+    #[serde(default)]
+    pub min_duration_secs: Option<u64>,
+}
+
+impl HookEntry {
+    /// Whether this hook runs for `event` on `command` (which ran `duration_ms`).
+    pub fn applies(&self, event: &str, command: &str, duration_ms: u64) -> bool {
+        if !self.event.trim().eq_ignore_ascii_case(event) {
+            return false;
+        }
+        if let Some(pattern) = self.match_command.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+            if !command.to_lowercase().contains(&pattern.to_lowercase()) {
+                return false;
+            }
+        }
+        self.min_duration_secs.is_none_or(|secs| duration_ms >= secs.saturating_mul(1000))
+    }
 }
 
 /// `[notifications]`: notify when a long-running command finishes.
@@ -285,6 +357,20 @@ impl MrtConfig {
                 self.terminal.max_block_output_mb
             ));
         }
+        for hook in &self.hooks {
+            if !HOOK_EVENTS.iter().any(|e| e.eq_ignore_ascii_case(hook.event.trim())) {
+                warnings.push(format!(
+                    "hook event \"{}\" is unknown (use {}); the hook never runs.",
+                    hook.event,
+                    HOOK_EVENTS.join(", ")
+                ));
+            }
+        }
+        for action in &self.actions {
+            if action.command_lines().is_empty() {
+                warnings.push(format!("action \"{}\" has no commands.", action.name));
+            }
+        }
         let provider = self.ai.provider.trim();
         if !KNOWN_AI_PROVIDERS.iter().any(|p| p.eq_ignore_ascii_case(provider)) {
             warnings.push(format!(
@@ -358,7 +444,7 @@ fn merge_table(base: &mut toml::Table, overlay: toml::Table, path: &str) {
                 merge_table(base_child, overlay_child, &child_path);
             }
             (Some(toml::Value::Array(base_items)), toml::Value::Array(overlay_items))
-                if child_path == "mcp.servers" =>
+                if child_path == "mcp.servers" || child_path == "actions" =>
             {
                 for item in overlay_items {
                     let name = item.get("name").and_then(|n| n.as_str()).map(str::to_string);
@@ -648,6 +734,32 @@ mod tests {
         assert!(parse_config_str("[[mcp.servers]]\nname = \"x\"").is_err(), "command is required");
         assert!(parse_config_str("[keybindings]\n\"ctrl+t\" = 3").is_err(), "actions are strings");
         assert!(parse_config_str("[notifications]\nthreshold_secs = -1").is_err());
+    }
+
+    #[test]
+    fn actions_and_hooks_parse_merge_and_match() {
+        let mut base = parse_layer(
+            "[[actions]]\nname = \"Tests\"\ncommand = \"cargo test\"\nkey = \"ctrl+alt+t\"\n\
+             [[actions]]\nname = \"deploy\"\ncommands = [\"cargo build\", \":split-h\"]\n\
+             [[hooks]]\nevent = \"command_failed\"\nrun = \"notify-send failed\"\nmatch = \"CARGO\"\nmin_duration_secs = 5\n",
+        )
+        .unwrap();
+        let overlay = parse_layer("[[actions]]\nname = \"deploy\"\ncommand = \"make deploy\"\n").unwrap();
+        merge_layers(&mut base, overlay);
+        let cfg = config_from_table(base).unwrap();
+        assert_eq!(cfg.actions.len(), 2, "actions merge by name");
+        assert_eq!(cfg.actions[0].id(), "tests");
+        assert_eq!(cfg.actions[0].command_lines(), vec!["cargo test".to_string()]);
+        assert_eq!(cfg.actions[1].command_lines(), vec!["make deploy".to_string()]);
+        let hook = &cfg.hooks[0];
+        assert!(hook.applies("command_failed", "cargo build", 6_000));
+        assert!(!hook.applies("command_failed", "cargo build", 1_000), "too short");
+        assert!(!hook.applies("command_failed", "make", 6_000), "no match");
+        assert!(!hook.applies("command_finished", "cargo build", 6_000), "other event");
+        assert!(cfg.warnings().is_empty(), "{:?}", cfg.warnings());
+
+        let bad = parse_config_str("[[hooks]]\nevent = \"on_boot\"\nrun = \"x\"\n[[actions]]\nname = \"empty\"\n").unwrap();
+        assert_eq!(bad.warnings().len(), 2, "{:?}", bad.warnings());
     }
 
     #[test]

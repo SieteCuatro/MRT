@@ -87,6 +87,8 @@ pub struct TerminalTab {
     /// `ssh` arguments when this is a remote tab (`:ssh user@host`): its commands run
     /// on that host through `shell_pool::run_remote`, never locally.
     pub remote: Option<Vec<String>>,
+    /// Keys typed into one pane's program go to the programs of every pane (`:broadcast`).
+    pub broadcast: bool,
 }
 
 impl TerminalTab {
@@ -108,6 +110,7 @@ impl TerminalTab {
             active_pane_idx: 0,
             activity: ActivityTracker::new(),
             remote: None,
+            broadcast: false,
         }
     }
 
@@ -312,7 +315,7 @@ impl ActiveTuiSession {
 
     /// Sends this frame's keyboard input to the program. Keys bound to MRT actions
     /// (e.g. `exit_tui`) were already removed by `handle_keybindings`.
-    fn forward_keys(&mut self, ctx: &egui::Context) {
+    fn forward_keys(&mut self, ctx: &egui::Context) -> Vec<u8> {
         let modes = self.term.modes();
         // egui-winit turns Ctrl+C (Cmd+C on macOS) into `Event::Copy` with no key event.
         // It copies the selection when there is one, with Ctrl+Shift+C, and on macOS,
@@ -339,6 +342,7 @@ impl ActiveTuiSession {
             self.selection = None;
             let _ = self.pty.send_bytes(&bytes);
         }
+        bytes
     }
 
     /// Draws the terminal into the space `ui` has left, resizing the emulator and the
@@ -493,6 +497,8 @@ pub struct MrtGuiApp {
     /// The layout last written, so unchanged layouts are not written again.
     pub(crate) layout_saved: Option<crate::layout::SavedLayout>,
     pub(crate) layout_next_check: Instant,
+    /// Keyboard selection in the active tab's output, while copy mode is on.
+    pub(crate) copy_mode: Option<crate::copy_mode::CopyMode>,
 }
 
 /// The egui context, set once the window exists, so background threads can wake
@@ -665,6 +671,7 @@ impl MrtGuiApp {
             layout_file: None,
             layout_saved: None,
             layout_next_check: Instant::now(),
+            copy_mode: None,
         };
         app.apply_config_side_effects();
         if !cfg!(test) && app.config_state.config.terminal.restore_layout {
@@ -2062,6 +2069,7 @@ impl MrtGuiApp {
                 }
             }
         }
+        let mut hook_events: Vec<crate::hooks::HookEvent> = Vec::new();
         while let Ok(ev) = self.rx.try_recv() {
             if !ev.is_background() {
                 self.busy_count = self.busy_count.saturating_sub(1);
@@ -2112,6 +2120,24 @@ impl MrtGuiApp {
                     if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
                         if was_streaming {
                             tab.activity.command_finished(block.exit_code.unwrap_or(1), Instant::now());
+                        }
+                        let cwd_changed = updated_cwd.as_ref().is_some_and(|new_cwd| *new_cwd != tab.cwd);
+                        hook_events.push(crate::hooks::HookEvent {
+                            event: if block.exit_code.unwrap_or(0) == 0 { "command_finished" } else { "command_failed" },
+                            command: block.command.clone(),
+                            exit_code: block.exit_code,
+                            duration_ms: block.duration_ms,
+                            cwd: block.cwd.clone(),
+                            tab_title: tab.title.clone(),
+                        });
+                        if cwd_changed {
+                            hook_events.push(crate::hooks::HookEvent {
+                                event: "cwd_changed",
+                                command: block.command.clone(),
+                                cwd: updated_cwd.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
+                                tab_title: tab.title.clone(),
+                                ..Default::default()
+                            });
                         }
                         if let Some(new_cwd) = updated_cwd {
                             tab.cwd = new_cwd.clone();
@@ -2196,6 +2222,9 @@ impl MrtGuiApp {
                     self.mcp_host.servers.push(status);
                 }
             }
+        }
+        for event in hook_events {
+            self.fire_hooks(event);
         }
     }
 
@@ -2393,6 +2422,18 @@ impl MrtGuiApp {
             }
         }
 
+        if raw_input == ":broadcast" || raw_input.starts_with(":broadcast ") {
+            let arg = raw_input.trim_start_matches(":broadcast").trim();
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                tab.broadcast = match arg {
+                    "on" => true,
+                    "off" => false,
+                    _ => !tab.broadcast,
+                };
+            }
+            return;
+        }
+
         if let Some(spec) = raw_input.strip_prefix(":ssh ") {
             let args = crate::widgets::links::split_command_line(spec.trim());
             if !args.is_empty() {
@@ -2580,6 +2621,13 @@ impl MrtGuiApp {
 
         let step = replay.steps[replay.next_step_idx].clone();
         replay.next_step_idx += 1;
+
+        // MRT commands (`:split-h`, `:ports`...) in a named action run at once.
+        if step.command.starts_with(':') {
+            self.submit_input(Some(step.command), false);
+            self.advance_runbook_replay();
+            return;
+        }
 
         let shell = self
             .shells
@@ -3082,7 +3130,7 @@ impl MrtGuiApp {
             }
             overlay_exit = session.pty.try_wait_exit().ok().flatten().map(|c| c as i32);
             if focused == Some(FocusedTui::Overlay) {
-                session.forward_keys(ctx);
+                let _ = session.forward_keys(ctx);
                 if kill_requested {
                     let _ = session.pty.kill();
                     overlay_exit = Some(130);
@@ -3095,6 +3143,7 @@ impl MrtGuiApp {
             }
         }
 
+        let mut broadcast: Option<(Uuid, Option<usize>, Vec<u8>)> = None;
         let mut index = 0;
         while index < self.pane_tuis.len() {
             let session = &mut self.pane_tuis[index];
@@ -3106,7 +3155,11 @@ impl MrtGuiApp {
             }
             let mut exit = session.pty.try_wait_exit().ok().flatten().map(|c| c as i32);
             if focused == Some(FocusedTui::Pane(index)) {
-                session.forward_keys(ctx);
+                let sent = session.forward_keys(ctx);
+                let tab_broadcasts = self.tabs.iter().any(|t| t.id == session.tab_id && t.broadcast);
+                if tab_broadcasts && !sent.is_empty() {
+                    broadcast = Some((session.tab_id, session.pane, sent));
+                }
                 if kill_requested {
                     let _ = session.pty.kill();
                     exit = Some(130);
@@ -3118,6 +3171,12 @@ impl MrtGuiApp {
                 continue;
             }
             index += 1;
+        }
+        // Broadcast: the same keys go to the programs in the tab's other panes.
+        if let Some((tab_id, pane, bytes)) = broadcast {
+            for other in self.pane_tuis.iter().filter(|s| s.tab_id == tab_id && s.pane != pane) {
+                let _ = other.pty.send_bytes(&bytes);
+            }
         }
     }
 
@@ -3336,6 +3395,7 @@ fn draw_pane_tui(
     focused: bool,
     window_focused: bool,
     exit_keys: &str,
+    broadcast: bool,
 ) -> Option<bool> {
     let session = sessions.iter_mut().find(|s| s.tab_id == tab_id && s.pane == Some(pane))?;
     let mut clicked = false;
@@ -3348,6 +3408,10 @@ fn draw_pane_tui(
                 .filter(|t| !t.trim().is_empty())
                 .unwrap_or_else(|| session.command.clone());
             ui.label(RichText::new(format!("📺 {}", shorten(&title, 60))).monospace().color(Palette::TEXT_SECONDARY));
+            if broadcast {
+                ui.label(RichText::new("⇉ broadcast").strong().color(Palette::ACCENT_AMBER))
+                    .on_hover_text("Keys typed here also go to the other pane (:broadcast off to stop)");
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let label = if exit_keys.is_empty() { "Exit".to_string() } else { format!("Exit ({exit_keys})") };
                 if ui.small_button(RichText::new(label).color(Palette::ACCENT_RED)).clicked() {
@@ -3558,6 +3622,101 @@ impl MrtGuiApp {
         }
     }
 
+    /// Runs an `[[actions]]` entry: one shell command is submitted like typed input;
+    /// several lines (or MRT `:` commands) run in order as a runbook in the active tab.
+    pub(crate) fn run_named_action(&mut self, id: &str) {
+        let Some(entry) = self.config_state.config.actions.iter().find(|a| a.id() == id).cloned() else {
+            self.runbooks_state.replay_notice = Some(format!("No [[actions]] entry named '{id}' in the config."));
+            return;
+        };
+        let lines = entry.command_lines();
+        match lines.as_slice() {
+            [] => {}
+            [only] => self.submit_input(Some(only.clone()), false),
+            _ => {
+                let shell_name = self
+                    .tabs
+                    .get(self.active_tab)
+                    .and_then(|t| self.shells.get(t.active_shell_idx))
+                    .map(|s| s.kind.short_label().to_string())
+                    .unwrap_or_default();
+                let steps = lines
+                    .into_iter()
+                    .map(|command| crate::history::RunbookStep { command, shell_name: shell_name.clone(), cwd: String::new() })
+                    .collect();
+                self.start_runbook_replay(crate::history::Runbook {
+                    id: Uuid::new_v4(),
+                    name: entry.title.clone().unwrap_or(entry.name.clone()),
+                    steps,
+                    updated_at: chrono::Utc::now(),
+                });
+            }
+        }
+    }
+
+    /// Named actions for the Command Palette: (action, title, key hint).
+    fn named_palette_actions(&self) -> Vec<(Action, String, String)> {
+        self.config_state
+            .config
+            .actions
+            .iter()
+            .map(|entry| {
+                let action = Action::RunNamed(entry.id());
+                let title = entry.title.clone().unwrap_or_else(|| entry.name.clone());
+                let keys = self.key_resolver.keymap().bindings_for(&action).join(" / ");
+                let hint = if keys.is_empty() { action.name() } else { keys };
+                (action, title, hint)
+            })
+            .collect()
+    }
+
+    /// Starts the `[[hooks]]` that apply to `event`.
+    pub(crate) fn fire_hooks(&self, event: crate::hooks::HookEvent) {
+        let hooks = &self.config_state.config.hooks;
+        if hooks.is_empty() || self.shells.is_empty() {
+            return;
+        }
+        let idx = crate::config_runtime::default_shell_index(&self.shells, &self.config_state.config);
+        crate::hooks::fire(&self.runtime, hooks, &self.shells[idx], &event);
+    }
+
+    /// Handles copy-mode keys (taking them away from the prompt) and draws its panel.
+    fn update_copy_mode(&mut self, ctx: &egui::Context) {
+        let Some(mut mode) = self.copy_mode.take() else { return };
+        let Some(tab) = self.tabs.get(self.active_tab) else { return };
+        let keys: Vec<crate::copy_mode::CopyKey> = ctx.input_mut(|i| {
+            let mut keys = Vec::new();
+            i.events.retain(|event| match event {
+                egui::Event::Key { key, pressed, modifiers, .. } => {
+                    if let Some(k) = crate::copy_mode::key_for(*key, *modifiers) {
+                        if *pressed {
+                            keys.push(k);
+                        }
+                        false
+                    } else {
+                        true
+                    }
+                }
+                // Typed letters are copy-mode keys, not prompt text.
+                egui::Event::Text(_) => false,
+                _ => true,
+            });
+            keys
+        });
+        for key in keys {
+            match mode.apply(key, &tab.blocks) {
+                crate::copy_mode::CopyOutcome::Stay => {}
+                crate::copy_mode::CopyOutcome::Copy(text) => {
+                    ctx.copy_text(text);
+                    return;
+                }
+                crate::copy_mode::CopyOutcome::Exit => return,
+            }
+        }
+        crate::copy_mode::render(ctx, &mode, &tab.blocks);
+        self.copy_mode = Some(mode);
+    }
+
     fn open_new_tab(&mut self, shell_idx: usize) {
         let cwd = self
             .tabs
@@ -3569,9 +3728,15 @@ impl MrtGuiApp {
         self.tabs.push(TerminalTab::new(
             format!("Tab {n} ({})", self.shells[shell_idx].kind.short_label()),
             shell_idx,
-            cwd,
+            cwd.clone(),
         ));
         self.active_tab = self.tabs.len() - 1;
+        self.fire_hooks(crate::hooks::HookEvent {
+            event: "tab_opened",
+            cwd: cwd.display().to_string(),
+            tab_title: self.tabs[self.active_tab].title.clone(),
+            ..Default::default()
+        });
     }
 
     /// Runs every key press through the keymap. Keys that complete a binding or
@@ -3681,6 +3846,15 @@ impl MrtGuiApp {
             Action::ToggleMosaic => self.mosaic = !self.mosaic,
             Action::OpenTaskManager => self.open_task_manager(None),
             Action::Find => self.find.open(),
+            Action::CopyMode => {
+                self.copy_mode = self.tabs.get(self.active_tab).and_then(|t| crate::copy_mode::CopyMode::new(&t.blocks));
+            }
+            Action::ToggleBroadcast => {
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    tab.broadcast = !tab.broadcast;
+                }
+            }
+            Action::RunNamed(name) => self.run_named_action(&name),
             // The resolver itself tracks the active key table.
             Action::EnterTable(_) | Action::ExitTable => {}
         }
@@ -4036,6 +4210,7 @@ impl eframe::App for MrtGuiApp {
         self.process_history_events();
         self.process_mcp_ui_commands();
         self.handle_keybindings(ctx);
+        self.update_copy_mode(ctx);
         self.process_tui_session(ctx);
         self.maybe_spawn_process_tick();
         if let Some(idx) = self.notifier.update(ctx, &self.tabs, self.active_tab, self.mosaic) {
@@ -4476,7 +4651,7 @@ impl eframe::App for MrtGuiApp {
                                     tab.active_pane_idx = 0;
                                 }
                             });
-                            if let Some(clicked) = draw_pane_tui(ctx, ui, &mut self.pane_tuis, tab.id, 0, None, pane_focus_allowed && tab.active_pane_idx == 0, window_focused, &exit_keys) {
+                            if let Some(clicked) = draw_pane_tui(ctx, ui, &mut self.pane_tuis, tab.id, 0, None, pane_focus_allowed && tab.active_pane_idx == 0, window_focused, &exit_keys, tab.broadcast) {
                                 if clicked {
                                     tab.active_pane_idx = 0;
                                 }
@@ -4511,7 +4686,7 @@ impl eframe::App for MrtGuiApp {
                                     tab.active_pane_idx = 1;
                                 }
                             });
-                            if let Some(clicked) = draw_pane_tui(ctx, ui, &mut self.pane_tuis, tab.id, 1, None, pane_focus_allowed && tab.active_pane_idx == 1, window_focused, &exit_keys) {
+                            if let Some(clicked) = draw_pane_tui(ctx, ui, &mut self.pane_tuis, tab.id, 1, None, pane_focus_allowed && tab.active_pane_idx == 1, window_focused, &exit_keys, tab.broadcast) {
                                 if clicked {
                                     tab.active_pane_idx = 1;
                                 }
@@ -4549,7 +4724,7 @@ impl eframe::App for MrtGuiApp {
                                 tab.active_pane_idx = 0;
                             }
                         });
-                        if let Some(clicked) = draw_pane_tui(ctx, ui, &mut self.pane_tuis, tab.id, 0, Some(half_h), pane_focus_allowed && tab.active_pane_idx == 0, window_focused, &exit_keys) {
+                        if let Some(clicked) = draw_pane_tui(ctx, ui, &mut self.pane_tuis, tab.id, 0, Some(half_h), pane_focus_allowed && tab.active_pane_idx == 0, window_focused, &exit_keys, tab.broadcast) {
                                 if clicked {
                                     tab.active_pane_idx = 0;
                                 }
@@ -4585,7 +4760,7 @@ impl eframe::App for MrtGuiApp {
                                 tab.active_pane_idx = 1;
                             }
                         });
-                        if let Some(clicked) = draw_pane_tui(ctx, ui, &mut self.pane_tuis, tab.id, 1, Some(half_h), pane_focus_allowed && tab.active_pane_idx == 1, window_focused, &exit_keys) {
+                        if let Some(clicked) = draw_pane_tui(ctx, ui, &mut self.pane_tuis, tab.id, 1, Some(half_h), pane_focus_allowed && tab.active_pane_idx == 1, window_focused, &exit_keys, tab.broadcast) {
                                 if clicked {
                                     tab.active_pane_idx = 1;
                                 }
@@ -4904,6 +5079,7 @@ impl eframe::App for MrtGuiApp {
                                 // Bindable actions, each showing its current key binding
                                 // (or its action name, ready to bind in `[keybindings]`).
                                 let keymap = self.key_resolver.keymap();
+                                let named = self.named_palette_actions();
                                 let action_rows: Vec<(Action, String, String)> = PALETTE_ACTIONS
                                     .iter()
                                     .map(|action| {
@@ -4911,6 +5087,7 @@ impl eframe::App for MrtGuiApp {
                                         let hint = if keys.is_empty() { action.name() } else { keys };
                                         (action.clone(), action.title(), hint)
                                     })
+                                    .chain(named)
                                     .filter(|(action, title, hint)| matches(title, &format!("{hint} {}", action.name())))
                                     .collect();
                                 if !action_rows.is_empty() {
@@ -5640,6 +5817,40 @@ mod tests {
     /// A remote tab's commands go to the SSH session and never run on this machine: with
     /// an unreachable host the first block reports the connection failure instead of the
     /// local `hostname`.
+    #[test]
+    fn named_actions_broadcast_and_copy_mode() {
+        let mut app = MrtGuiApp::new();
+        app.config_state.config.actions = vec![mrt_core::NamedActionEntry {
+            name: "Pair-Up".into(),
+            title: Some("Split and broadcast".into()),
+            command: None,
+            commands: vec![":split-h".into(), ":broadcast on".into()],
+            key: Some("ctrl+alt+p".into()),
+        }];
+        app.apply_config_side_effects();
+        let palette = app.named_palette_actions();
+        assert_eq!(palette.len(), 1);
+        assert_eq!(palette[0].0, Action::RunNamed("pair_up".into()));
+        assert_eq!(palette[0].1, "Split and broadcast");
+        assert!(palette[0].2.to_lowercase().contains("alt"), "the action's key is bound: {}", palette[0].2);
+
+        app.dispatch_action(Action::RunNamed("pair_up".into()));
+        assert!(app.tabs[0].secondary_pane.is_some(), "MRT commands in an action run in order");
+        assert!(app.tabs[0].broadcast);
+        app.submit_input(Some(":broadcast".into()), false);
+        assert!(!app.tabs[0].broadcast, "toggles");
+
+        app.dispatch_action(Action::RunNamed("missing".into()));
+        assert!(app.runbooks_state.replay_notice.as_deref().unwrap_or("").contains("missing"));
+
+        app.dispatch_action(Action::CopyMode);
+        assert!(app.copy_mode.is_none(), "no blocks, nothing to select");
+        app.tabs[0].blocks.push(CommandBlock::new_completed("echo hi", "sh", "/", "hi
+", 0, 0));
+        app.dispatch_action(Action::CopyMode);
+        assert_eq!(app.copy_mode, Some(crate::copy_mode::CopyMode { block: 0, line: 0, anchor: None }));
+    }
+
     #[test]
     fn forwarding_channel_keeps_order_and_ends_with_its_senders() {
         let (tx, rx) = forwarding_channel::<u32>();

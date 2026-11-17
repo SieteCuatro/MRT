@@ -12,14 +12,15 @@ This page covers what is built, and the plan for the rest of Milestone 4 in the 
 | Detach for PTYs | `mrt_pty_spawn` / `mrt_pty_write` / `mrt_pty_read` | PTYs live in the server, not the client. `mrt_pty_read` with `drain: true` returns only the output a client has not read yet, so a client that reconnects gets what it missed once. `view: "screen"` rebuilds the visible screen. |
 | Layout restore | `mrt-app/src/layout.rs` | The GUI saves its tabs, splits, shells, folders and remote tabs, and reopens them with fresh shells. |
 
+| Session host | `mrt-app/src/session_host.rs` | `mrt session-host`, started detached by the window: owns each tab's persistent shell (`ShellPool`) and every running command with its output. The window sends `run`, follows with `poll`, and on start asks for `jobs` to reattach to commands that ran while it was gone. Token-authenticated localhost TCP (`session-host.json`). |
 | Sessions outlive the window | `mrt-app/src/app.rs` (`handle_close_request`) | Closing the window while commands, TUI programs or PTYs run keeps the MRT process running with its window hidden; `mrt` / `mrt quick` shows it again with the same tabs, blocks and live output. |
 | Single instance and upgrades | `mrt-app/src/cli.rs` (`handoff_to_running_instance`) | A new `mrt` shows the running window. A different version replaces an idle one (which saves its layout) and leaves a busy one running. |
 | Remote connections | `mrt-mcp/src/remote.rs`, `mrt-app/src/remote_cli.rs` | `mrt share` / `mrt pair` / `mrt attach`: SPAKE2 pairing, Noise-encrypted relay to the bridge, paired keys only, live revocation, reconnect with missed output shown once. |
 | Phone companion | `mrt-mcp/src/companion.rs` | `mrt share --web`: HTTPS web app with token pairing, live tabs and blocks, a command box and Safety Gate answers (opt-in). |
 
-The "done when" of the session-server milestone (close the window mid-build, reopen it, see the same tabs, finished blocks and live output) is met by keeping the GUI process alive in the background. The sections below describe the further step: moving the shells into a separate server process that a GUI attaches to, so a crash of the window does not take the shells with it.
+With the session host, the shells and running commands no longer live in the window process: a window that closes or crashes does not take them along, and the next window reattaches. Full-screen programs (TUI PTYs) and agents' PTYs still live in the window process; section 2 describes moving those and replacing polling with event streams.
 
-## 2. GUI attached to the server
+## 2. GUI attached to the server (implemented for tab commands)
 
 **Goal.** Close the window during a build, reopen it, and see the same tabs, the finished blocks and the live output.
 

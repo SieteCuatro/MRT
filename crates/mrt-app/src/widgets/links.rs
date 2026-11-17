@@ -44,15 +44,26 @@ pub fn open_modifier_label() -> &'static str {
 /// Renders ANSI spans as one selectable label with clickable links.
 /// `cwd` resolves relative file paths. Returns a request when a click needs
 /// the app (terminal editors); everything else is handled here.
+/// Find-in-output highlights for one block: the query, which of this block's matches
+/// is the current one, and whether to scroll it into view this frame.
+pub struct FindView<'a> {
+    pub query: &'a str,
+    pub current: Option<usize>,
+    pub scroll: bool,
+}
+
 pub fn render_spans_with_links(
     ui: &mut Ui,
     spans: &[AnsiSpan],
     style: &SpanStyle,
     cwd: &str,
     error_id: egui::Id,
+    find: Option<&FindView>,
 ) -> Option<LinkRequest> {
     let text: String = spans.iter().map(|s| s.text.as_str()).collect();
     let links = collect_links(spans, &text);
+    let matches = find.map(|f| crate::find::match_ranges(&text, f.query)).unwrap_or_default();
+    let current_match = find.and_then(|f| f.current).and_then(|n| matches.get(n).cloned());
 
     let mut job = egui::text::LayoutJob::default();
     let mut offset = 0;
@@ -60,11 +71,11 @@ pub fn render_spans_with_links(
         let span_end = offset + span.text.len();
         // Cut the span at link boundaries so links can be styled separately.
         let mut cuts = vec![offset, span_end];
-        for link in &links {
-            for b in [link.bytes.start, link.bytes.end] {
-                if b > offset && b < span_end {
-                    cuts.push(b);
-                }
+        let link_bounds = links.iter().flat_map(|l| [l.bytes.start, l.bytes.end]);
+        let match_bounds = matches.iter().flat_map(|m| [m.start, m.end]);
+        for b in link_bounds.chain(match_bounds) {
+            if b > offset && b < span_end {
+                cuts.push(b);
             }
         }
         cuts.sort_unstable();
@@ -72,13 +83,33 @@ pub fn render_spans_with_links(
         for pair in cuts.windows(2) {
             let (a, b) = (pair[0], pair[1]);
             let in_link = links.iter().any(|l| l.bytes.start <= a && b <= l.bytes.end);
-            job.append(&text[a..b], 0.0, span_format(span, style, in_link));
+            let mut format = span_format(span, style, in_link);
+            if matches.iter().any(|m| m.start <= a && b <= m.end) {
+                let is_current = current_match.as_ref().is_some_and(|m| m.start <= a && b <= m.end);
+                if is_current {
+                    format.background = Palette::ACCENT_AMBER;
+                    format.color = Palette::ON_ACCENT;
+                } else {
+                    format.background = Palette::ACCENT_AMBER.gamma_multiply(0.35);
+                }
+            }
+            job.append(&text[a..b], 0.0, format);
         }
         offset = span_end;
     }
     job.wrap.max_width = ui.available_width();
     let galley = ui.fonts(|f| f.layout_job(job));
     let response = ui.add(egui::Label::new(galley.clone()));
+
+    // Bring the current find match into view.
+    if let (Some(range), Some(true)) = (&current_match, find.map(|f| f.scroll)) {
+        let index = text[..range.start].chars().count();
+        let cursor = galley.from_ccursor(egui::text::CCursor::new(index));
+        let rect = galley.pos_from_cursor(&cursor).translate(response.rect.min.to_vec2());
+        // Jump without animation: an animated scroll toward a match far up a long block
+        // did not reach it.
+        ui.scroll_to_rect_animation(rect.expand(24.0), Some(egui::Align::Center), egui::style::ScrollAnimation::none());
+    }
 
     let mut request = None;
     if let Some(pos) = response.hover_pos() {

@@ -13,6 +13,7 @@ The Cargo workspace contains 5 modular crates:
 - **`crates/mrt-core`**:
   - `pty.rs`: Discovers installed host shells (`pwsh`, `powershell`, `cmd`/Batch, `git-bash`, `wsl`, `bash`, `zsh`, `fish`, `nu`, `sh`) and executes commands or spawns `portable-pty` sessions. Uses `CREATE_NO_WINDOW` (`0x08000000`) on Windows so child processes never flash external console windows.
   - `vt.rs`: Parses ANSI/VT100 escape sequences via `vte` into colored `AnsiSpan` segments and stripped plain text.
+  - `term.rs`: Terminal grid emulator (`TerminalEmulator`) wrapping `alacritty_terminal` behind an MRT-owned API: `feed` PTY bytes, `resize`, `snapshot` of cells (colors, attributes, wide chars), cursor, scrollback, title, alternate screen, input modes (app cursor, bracketed paste, mouse), and `take_replies` for DA/CPR answers to the PTY (library only; not wired into the GUI yet).
   - `block.rs`: Defines `CommandBlock` and `classify_output` (auto-detecting JSON trees, CSV/TSV tables, Markdown, and HTTP responses).
   - `safety.rs`: Evaluates command risk (`Safe`, `Moderate`, `Critical`) across Bash, PowerShell, CMD/Batch, SQL, Git, Kubernetes, and process control (`kill`, `taskkill`, `Stop-Process`, protected OS process names) for the MRT Safety Approval Gate.
   - `shell_integration.rs`: OSC 133 semantic prompt markers parser and shell integration generator for Bash, Zsh, Fish, PowerShell, and CMD (library only; not wired into the GUI yet).

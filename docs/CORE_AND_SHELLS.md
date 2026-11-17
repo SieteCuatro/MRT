@@ -10,6 +10,7 @@
 | :--- | :--- | :--- |
 | **`pty`** | [`src/pty.rs`](../crates/mrt-core/src/pty.rs) | Multi-shell discovery (`ShellProfile`), per-command & streaming shell execution (`execute_command_in_shell`, `execute_command_streaming`, `execute_command_streaming_with_pid`), and streaming `portable-pty` sessions (`InteractivePty`). |
 | **`vt`** | [`src/vt.rs`](../crates/mrt-core/src/vt.rs) | ANSI / VT100 escape sequence state machine powered by `vte`, producing styled `AnsiSpan` vectors and stripped plain text. |
+| **`term`** | [`src/term.rs`](../crates/mrt-core/src/term.rs) | Terminal grid emulator (`TerminalEmulator`) wrapping `alacritty_terminal`: turns PTY bytes into a screen of cells with cursor, scrollback, alternate screen, title, input modes, and replies for the PTY. Library only; not wired into the GUI yet. |
 | **`block`** | [`src/block.rs`](../crates/mrt-core/src/block.rs) | `CommandBlock` data model and automatic `StructuredOutput` detector (JSON, CSV/TSV Tables, Markdown, HTTP results). |
 | **`safety`** | [`src/safety.rs`](../crates/mrt-core/src/safety.rs) | Cross-shell destructive command classifier (`RiskLevel::Safe`, `Moderate`, `Critical`) powering the MRT Safety Approval Gate. |
 | **`shell_integration`** | [`src/shell_integration.rs`](../crates/mrt-core/src/shell_integration.rs) | OSC 133 semantic prompt marker parser and shell integration generator for Bash, Zsh, Fish, PowerShell, and CMD. |
@@ -108,3 +109,53 @@ MRT integrates native support for the **OSC 133 semantic prompt specification**,
 
 ### Status
 The parser and scripts are a library API with unit tests. The GUI does not inject the scripts or read markers yet: each command block runs in its own shell process (`-Command` / `/C` / `-c`), so the exit code comes from the process itself. Wiring OSC 133 into persistent PTY tabs is tracked in the [Roadmap](../ROADMAP.md#milestone-2--everyday-terminal-use).
+
+---
+
+## 7. Terminal Grid Emulator (`term.rs`)
+
+`vt.rs` only colors a text transcript. Full-screen programs (`vim`, `htop`, `less`, `lazygit`) need a real screen: they move the cursor, erase regions, set scroll regions, and switch to the alternate screen. `TerminalEmulator` keeps that screen. It wraps [`alacritty_terminal`](https://crates.io/crates/alacritty_terminal) behind an MRT-owned API, so no `alacritty_terminal` type appears in a public signature.
+
+The emulator is a pure state machine: it never touches a PTY. The caller feeds it PTY output and writes its replies back.
+
+```rust
+use mrt_core::TerminalEmulator;
+
+let mut term = TerminalEmulator::new(120, 35, 10_000); // cols, rows, scrollback lines
+term.feed(&bytes_from_pty);
+pty.write_all(&term.take_replies())?;                 // DA, DSR/CPR, color and size replies
+let screen = term.snapshot();                          // cells, cursor, modes, title
+```
+
+### API
+
+| Method | Returns |
+| :--- | :--- |
+| `new(cols, rows, scrollback)` | Emulator with a `cols` x `rows` screen keeping up to `scrollback` history lines. Sizes below 2x1 are clamped. |
+| `feed(&[u8])` | Parses PTY output. Escape sequences and UTF-8 characters may be split across calls. |
+| `resize(cols, rows)` | Resizes the grid (lines reflow; shrinking rows pushes the top into scrollback). |
+| `take_replies() -> Vec<u8>` | Drains the bytes the terminal must write back to the PTY: primary/secondary device attributes (`CSI c`, `CSI > c`), status and cursor position reports (`CSI 5n`, `CSI 6n`), text area size (`CSI 14t`, `CSI 18t`), and color queries (`OSC 4/10/11 ; ?`). |
+| `snapshot() -> TermSnapshot` | Visible cells (`rows` x `cols` `TermCell`s), cursor, modes and title. |
+| `row_cells(row)` | One visible row as `TermCell`s. |
+| `screen_text()` | Visible screen as plain text, one line per row, trailing spaces trimmed, wide-character spacers skipped. |
+| `scrollback_len()`, `scrollback_lines()`, `scrollback_row_cells(i)` | History that scrolled off the primary screen, oldest first. The alternate screen has no history. |
+| `cursor() -> TermCursor` | 0-based `row`/`col`, `visible` (`CSI ?25 h/l`), and `shape` (`Block`, `Underline`, `Beam` from `CSI n SP q`). |
+| `modes() -> TermModes` | What the input side needs: `app_cursor` (DECCKM), `app_keypad`, `bracketed_paste` (2004), `mouse` (`MouseMode::None/Click/Drag/Motion` for 1000/1002/1003), `sgr_mouse` (1006), `utf8_mouse` (1005), `focus_reporting` (1004), `alternate_scroll` (1007), `alt_screen`. |
+| `is_alt_screen()` | Whether the alternate screen (1049/1047/47) is active. |
+| `title()` | Window title set with `OSC 0` / `OSC 2`. |
+| `take_bell()` | Whether `BEL` rang since the last call. |
+| `sync_deadline()`, `flush_sync()` | Synchronized updates (mode 2026) hold output back until the program ends them; if it never does, call `flush_sync()` once the deadline passes (`feed` also flushes an expired one). |
+| `set_cell_size_px(w, h)` | Cell size reported by `CSI 14t` (default 8x16). |
+
+Each `TermCell` has `ch`, `zero_width` (combining marks), `fg`/`bg`, and the flags `bold`, `dim`, `italic`, `underline`, `strikeout`, `inverse`, `hidden`, `wide` (a double-width CJK or emoji character) and `wide_spacer` (the right half of a wide character, which renderers skip).
+
+Colors stay unresolved as `TermColor::DefaultFg`, `DefaultBg`, `Indexed(0..=255)` or `Rgb(AnsiColor)`, so the renderer applies its theme. `TermColor::to_rgb(fg, bg)` and `xterm_palette(index)` resolve them with the standard xterm 256-color palette.
+
+### Security
+`OSC 52` clipboard access is disabled: programs inside the terminal can neither read nor set the clipboard.
+
+### Dependency note
+`alacritty_terminal` 0.26 depends on `vte` 0.15, while `vt.rs` uses the workspace's `vte` 0.13. Cargo builds both versions side by side; they never meet in a public type. `vt.rs` can move to 0.15 in a later change.
+
+### Status
+Library API with unit tests (cursor movement, erase, alternate screen, scroll regions, 16/256/truecolor, wide and combining characters, resize, replies, modes, and vim-like and htop-like byte streams). The GUI does not use it yet: the TUI overlay still shows the raw PTY transcript. A renderer widget is a follow-up.

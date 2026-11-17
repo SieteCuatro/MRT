@@ -2,9 +2,59 @@
 
 MRT's strengths are the features built on top of the terminal: command blocks with structured output, the Safety Approval Gate, the MCP server and host, AI diagnosis, runbooks, and the Toolbox. This roadmap started from two gaps underneath them (no terminal screen emulator, and a new shell process for every command) and from what Ghostty, tmux and Rex do better.
 
-**Status (November 2026): every milestone and idea below is implemented** and merged to `main`. The one limit left is that macOS has not been tested (no Mac was available); everything else is covered by tests on Windows and Linux. New work should start a new list.
+The roadmap has two lists. The **second list** (below) is the open work, from a comparison with what other terminals shipped in 2026. The **first list** (Milestones 1–6) is finished: every item is implemented and merged to `main`, tested on Windows and Linux; macOS has not been tested (no Mac was available).
 
-The milestones below are in priority order. Each item says what to build and how to tell it is done. Status markers: *(implemented)*, *(in progress)*, *(library only)*. Unmarked items are open. When you finish an item, mark it here and update the documents listed in [CONTRIBUTING.md](CONTRIBUTING.md#which-documents-to-update).
+Milestones are in priority order. Each item says what to build and how to tell it is done. Status markers: *(implemented)*, *(in progress)*, *(library only)*. Unmarked items are open. When you finish an item, mark it here and update the documents listed in [CONTRIBUTING.md](CONTRIBUTING.md#which-documents-to-update).
+
+# Second list (November 2026)
+
+## What other terminals shipped in 2026
+
+- **Warp.** Vertical tabs, git worktrees with generated branch names, its rich input editor for third-party agent CLIs (Claude Code, Codex), comments routed to an idle terminal in the same repository when the focused one is busy, an agent mode with plans and checkpoints that can orchestrate other agents, and AI cost shown in money. *Lesson:* agents work in parallel, each in its own worktree, and the terminal should manage that.
+- **Ghostty 1.3.** Scrollback search, native scrollbars, click-to-move the cursor at the prompt, key tables and chained keybinds, a much more complete OSC 133, and image copy and paste (OSC 5522) in development builds. *Lesson:* the basics (scrollbars, search, correct shell integration) are still what users ask for most.
+- **Kitty 0.46–0.49.** Momentum scrolling, tabs reordered by dragging, moved between windows or detached into a new one, split resizing with the mouse, custom shaders, and `remap_modifiers`. *Lesson:* tabs and windows should be as easy to rearrange as in a browser.
+- **Windows Terminal 1.25.** A searchable settings UI where actions, Command Palette entries and keybindings can be edited, the kitty keyboard protocol, and faster start-up. Microsoft also tests an "Intelligent Terminal" fork with an agents sidebar. *Lesson:* every setting should be reachable without editing a file.
+- **Wave 0.14.** Vertical tabs, badges on blocks and tabs, a secret store reachable from its CLI, saving scrollback to a file, and local or bring-your-own-key AI. *Lesson:* secrets belong in a store, not in environment variables.
+- **Agent workspaces (Superset, cmux).** One git worktree per agent task, with the agents' terminals side by side and a review step before merging.
+
+MRT already covers much of this: vertical tab sidebar, scrollback search, key tables and chains, kitty keyboard, agent status on tabs, badges for unseen results, local and bring-your-own-key AI. The milestones below are what is left.
+
+## Milestone 7 — Agents working in parallel
+
+- **Worktree tabs.** `:worktree <branch>` (and an MCP tool) creates a git worktree for a new branch next to the repository, opens a tab in it, and labels the tab with the branch. Closing the tab offers to remove the worktree if it has no uncommitted changes. *Done when:* two agents run in two worktree tabs of the same repository without touching each other's files.
+- **Review before merge.** A worktree tab shows its changes against the base branch (files changed, a diff block) and has Merge, Open PR (`gh`, when installed) and Discard actions, each through the Safety Gate.
+- **Send work to an idle tab.** `mrt send --idle <repo>` and an MCP option pick a tab in the same repository that is not running anything, so an agent can queue work while another tab is busy.
+- **AI cost.** Show the tokens and the estimated cost of each AI request (per provider price table in the config), per tab and per session.
+
+## Milestone 8 — Tabs, windows and scrolling
+
+- **Drag tabs.** Reorder tabs by dragging them in the sidebar, as Mosaic tiles already can.
+- **Several windows.** Open a second window (egui viewports) and move a tab to another window or into a new one. *Done when:* a tab moved to a new window keeps its shell, blocks and running command.
+- **Scrollbars and smooth scrolling.** A scrollbar for the TUI grid's scrollback (blocks already scroll), and smooth scrolling with the touchpad.
+- **Resize splits with the mouse.** Drag the divider between panes.
+
+## Milestone 9 — Text input
+
+- **Input methods (IME).** Composed input for Chinese, Japanese and Korean in the prompt and in full-screen programs, with the composition shown at the cursor. *Done when:* typing Japanese with the Windows IME and with fcitx/ibus on Linux works in the prompt and in `vim`.
+- **Ligatures and complex scripts.** Shape text (for example with `cosmic-text` or `rustybuzz`) so programming ligatures, Arabic and Indic scripts draw correctly; egui does not shape text today.
+- **Images on the clipboard.** Copy and paste images with OSC 5522 when Ghostty's proposal settles.
+
+## Milestone 10 — Settings and secrets
+
+- **Settings window.** A searchable settings view that edits `config.toml` (font, theme, shell, Safety Gate, AI provider, notifications) and lists keybindings and actions with conflicts highlighted, writing the same file the watcher reloads.
+- **API keys in the OS keyring.** Store provider keys in Windows Credential Manager, the macOS Keychain or the Secret Service, as an alternative to environment variables, so MRT started from a desktop launcher finds them.
+- **SSH hosts.** List hosts from `~/.ssh/config` in the Command Palette; choosing one opens a `:ssh` tab with shell integration.
+- **Update check.** Opt-in check against GitHub Releases at start-up, shown as a small notice, never downloading anything without a click.
+
+## Milestone 11 — Distribution
+
+- **macOS.** Test on a Mac (persistent shells, session host, notifications, fonts, keyboard) and publish Intel and Apple Silicon archives. The one platform the first list could not test.
+- **Linux packages.** An AppImage and a `.deb` alongside the tar.gz, then Flathub. The tar.gz binary already runs on glibc 2.17 or newer (`scripts/release/build-linux.sh`).
+- **Windows packages.** A winget manifest and an MSI or MSIX installer with a Start menu entry.
+- **ARM.** `aarch64` Linux and Windows on ARM builds.
+- **Signed binaries.** Code signing on Windows and notarization on macOS, so the OS does not warn on first start.
+
+# First list (done)
 
 ## What other terminals do better
 

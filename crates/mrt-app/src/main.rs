@@ -6,6 +6,7 @@ mod config_runtime;
 mod history;
 mod keymap;
 mod notifications;
+mod term_input;
 mod theme;
 mod widgets;
 

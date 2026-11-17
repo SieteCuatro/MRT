@@ -565,11 +565,26 @@ impl InteractivePty {
 
         std::thread::spawn(move || {
             let mut temp = [0u8; 4096];
+            // Bytes of a UTF-8 character cut off at the end of the previous read.
+            let mut pending: Vec<u8> = Vec::new();
             while let Ok(n) = reader.read(&mut temp) {
                 if n == 0 {
                     break;
                 }
-                let text = String::from_utf8_lossy(&temp[..n]);
+                pending.extend_from_slice(&temp[..n]);
+                let text = decode_output(&mut pending, false);
+                if text.is_empty() {
+                    continue;
+                }
+                if let Ok(mut guard) = buf_clone.lock() {
+                    guard.push_str(&text);
+                }
+                if let Ok(mut guard) = transcript_clone.lock() {
+                    guard.push_str(&text);
+                }
+            }
+            if !pending.is_empty() {
+                let text = decode_output(&mut pending, true);
                 if let Ok(mut guard) = buf_clone.lock() {
                     guard.push_str(&text);
                 }

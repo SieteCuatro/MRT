@@ -12,7 +12,8 @@ The Cargo workspace contains 5 modular crates:
 
 - **`crates/mrt-core`**:
   - `pty.rs`: Discovers installed host shells (`pwsh`, `powershell`, `cmd`/Batch, `git-bash`, `wsl`, `bash`, `zsh`, `fish`, `nu`, `sh`) and executes commands or spawns `portable-pty` sessions. Uses `CREATE_NO_WINDOW` (`0x08000000`) on Windows so child processes never flash external console windows.
-  - `vt.rs`: Parses ANSI/VT100 escape sequences via `vte` into colored `AnsiSpan` segments and stripped plain text.
+  - `vt.rs`: Parses ANSI/VT100 escape sequences via `vte` into colored `AnsiSpan` segments and stripped plain text; `parse_ansi_rich` also returns OSC 7 (working directory), OSC 8 (hyperlinks on spans), and OSC 52 (clipboard requests, never applied automatically) as `VtEvent`s.
+  - `links.rs`: Detects plain-text URLs and `path:line[:col]` locations in output and classifies OSC 8 targets (which URL schemes MRT will open).
   - `term.rs`: Terminal grid emulator (`TerminalEmulator`) wrapping `alacritty_terminal` behind an MRT-owned API: `feed` PTY bytes, `resize`, `snapshot` of cells (colors, attributes, wide chars), cursor, scrollback, title, alternate screen, input modes (app cursor, bracketed paste, mouse), and `take_replies` for DA/CPR answers to the PTY (library only; not wired into the GUI yet).
   - `block.rs`: Defines `CommandBlock` and `classify_output` (auto-detecting JSON trees, CSV/TSV tables, Markdown, and HTTP responses).
   - `safety.rs`: Evaluates command risk (`Safe`, `Moderate`, `Critical`) across Bash, PowerShell, CMD/Batch, SQL, Git, Kubernetes, and process control (`kill`, `taskkill`, `Stop-Process`, protected OS process names) for the MRT Safety Approval Gate.
@@ -39,7 +40,10 @@ The Cargo workspace contains 5 modular crates:
 - **`crates/mrt-ai`**:
   - `lib.rs`: Multi-provider AI client supporting **Google Gemini**, **Anthropic Claude**, **OpenAI**, **xAI Grok**, **DeepSeek**, **OpenRouter**, **Local Ollama**, and a deterministic **Offline Polyglot Heuristic Engine**, with streaming token delivery (`diagnose_command_error_streaming`).
 - **`crates/mrt-app`**:
-  - `main.rs`: Entrypoint (`#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]`), CLI flag handler (`--mcp-server`, `--version`, `--help`), and `eframe` native GPU launcher.
+  - `main.rs`: Entrypoint (`#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]`), CLI flag handler (`--mcp-server`, `--version`, `--help`, and the `mrt agent setup|show|remove` subcommand in `agent_setup.rs`), and `eframe` native GPU launcher.
+  - `config_runtime.rs`: Loads the config file at startup, polls it for changes, and applies it to the GUI (font size, default shell, AI preferences, startup MCP servers, keymap, notification settings) with an in-window notice for errors.
+  - `notifications.rs`: `CommandNotifier`: desktop notifications (`notify-rust`) for long commands that finish in the background, and unseen-results badges on tabs.
+  - `widgets/activity.rs` & `widgets/links.rs`: Tab activity indicator (dot, spinner, progress ring) for sidebar rows and Mosaic tiles, and clickable links (`Ctrl`/`Cmd`+click) plus the OSC 52 clipboard prompt in command blocks.
   - `app.rs`, `history.rs`, `keymap.rs`, `theme.rs` & `widgets/`: Configurable keybindings (`keymap.rs`: actions, `ctrl+a > c` chains, key tables, conflict reporting), Multi-tab GUI, Split Panes within tabs (`:split-h`, `:split-v`, `:unsplit`), full-screen Interactive TUI Mode overlay (`:tui <cmd>`, `vim`, `nano`, `htop`, `lazygit`), Mosaic split grid, Folder Explorer, SQLite + FTS5 trigram command history, dark theme & system font loader, per-tab shell switcher, interactive block renderer (with structured diffs), MCP Hub side panel, Toolbox side panel (`widgets/toolbox.rs` with Network and Task Manager tabs, `widgets/task_manager.rs`), Safety Approval Gate modal, and Command Palette (`Ctrl+K` / `Ctrl+P`).
 
 ---

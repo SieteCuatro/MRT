@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.2.1 — 2026-11-17
+
+### New
+- **Kitty keyboard protocol**: programs that turn it on (Neovim, Helix, recent fish…) get kitty key codes for all five flags: disambiguated Esc and modified keys, repeat and release events, alternate keys, all keys as escape codes, and associated text.
+- **Search a running program's scrollback**: in grid copy mode (`Ctrl+Shift+Space` inside a full-screen program), `/` searches the screen and its history, `n` / `N` step through matches, and moving past the edges or `PgUp` / `PgDn` scroll back through the history.
+- **`mrt_pty_read` scrollback**: with `view: "screen"`, `scrollback_lines` also returns the lines above the screen.
+- **`:agents`**: a window that shows agents' PTYs live, drawn like a terminal, read-only.
+
+### Notes
+- The CI and release workflows are disabled while there are no GitHub Actions minutes; this release was tested locally on Windows and Linux and has Windows and Linux archives built locally (the Linux binary needs glibc 2.43 or newer). There are no macOS archives.
+
 ## v0.2.0 — 2026-11-17
 
 The first release with the whole [ROADMAP](ROADMAP.md): a real terminal core, persistent shells, sessions that outlive the window, remote access, and the features suggested by Ghostty, tmux and Rex. Details are in the [User Guide](docs/USER_GUIDE.md).

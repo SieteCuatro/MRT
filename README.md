@@ -76,6 +76,7 @@ MRT checks configured environment variables in the following order and falls bac
 - [Toolbox: Network Tools & Task Manager](docs/TOOLBOX.md) — `:http`, `:web`, `:ports`, `:dns`, `:ws`, `:ps`, `:top`, `:proc`, `:kill`, and `:watch-proc` internals.
 - [AI Providers & Error Triage](docs/AI_PROVIDERS_AND_AGENTS.md) — Provider resolution and command diagnosis.
 - [GUI & Widgets](docs/GUI_AND_WIDGETS.md) — Async architecture, block viewers, and side panels.
+- [Performance & Benchmarks](docs/PERFORMANCE.md) — Output throughput numbers, hot spots with large output, and how to run `cargo bench`.
 - [Roadmap](ROADMAP.md) — Planned milestones and project ideas.
 - [Contributing](CONTRIBUTING.md) — Development workflow and PR checklist.
 - [AI Agent Instructions](AGENTS.md) — Workspace context for coding agents.

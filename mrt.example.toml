@@ -12,15 +12,28 @@
 [terminal]
 default_shell = "auto" # "auto", "pwsh", "powershell", "cmd", "bash", "git-bash", "wsl", "zsh", "fish", "nu", "sh"
 font_size = 14.0       # terminal (monospace) font size, 8–40
-# theme = "graphite-calm" # the built-in dark theme ("dark" and "default" are aliases)
+# font_family = "JetBrains Mono"          # a family name installed here, or a .ttf/.otf/.ttc path
+# font_fallback = ["Symbols Nerd Font"]   # tried in order for characters the main font lacks
+# theme = "graphite-calm" # "graphite-calm" (aliases "dark", "default"), "high-contrast", or a theme
+#                         # file: a path, or a name next to this file or in its themes/ folder.
+#                         # MRT TOML, Windows Terminal JSON, Alacritty, Ghostty and iTerm2 themes work.
+persistent_shell = true              # one shell per tab: cd, variables and venvs carry over
+session_server = true                # shells, commands and programs live in `mrt session-host`,
+                                     # so they survive the window closing or crashing
+keep_running_on_close = true         # closing the window with work running keeps MRT in the background
+restore_layout = true                # reopen tabs, splits, shells and folders at the next start
+max_block_output_mb = 32             # output kept per command block (0 = everything, max 4096)
+quick_dropdown = false               # `mrt quick` shows the window across the top of the screen
+quick_height_percent = 45            # height of that drop-down, 20–100
+fast_native_output = false           # Windows: plain native programs typed in PowerShell run via cmd.exe
 scrollback_blocks = 500              # reserved, not applied yet
 auto_detect_structured_output = true # reserved, not applied yet
-persistent_shell = true              # one shell per tab: cd, variables and venvs carry over
 
 [safety]
 enabled = true                       # false: never ask (blocked_patterns still apply)
 require_approval_for_moderate = false # true: also ask before every Moderate command
 require_approval_for_critical = true
+remote_approvals = false             # let the phone companion (mrt share --web) answer the Safety Gate
 # Commands containing any of these (case-insensitive) are refused, never run.
 # A project .mrt.toml adds to this list; it cannot remove entries.
 blocked_patterns = [
@@ -65,6 +78,28 @@ enabled = false # MRT's own tools are already built in; enable to test an extern
 enabled = true
 threshold_secs = 10
 
-# Keyboard shortcuts: "binding" = "action name" (reserved, not applied yet).
+# Keyboard shortcuts: "binding" = "action name". Applied live; problems are listed in
+# the Command Palette. See the User Guide, "Custom keybindings".
 [keybindings]
 # "ctrl+t" = "new_tab"
+# "ctrl+a > c" = "new_tab"        # chain: Ctrl+A, then C
+# "ctrl+b" = "enter_table:pane"   # key table (mode)
+# "pane/h" = "split_horizontal"
+# "ctrl+alt+t" = "run:tests"      # an [[actions]] entry
+
+# Your own actions: they appear in the Command Palette and can have a key.
+# Several lines run in order like a runbook; MRT commands (":split-h") work too.
+# [[actions]]
+# name = "tests"
+# title = "Run the test suite"
+# command = "cargo test --workspace"
+# key = "ctrl+alt+t"
+
+# Commands MRT runs in the background when something happens. Events:
+# command_finished, command_failed, cwd_changed, tab_opened. The environment has
+# MRT_EVENT, MRT_COMMAND, MRT_EXIT_CODE, MRT_DURATION_MS, MRT_CWD and MRT_TAB.
+# [[hooks]]
+# event = "command_failed"
+# match = "cargo"
+# min_duration_secs = 30
+# run = "notify-send MRT \"$MRT_COMMAND failed\""

@@ -1,6 +1,6 @@
 # Modern Rust Terminal (MRT)
 
-A cross-platform (Windows, macOS, Linux) GPU-accelerated terminal emulator written in Rust (`eframe`/`egui` + `wgpu`). MRT combines native shell execution with structured command blocks, built-in network inspection tools, multi-provider AI translation/triage, and dual-mode Model Context Protocol (MCP) support.
+A cross-platform (Windows, macOS, Linux) GPU-accelerated terminal emulator written in Rust (`eframe`/`egui`). MRT combines persistent shells and a real terminal emulator with structured command blocks, sessions that survive the window (and are reachable from other devices), built-in network and process tools, multi-provider AI assistance, and Model Context Protocol (MCP) support for coding agents.
 
 Dual-licensed under the [MIT License or The Unlicense](LICENSE), at your option.
 
@@ -15,6 +15,8 @@ Dual-licensed under the [MIT License or The Unlicense](LICENSE), at your option.
 - **Sessions that Outlive the Window, from Anywhere**: closing the window keeps running work alive (`mrt` brings it back), upgrades never cut running sessions, and `mrt share` / `mrt attach` let paired computers and phones follow and drive your tabs over an end-to-end encrypted connection.
 - **Scriptable from the Shell**: `mrt list`, `mrt send`, `mrt capture` and `mrt split` control the open window (with `--json`), and the window's tabs, splits and folders are restored at the next start.
 - **Remote Tabs over SSH**: `:ssh user@host` opens a tab whose commands run on the host with blocks, exit codes and folder tracking; the shell integration is typed into the remote Bash/Zsh, so nothing is installed there.
+- **Fast with Huge Output**: output is parsed incrementally while it streams, each block keeps a bounded tail (`terminal.max_block_output_mb`) and draws its last lines with **Show more**, and the idle window barely repaints. `Ctrl+F` finds text in every block.
+- **Fonts**: pick any installed font or a font file, with fallbacks for icons and symbols (`terminal.font_family`, `terminal.font_fallback`).
 - **Persistent Shells**: Each tab keeps one long-lived shell with OSC 133 shell integration (PowerShell, CMD, Bash, Git Bash, Zsh, Fish, sh), so `cd`, variables, aliases and activated environments carry over from one command to the next, and **Stop** interrupts the command without losing the shell. WSL and Nushell, a busy shell, or `terminal.persistent_shell = false` run each command in its own process instead.
 - **Structured Command Blocks**: Automatically classifies command output into collapsible JSON trees, filterable CSV/TSV tables, Markdown, or HTTP exchanges while preserving full ANSI/VT100 styling, structured JSON/port diffing, and line-by-line block comparisons.
 - **Clickable Links & Clipboard Requests**: OSC 8 hyperlinks, plain-text URLs, and `path:line[:col]` locations in output open with `Ctrl+click` (`Cmd+click` on macOS) in the browser or your `$VISUAL` / `$EDITOR`. OSC 52 clipboard writes from programs wait for your approval.
@@ -62,6 +64,10 @@ cargo run -p mrt-app -- --mcp-server
 # Connect Claude Code, Codex CLI and Gemini CLI to MRT (add --dry-run to preview)
 cargo run -p mrt-app -- agent setup
 
+# Control the running window from another terminal
+cargo run -p mrt-app -- send echo hello
+cargo run -p mrt-app -- list --json
+
 # Run the workspace test suite
 cargo test --workspace
 ```
@@ -90,8 +96,9 @@ MRT checks configured environment variables in the following order (set `ai.prov
 - [Toolbox: Network Tools & Task Manager](docs/TOOLBOX.md) — `:http`, `:web`, `:ports`, `:dns`, `:ws`, `:ps`, `:top`, `:proc`, `:kill`, and `:watch-proc` internals.
 - [AI Providers & Error Triage](docs/AI_PROVIDERS_AND_AGENTS.md) — Provider resolution and command diagnosis.
 - [GUI & Widgets](docs/GUI_AND_WIDGETS.md) — Async architecture, block viewers, and side panels.
+- [Session Server & Remote Sessions](docs/SESSION_SERVER.md) — The session host, background mode, upgrades, `mrt share` / `pair` / `attach`, the phone companion, and how they are verified.
 - [Performance & Benchmarks](docs/PERFORMANCE.md) — Output throughput numbers, hot spots with large output, and how to run `cargo bench`.
-- [Roadmap](ROADMAP.md) — Planned milestones and project ideas.
+- [Roadmap](ROADMAP.md) — Milestones (all implemented) and the competitor comparison behind them.
 - [Contributing](CONTRIBUTING.md) — Development workflow and PR checklist.
 - [AI Agent Instructions](AGENTS.md) — Workspace context for coding agents.
 - [Configuration Example](mrt.example.toml) — Every setting MRT reads from `~/.config/mrt/config.toml` (`%APPDATA%\mrt\config.toml` on Windows) and a per-project `.mrt.toml`, reloaded live. See [User Guide §6](docs/USER_GUIDE.md#6-configuration-file).

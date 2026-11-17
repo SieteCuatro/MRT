@@ -1,6 +1,8 @@
 # MRT roadmap
 
-MRT's strengths are the features built on top of the terminal: command blocks with structured output, the Safety Approval Gate, the MCP server and host, AI diagnosis, runbooks, and the Toolbox. Two gaps sit underneath them. MRT has no terminal screen emulator, and each command runs in a new shell process. Until those are fixed, full-screen programs do not display correctly and shell state is lost between commands.
+MRT's strengths are the features built on top of the terminal: command blocks with structured output, the Safety Approval Gate, the MCP server and host, AI diagnosis, runbooks, and the Toolbox. This roadmap started from two gaps underneath them (no terminal screen emulator, and a new shell process for every command) and from what Ghostty, tmux and Rex do better.
+
+**Status (November 2026): every milestone and idea below is implemented** and merged to `main`. The few limits that remain are written next to each item (for example, the kitty keyboard protocol and searching a running program's scrollback). New work should start a new list.
 
 The milestones below are in priority order. Each item says what to build and how to tell it is done. Status markers: *(implemented)*, *(in progress)*, *(library only)*. Unmarked items are open. When you finish an item, mark it here and update the documents listed in [CONTRIBUTING.md](CONTRIBUTING.md#which-documents-to-update).
 

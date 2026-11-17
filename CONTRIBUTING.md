@@ -23,6 +23,8 @@ RUSTFLAGS="-D warnings" cargo test --workspace --locked
 
 (In PowerShell: `$env:RUSTFLAGS = "-D warnings"; cargo test --workspace --locked`.) On Linux, install the GUI build dependencies first (see the [User Guide](docs/USER_GUIDE.md#1-install)). Some tests spawn real shells and processes, so run them on a machine where that is allowed.
 
+`crates/mrt-app/tests/e2e_processes.rs` starts real `mrt` processes (`server`, `share`, `pair`, `--host`, `session-host`), each with its own `MRT_DATA_DIR`, so it never touches your own MRT data. To check the real window without a desktop session, `scripts/e2e/` runs it on an offscreen X server (`xvfb_offscreen.sh`, no root needed) and drives it over MCP: `gui_crash_reattach.py` (kill the window, reopen, check the programs come back) and `gui_feature_tour.py` (screenshots of several features).
+
 - Maintain cross-platform compatibility across Windows, macOS, and Linux (`#[cfg(target_os = "...")]` where OS-specific APIs are required, and `CREATE_NO_WINDOW` for background Windows child processes).
 - Keep `mrt-ai` provider-agnostic and preserve the offline heuristic fallback.
 - Add or update unit tests and documentation when changing behavior.
@@ -37,4 +39,7 @@ RUSTFLAGS="-D warnings" cargo test --workspace --locked
 | AI providers, models, or environment variables | [docs/AI_PROVIDERS_AND_AGENTS.md](docs/AI_PROVIDERS_AND_AGENTS.md) and the table in [README.md](README.md) |
 | GUI panels, widgets, or the theme | [docs/GUI_AND_WIDGETS.md](docs/GUI_AND_WIDGETS.md) |
 | The output pipeline (streaming, VT parsing, classification, block rendering) in a way that changes speed or memory | Re-run `cargo bench -p mrt-core` and update [docs/PERFORMANCE.md](docs/PERFORMANCE.md) |
+| A config setting | [mrt.example.toml](mrt.example.toml) (a test parses it) and the settings table in [docs/USER_GUIDE.md](docs/USER_GUIDE.md#6-configuration-file) |
+| The session host, background mode, `mrt share` / `pair` / `attach`, or the phone companion | [docs/SESSION_SERVER.md](docs/SESSION_SERVER.md) and [docs/USER_GUIDE.md](docs/USER_GUIDE.md) |
+| A module, crate dependency, or process | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [AGENTS.md](AGENTS.md) |
 | A roadmap item | Mark it in [ROADMAP.md](ROADMAP.md) |

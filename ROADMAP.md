@@ -33,7 +33,7 @@ These items make MRT usable as a person's main terminal.
 - **Scrollback search.** *(implemented for command blocks: Ctrl+F find bar with highlights and next/previous; searching a running program's scrollback is not done)* Search the live terminal buffer as well as saved history, with match highlighting and next/previous navigation. This is separate from the FTS5 history search.
 - **Command-finished notifications.** *(implemented, #7)* Send a desktop notification when a command that ran longer than a set time finishes while MRT is unfocused or the tab is hidden. Include the exit code and duration.
 - **Hyperlinks and clipboard.** *(implemented, #15)* OSC 8 hyperlinks, Ctrl/Cmd-click on detected URLs and `file:line` paths (open in the user's editor), and OSC 52 clipboard writes behind a permission prompt.
-- **Shell integration over SSH.** When the user runs `ssh`, offer to inject the integration script for that session (Ghostty's approach), so blocks and exit codes keep working on remote machines.
+- **Shell integration over SSH.** *(implemented as opt-in remote tabs: `:ssh user@host` types the integration into the remote Bash/Zsh without writing files; key/agent authentication required, `:tui ssh` for passwords)* When the user runs `ssh`, offer to inject the integration script for that session (Ghostty's approach), so blocks and exit codes keep working on remote machines.
 
 ## Milestone 3 — Rendering and performance
 

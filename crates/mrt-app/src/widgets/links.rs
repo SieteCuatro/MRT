@@ -344,7 +344,7 @@ fn editor_args(
 }
 
 /// Splits an `$EDITOR` value into words, honouring double/single quotes.
-fn split_command_line(s: &str) -> Vec<String> {
+pub(crate) fn split_command_line(s: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut cur = String::new();
     let mut quote: Option<char> = None;

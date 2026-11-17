@@ -135,6 +135,9 @@ MRT supports the **OSC 133 semantic prompt specification**, which lets the termi
 
 WSL and Nushell get a comment saying OSC 133 is not supported.
 
+### Remote Sessions over SSH (`ShellSession::spawn_remote`)
+`spawn_remote(program, args, cwd, options)` starts a program that ends in an interactive Bash or Zsh (the GUI uses `ssh -tt -o BatchMode=yes -o ConnectTimeout=20 <args>`) and **types** the integration in instead of passing an rcfile: `shell_integration::remote_bootstrap_lines()` assembles the base64 of `remote_integration_script()` (the Bash and Zsh scripts behind a `$BASH_VERSION` / `$ZSH_VERSION` check, plus a `__mrt_decode` helper for GNU `base64 -d` or BSD `base64 -D`) in a variable over lines of at most 900 characters (a terminal in canonical mode keeps only ~4 KB per line before `readline` starts), then `eval`s it. Every typed line starts with a space to stay out of history. Commands are typed as ` __mrt_c; eval "$(printf %s '<base64>' | __mrt_decode)"` (`remote_command_line`), so quotes and multi-line scripts arrive unchanged; commands over 3,000 base64 characters are refused. Nothing is written on the remote machine. Shells that run neither script never print a prompt marker, so `spawn_remote` returns `IntegrationTimeout`. Tests stand a plain `bash --norc --noprofile -i` (Git Bash on Windows) and `zsh -f -i` in for the remote shell.
+
 ### Persistent Shell Sessions (`shell_session.rs`)
 `ShellSession` keeps **one long-lived shell in a PTY** (`portable-pty`, ConPTY on Windows), so `cd`, exported/`set` variables, aliases, functions, and venv/conda activation persist between commands. It is a library API; the GUI still runs one process per command.
 

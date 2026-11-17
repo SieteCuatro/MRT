@@ -210,7 +210,43 @@ impl ShellSession {
         for (key, value) in &options.env {
             cmd.env(key, value);
         }
+        Self::start(shell.kind.clone(), shell.program.clone(), cmd, scratch, options, None)
+    }
 
+    /// Starts a remote shell over SSH (or any program that ends in an interactive Bash
+    /// or Zsh, e.g. `ssh -tt host`) and installs the integration by typing it in: see
+    /// [`remote_bootstrap_lines`](crate::shell_integration::remote_bootstrap_lines).
+    /// Nothing is written on the remote machine. Commands are typed as base64 `eval`
+    /// lines. Shells other than Bash and Zsh never report a prompt, so this returns
+    /// `IntegrationTimeout`; the caller should then offer a plain interactive session.
+    pub fn spawn_remote(
+        program: &str,
+        args: &[String],
+        cwd: &Path,
+        options: ShellSessionOptions,
+    ) -> Result<Self, ShellSessionError> {
+        let scratch = Scratch::create(&ShellKind::Bash, false).map_err(ShellSessionError::Spawn)?;
+        let mut cmd = CommandBuilder::new(program);
+        for arg in args {
+            cmd.arg(arg);
+        }
+        cmd.cwd(cwd);
+        crate::pty::apply_terminal_env(&mut cmd);
+        for (key, value) in &options.env {
+            cmd.env(key, value);
+        }
+        let bootstrap = crate::shell_integration::remote_bootstrap_lines();
+        Self::start(ShellKind::Bash, program.to_string(), cmd, scratch, options, Some(bootstrap))
+    }
+
+    fn start(
+        kind: ShellKind,
+        program: String,
+        cmd: CommandBuilder,
+        scratch: Scratch,
+        options: ShellSessionOptions,
+        remote_bootstrap: Option<Vec<String>>,
+    ) -> Result<Self, ShellSessionError> {
         let spawn = || -> anyhow::Result<_> {
             let pair = native_pty_system().openpty(PtySize {
                 rows: options.rows,
@@ -224,12 +260,14 @@ impl ShellSession {
             Ok((pair.master, child, reader, writer))
         };
         let (master, mut child, reader, writer) = spawn().map_err(|error| {
-            ShellSessionError::Spawn(error.context(format!("could not start `{}`", shell.program)))
+            ShellSessionError::Spawn(error.context(format!("could not start `{program}`")))
         })?;
 
         let (ready_tx, ready_rx) = mpsc::channel();
+        let remote = remote_bootstrap.is_some();
         let shared = Arc::new(Shared {
-            kind: shell.kind.clone(),
+            kind: kind.clone(),
+            remote,
             scratch,
             writer: Mutex::new(writer),
             rows: AtomicU16::new(options.rows.max(1)),
@@ -243,8 +281,8 @@ impl ShellSession {
             }),
         });
         let session = Self {
-            kind: shell.kind.clone(),
-            program: shell.program.clone(),
+            kind,
+            program: program.clone(),
             pid: child.process_id(),
             killer: Mutex::new(child.clone_killer()),
             master: Mutex::new(master),
@@ -267,16 +305,24 @@ impl ShellSession {
             })
             .map_err(|error| ShellSessionError::Spawn(error.into()))?;
 
+        // Remote shells get the integration typed in. The lines wait in the PTY until
+        // the remote shell reads them, so they can be sent right away.
+        if let Some(lines) = remote_bootstrap {
+            for line in lines {
+                shared.write(format!("{line}\r").as_bytes())?;
+            }
+        }
+
         match ready_rx.recv_timeout(options.ready_timeout) {
             Ok(Startup::Ready) => Ok(session),
             Ok(Startup::Exited) | Err(RecvTimeoutError::Disconnected) => {
                 Err(ShellSessionError::StartupExited {
-                    program: shell.program.clone(),
+                    program: program.clone(),
                     transcript: shared.state().transcript.clone(),
                 })
             }
             Err(RecvTimeoutError::Timeout) => Err(ShellSessionError::IntegrationTimeout {
-                program: shell.program.clone(),
+                program: program.clone(),
                 waited: options.ready_timeout,
                 transcript: shared.state().transcript.clone(),
             }),
@@ -291,7 +337,17 @@ impl ShellSession {
     /// as written. CMD has no way to source a file without batch-file semantics, so it gets
     /// the command typed on one line, with multiple lines joined by ` & `.
     pub fn run(&self, command: &str) -> Result<CommandHandle, ShellSessionError> {
-        let (line, file) = command_line(&self.kind, &self.shared.scratch, command);
+        let (line, file) = if self.shared.remote {
+            let line = crate::shell_integration::remote_command_line(command).ok_or_else(|| {
+                ShellSessionError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "command too long to send to a remote session",
+                ))
+            })?;
+            (line, None)
+        } else {
+            command_line(&self.kind, &self.shared.scratch, command)
+        };
         let (tx, rx) = mpsc::channel();
         {
             let mut state = self.shared.state();
@@ -692,6 +748,8 @@ impl State {
 
 struct Shared {
     kind: ShellKind,
+    /// Commands are typed as base64 `eval` lines (SSH sessions) instead of files.
+    remote: bool,
     scratch: Scratch,
     writer: Mutex<Box<dyn Write + Send>>,
     rows: AtomicU16,
@@ -1279,6 +1337,49 @@ mod tests {
     fn zsh_session_keeps_state() {
         if let Some(shell) = find_shell(ShellKind::Zsh) {
             exercise(&shell, posix_case());
+        }
+    }
+
+    /// Runs the remote-session checks against `program args`, a plain interactive shell
+    /// standing in for the shell at the other end of `ssh -tt host`.
+    fn check_remote(program: &str, args: &[&str], label: &str) {
+        let options = ShellSessionOptions {
+            ready_timeout: TEST_TIMEOUT,
+            ..Default::default()
+        };
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let session = match ShellSession::spawn_remote(program, &args, &std::env::temp_dir(), options) {
+            Ok(session) => session,
+            Err(ShellSessionError::IntegrationTimeout { transcript, .. })
+            | Err(ShellSessionError::StartupExited { transcript, .. }) => {
+                panic!("{label}: remote integration did not start. Output:\n{}", transcript.escape_debug())
+            }
+            Err(error) => panic!("{label}: {error}"),
+        };
+        let out = run(&session, "export MRT_REMOTE=kept; echo \"it's \\\"quoted\\\" $((40+2))\"");
+        assert_eq!(out.exit_code, Some(0), "{label}: {:?}", out.plain_output());
+        assert_eq!(out.plain_output().trim(), "it's \"quoted\" 42", "{label}");
+        assert_eq!(run(&session, "echo $MRT_REMOTE").plain_output().trim(), "kept", "{label}");
+        assert_eq!(run(&session, "false").exit_code, Some(1), "{label}");
+        assert_eq!(run(&session, "printf a\nprintf b").plain_output().trim(), "ab", "{label}");
+        let out = run(&session, "cd / && pwd");
+        assert_eq!(out.exit_code, Some(0), "{label}");
+        assert!(out.cwd.is_some(), "{label}: the remote shell should report its directory");
+    }
+
+    #[test]
+    fn remote_session_bootstraps_bash_without_files() {
+        let shell = if cfg!(windows) { find_shell(ShellKind::GitBash) } else { find_shell(ShellKind::Bash) };
+        if let Some(shell) = shell {
+            check_remote(&shell.program, &["--norc", "--noprofile", "-i"], "bash");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_session_bootstraps_zsh_without_files() {
+        if let Some(shell) = find_shell(ShellKind::Zsh) {
+            check_remote(&shell.program, &["-f", "-i"], "zsh");
         }
     }
 

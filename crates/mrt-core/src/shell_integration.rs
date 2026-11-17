@@ -298,9 +298,109 @@ REM 133;C and 133;D;%ERRORLEVEL% from helper batch files around each command.
 PROMPT $E]133;A$E\$E]7;file://localhost/$P$E\$P$G$E]133;B$E\
 "#;
 
+// ---------------------------------------------------------------------------
+// Remote sessions (SSH)
+// ---------------------------------------------------------------------------
+
+/// Longest line MRT types into a remote shell. Before `readline` starts, a terminal in
+/// canonical mode keeps at most ~4 KB per line, so the bootstrap is sent in chunks.
+const REMOTE_LINE_LIMIT: usize = 900;
+
+/// Longest base64-encoded command typed into a remote session in one line.
+pub const REMOTE_COMMAND_LIMIT: usize = 3000;
+
+/// The integration installed in a remote shell over SSH: the Bash or Zsh script,
+/// picked by the shell itself, plus `__mrt_decode` for the base64 commands MRT types.
+/// Other shells (fish, plain sh) install nothing, so no prompt marker appears and the
+/// session reports that integration did not start.
+pub fn remote_integration_script() -> String {
+    format!(
+        "if [ -n \"${{BASH_VERSION-}}\" ]; then\n{BASH_SCRIPT}\nelif [ -n \"${{ZSH_VERSION-}}\" ]; then\n{ZSH_SCRIPT}\nfi\n\
+if printf 'YQ==' | base64 -d >/dev/null 2>&1; then __mrt_decode() {{ base64 -d; }}; else __mrt_decode() {{ base64 -D; }}; fi\n"
+    )
+}
+
+/// Lines MRT types into a freshly started remote shell to install the integration
+/// without writing any file on the remote machine: the base64 script is assembled in
+/// a variable over several short lines, then decoded and `eval`ed. Every line starts
+/// with a space so shells with `HISTCONTROL=ignorespace` keep them out of history.
+pub fn remote_bootstrap_lines() -> Vec<String> {
+    let encoded = base64_encode(remote_integration_script().as_bytes());
+    let chunk = REMOTE_LINE_LIMIT - 32;
+    let mut lines = vec![" __mrt_boot=''".to_string()];
+    for piece in encoded.as_bytes().chunks(chunk) {
+        // Base64 only contains [A-Za-z0-9+/=], safe inside double quotes.
+        lines.push(format!(" __mrt_boot=\"${{__mrt_boot}}{}\"", String::from_utf8_lossy(piece)));
+    }
+    lines.push(
+        " export MRT_SHELL_INTEGRATION=1; eval \"$(printf %s \"$__mrt_boot\" | base64 -d 2>/dev/null || printf %s \"$__mrt_boot\" | base64 -D)\"; unset __mrt_boot"
+            .to_string(),
+    );
+    lines
+}
+
+/// The line typed into a remote session to run `command`: marks the start of the
+/// command (`133;C`) and `eval`s it from base64, so quotes, backslashes and multiple
+/// lines reach the shell unchanged. `None` when the command is too long for one line.
+pub fn remote_command_line(command: &str) -> Option<String> {
+    let encoded = base64_encode(command.replace("\r\n", "\n").as_bytes());
+    (encoded.len() <= REMOTE_COMMAND_LIMIT)
+        .then(|| format!(" __mrt_c; eval \"$(printf %s '{encoded}' | __mrt_decode)\""))
+}
+
+/// Standard base64 with padding (RFC 4648).
+pub(crate) fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        out.push(TABLE[(n >> 18) as usize & 63] as char);
+        out.push(TABLE[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base64_matches_rfc_4648_vectors() {
+        for (input, expected) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64_encode(input.as_bytes()), expected);
+        }
+    }
+
+    #[test]
+    fn remote_bootstrap_lines_are_short_and_rebuild_the_script() {
+        let lines = remote_bootstrap_lines();
+        assert!(lines.iter().all(|l| l.len() <= REMOTE_LINE_LIMIT + 200), "a line is too long");
+        assert!(lines.iter().all(|l| l.starts_with(' ')), "lines must stay out of history");
+        let encoded: String = lines[1..lines.len() - 1]
+            .iter()
+            .map(|l| l.trim_start().trim_start_matches("__mrt_boot=\"${__mrt_boot}").trim_end_matches('"'))
+            .collect();
+        assert_eq!(encoded, base64_encode(remote_integration_script().as_bytes()));
+    }
+
+    #[test]
+    fn remote_command_lines_encode_the_command() {
+        let line = remote_command_line("echo 'a b' \"c\"\nprintf x").unwrap();
+        assert!(line.starts_with(" __mrt_c; eval"));
+        assert!(line.contains(&base64_encode(b"echo 'a b' \"c\"\nprintf x")));
+        assert!(remote_command_line(&"x".repeat(REMOTE_COMMAND_LIMIT)).is_none());
+    }
 
     #[test]
     fn test_parse_osc133_markers() {

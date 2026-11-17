@@ -84,6 +84,9 @@ pub struct TerminalTab {
     pub active_pane_idx: usize,
     /// Running / progress / waiting-for-input / finished state shown on the tab.
     pub activity: ActivityTracker,
+    /// `ssh` arguments when this is a remote tab (`:ssh user@host`): its commands run
+    /// on that host through `shell_pool::run_remote`, never locally.
+    pub remote: Option<Vec<String>>,
 }
 
 impl TerminalTab {
@@ -104,6 +107,7 @@ impl TerminalTab {
             secondary_pane: None,
             active_pane_idx: 0,
             activity: ActivityTracker::new(),
+            remote: None,
         }
     }
 
@@ -1672,6 +1676,18 @@ impl MrtGuiApp {
     }
 
     fn render_explorer(&mut self, ctx: &egui::Context) {
+        if self.tabs[self.active_tab].remote.is_some() {
+            egui::SidePanel::left("folder_explorer").frame(panel_frame()).default_width(240.0).show(ctx, |ui| {
+                ui.label(RichText::new("Explorer").size(15.0).strong().color(Palette::TEXT_PRIMARY));
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("This is a remote (SSH) tab. The Explorer shows folders on this computer only.")
+                        .size(12.5)
+                        .color(Palette::TEXT_MUTED),
+                );
+            });
+            return;
+        }
         let path = self.tabs[self.active_tab].cwd.clone();
         if self.explorer_path.as_ref() != Some(&path) {
             self.refresh_explorer(path.clone());
@@ -2309,6 +2325,14 @@ impl MrtGuiApp {
             }
         }
 
+        if let Some(spec) = raw_input.strip_prefix(":ssh ") {
+            let args = crate::widgets::links::split_command_line(spec.trim());
+            if !args.is_empty() {
+                self.open_remote_tab(args);
+            }
+            return;
+        }
+
         let is_tui_command = if let Some(cmd) = raw_input.strip_prefix(":tui ") {
             Some(cmd.trim().to_string())
         } else {
@@ -2329,6 +2353,17 @@ impl MrtGuiApp {
             } else {
                 None
             }
+        };
+
+        // In a remote tab a full-screen program runs on the host, through `ssh -tt`, from a
+        // local folder (the tab's folder is on the other machine).
+        let (is_tui_command, cwd) = match (is_tui_command, tab.remote.as_ref()) {
+            (Some(cmd), Some(args)) => {
+                let remote_dir = tab.cwd.to_str().filter(|d| d.starts_with('/')).map(str::to_string);
+                let line = crate::shell_pool::remote_tui_command(&shell.kind, args, remote_dir.as_deref(), &cmd);
+                (Some(line), std::env::temp_dir())
+            }
+            (other, _) => (other, cwd),
         };
 
         if let Some(tui_cmd) = is_tui_command {
@@ -2530,9 +2565,24 @@ impl MrtGuiApp {
         let running_pids = self.running_pids.clone();
         let tx = self.tx.clone();
         let pool = self.shell_pool.clone();
+        let remote = self.tabs.iter().find(|t| t.id == tab_id).and_then(|t| t.remote.clone());
         self.busy_count += 1;
         self.runtime.spawn(async move {
             let cwd_str = cwd.display().to_string();
+
+            // Remote tab: always on the host, never in a local process.
+            if let Some(args) = remote {
+                let result = crate::shell_pool::run_remote(&pool, tab_id, block_id, &args, &raw_input, &output).await;
+                let (text, exit_code, duration_ms, updated_cwd) = match result {
+                    Ok(run) => (run.output, run.exit_code, run.duration_ms, run.cwd),
+                    Err(e) => (e, 1, 0, None),
+                };
+                let mut block = CommandBlock::new_completed(&raw_input, "ssh", cwd_str, text, exit_code, duration_ms);
+                block.id = block_id;
+                block.timestamp = timestamp;
+                let _ = tx.send(AsyncWorkerEvent::BlockCompleted { tab_id, block, updated_cwd });
+                return;
+            }
 
             // Run in the tab's persistent shell when it is free; otherwise in a new process.
             if let Some(result) = crate::shell_pool::run_with_pool(&pool, tab_id, block_id, &shell, &raw_input, &cwd, &output, &running_pids).await {
@@ -3421,6 +3471,22 @@ impl MrtGuiApp {
             if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
                 tab.activity.observe_process_names(names);
             }
+        }
+    }
+
+    /// Opens a remote tab (`:ssh user@host [ssh options]`) and runs `hostname` there, which
+    /// connects the session and shows which machine the tab is on.
+    fn open_remote_tab(&mut self, args: Vec<String>) {
+        let shell_idx = self.tabs.get(self.active_tab).map(|t| t.active_shell_idx).unwrap_or(0);
+        let host = args.iter().find(|a| !a.starts_with('-')).cloned().unwrap_or_else(|| args.join(" "));
+        let mut tab = TerminalTab::new(format!("ssh {host}"), shell_idx, std::env::temp_dir());
+        tab.remote = Some(args);
+        let tab_id = tab.id;
+        let cwd = tab.cwd.clone();
+        self.tabs.push(tab);
+        self.active_tab = self.tabs.len() - 1;
+        if let Some(shell) = self.shells.get(shell_idx).cloned() {
+            self.spawn_shell_command(tab_id, shell, cwd, "hostname".to_string());
         }
     }
 
@@ -5494,6 +5560,38 @@ mod tests {
         let secondary = app.tabs[0].secondary_pane.as_ref().unwrap();
         assert!(secondary.blocks.iter().any(|b| b.command.contains("pane_tui_test")));
         assert!(!app.tabs[0].blocks.iter().any(|b| b.command.contains("pane_tui_test")));
+    }
+
+    /// A remote tab's commands go to the SSH session and never run on this machine: with
+    /// an unreachable host the first block reports the connection failure instead of the
+    /// local `hostname`.
+    #[test]
+    fn remote_tab_never_runs_commands_locally() {
+        let mut app = MrtGuiApp::new();
+        app.submit_input(Some(":ssh mrt-test-host.invalid".to_string()), false);
+        let tab = app.tabs.last().unwrap();
+        assert_eq!(tab.remote.as_deref(), Some(&["mrt-test-host.invalid".to_string()][..]));
+        assert!(tab.title.contains("mrt-test-host.invalid"));
+        let tab_id = tab.id;
+        let start = Instant::now();
+        let block = loop {
+            let tab = app.tabs.iter().find(|t| t.id == tab_id).unwrap();
+            if let Some(block) = tab.blocks.iter().find(|b| b.exit_code.is_some()) {
+                break block.clone();
+            }
+            assert!(start.elapsed() < Duration::from_secs(60), "the remote command did not finish");
+            pump_one(&mut app);
+        };
+        assert_eq!(block.command, "hostname");
+        assert_eq!(block.shell_name, "ssh");
+        assert_ne!(block.exit_code, Some(0));
+        let local = std::process::Command::new("hostname").output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+        assert!(
+            local.is_empty() || !block.plain_output.trim().eq_ignore_ascii_case(&local),
+            "the command ran locally: {:?}",
+            block.plain_output
+        );
+        assert!(block.plain_output.contains("MRT could not start shell integration over SSH"), "{}", block.plain_output);
     }
 
     #[test]

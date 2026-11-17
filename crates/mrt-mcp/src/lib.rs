@@ -1,5 +1,6 @@
 pub mod bridge;
 pub mod client;
+pub mod companion;
 pub mod protocol;
 pub mod remote;
 pub mod server;

@@ -2186,6 +2186,16 @@ impl MrtGuiApp {
                 *guard = active.cwd.clone();
             }
         }
+        if let Ok(mut guard) = state.pending_approval.lock() {
+            *guard = self.pending_safety.as_ref().map(|p| {
+                serde_json::json!({
+                    "command": p.assessment.command,
+                    "risk": p.assessment.risk.label(),
+                    "reason": p.assessment.reason,
+                    "tab_id": p.tab_id,
+                })
+            });
+        }
         if let Ok(mut tabs_guard) = state.tabs.lock() {
             // This runs every frame. Copying every block every frame cost O(all output)
             // per frame, so blocks the mirror already has unchanged are moved over, and a
@@ -2329,6 +2339,22 @@ impl MrtGuiApp {
                     }
                 }
                 GuiUiCommand::SetWindow { action } => self.pending_window = Some(action),
+                GuiUiCommand::SafetyDecision { approve, device } => {
+                    if self.config_state.config.safety.remote_approvals && self.pending_safety.is_some() {
+                        let tab_id = self.pending_safety.as_ref().map(|p| p.tab_id);
+                        let command = self.pending_safety.as_ref().map(|p| p.assessment.command.clone()).unwrap_or_default();
+                        if approve {
+                            self.approve_pending_command();
+                        } else {
+                            self.deny_pending_command();
+                        }
+                        if let Some(tab_id) = tab_id {
+                            let cwd = self.tabs.iter().find(|t| t.id == tab_id).map(|t| t.cwd.clone()).unwrap_or_default();
+                            let verb = if approve { "approved" } else { "denied" };
+                            self.push_block(tab_id, Self::process_error_block(":safety", &cwd, format!("Safety Gate: `{command}` was {verb} from {device}.")));
+                        }
+                    }
+                }
                 GuiUiCommand::RequestProcessKill { pids, force, tree } => {
                     if let Some(tab) = self.tabs.get(self.active_tab) {
                         let (tab_id, cwd) = (tab.id, tab.cwd.clone());
@@ -2842,6 +2868,20 @@ impl MrtGuiApp {
         }
 
         self.spawn_shell_command(tab_id, shell, cwd, raw_input);
+    }
+
+    /// Cancels the pending Safety Gate prompt (and a runbook waiting on it).
+    fn deny_pending_command(&mut self) {
+        let cancelled_tab = self.pending_safety.as_ref().map(|p| p.tab_id);
+        self.pending_safety = None;
+        if let Some(replay) = &self.active_replay {
+            if Some(replay.tab_id) == cancelled_tab && replay.waiting_block_id.is_none() {
+                let name = replay.runbook_name.clone();
+                let step = replay.next_step_idx;
+                let total = replay.steps.len();
+                self.stop_runbook_replay(Some(format!("Runbook '{name}' stopped at step {step}/{total}: cancelled at Safety Gate.")));
+            }
+        }
     }
 
     fn approve_pending_command(&mut self) {
@@ -5520,18 +5560,7 @@ impl eframe::App for MrtGuiApp {
             if approve {
                 self.approve_pending_command();
             } else if cancel {
-                let cancelled_tab = self.pending_safety.as_ref().map(|p| p.tab_id);
-                self.pending_safety = None;
-                if let Some(replay) = &self.active_replay {
-                    if Some(replay.tab_id) == cancelled_tab && replay.waiting_block_id.is_none() {
-                        let name = replay.runbook_name.clone();
-                        let step = replay.next_step_idx;
-                        let total = replay.steps.len();
-                        self.stop_runbook_replay(Some(format!(
-                            "Runbook '{name}' stopped at step {step}/{total}: cancelled at Safety Gate."
-                        )));
-                    }
-                }
+                self.deny_pending_command();
             }
         }
 
@@ -6408,6 +6437,30 @@ error: test failed
         let answer = block.ai_explanation.as_deref().unwrap_or("");
         assert!(answer.contains("`cargo test` failed (exit code 101)"), "{answer}");
         assert!(answer.contains("earlier run"), "{answer}");
+    }
+
+    #[test]
+    fn remote_safety_decisions_need_the_setting() {
+        let mut app = MrtGuiApp::new();
+        // Never runs: every Moderate command waits for approval in this test.
+        app.config_state.config.safety.require_approval_for_moderate = true;
+        app.submit_input(Some("del notes.txt".into()), false);
+        assert!(app.pending_safety.is_some());
+        app.sync_mcp_from_gui();
+        let mirrored = app.mcp_host.local_server_state.pending_approval.lock().unwrap().clone().unwrap();
+        assert_eq!(mirrored["command"], "del notes.txt");
+
+        let send = |app: &mut MrtGuiApp, approve: bool| {
+            app.mcp_host.local_server_state.gui_tx.as_ref().unwrap()
+                .send(GuiUiCommand::SafetyDecision { approve, device: "web: phone".into() }).unwrap();
+            app.process_mcp_ui_commands();
+        };
+        send(&mut app, false);
+        assert!(app.pending_safety.is_some(), "ignored while safety.remote_approvals is off");
+        app.config_state.config.safety.remote_approvals = true;
+        send(&mut app, false);
+        assert!(app.pending_safety.is_none(), "denied from the phone");
+        assert!(app.tabs[0].blocks.last().unwrap().plain_output.contains("denied from web: phone"));
     }
 
     #[test]

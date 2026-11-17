@@ -10,8 +10,10 @@ use std::sync::{Arc, Mutex};
 
 pub const USAGE: &str = "\
 Remote connections (end-to-end encrypted, paired devices only):
-  mrt share [--listen ADDR:PORT] [--no-pairing]   Let paired devices attach to this MRT
-                                          (default 0.0.0.0:7682); shows a pairing code
+  mrt share [--listen ADDR:PORT] [--no-pairing] [--web [--web-listen ADDR:PORT]]
+                                          Let paired devices attach to this MRT (default
+                                          0.0.0.0:7682); shows a pairing code. --web also
+                                          serves the phone companion over HTTPS (:7683)
   mrt share --list | --revoke NAME        Paired devices / remove one (its connections end)
   mrt pair HOST[:PORT] [--name NAME]      Pair this device with a host running `mrt share`
   mrt attach HOST [-t TAB]                Follow a host tab live and type commands into it
@@ -89,6 +91,7 @@ fn prompt(question: &str) -> String {
 async fn share(args: &[String]) -> Result<()> {
     let mut listen = format!("0.0.0.0:{}", remote::DEFAULT_SHARE_PORT);
     let mut pairing = true;
+    let mut web: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -97,6 +100,13 @@ async fn share(args: &[String]) -> Result<()> {
                 listen = args.get(i).cloned().ok_or_else(|| anyhow!("--listen needs ADDR:PORT"))?;
             }
             "--no-pairing" => pairing = false,
+            "--web" => {
+                web.get_or_insert_with(|| format!("0.0.0.0:{}", mrt_mcp::companion::DEFAULT_COMPANION_PORT));
+            }
+            "--web-listen" => {
+                i += 1;
+                web = Some(args.get(i).cloned().ok_or_else(|| anyhow!("--web-listen needs ADDR:PORT"))?);
+            }
             "--list" => {
                 let store = store()?;
                 if store.guests.is_empty() {
@@ -143,16 +153,25 @@ async fn share(args: &[String]) -> Result<()> {
             }
         }
     });
-    let host = Arc::new(ShareHost {
-        store,
-        pairing_code: code,
-        host_name: this_device_name(),
-        approve: Arc::new(|name: &str| {
-            let answer = prompt(&format!("Allow device \"{name}\" to attach to this MRT (run commands, read output)? [y/N] "));
-            matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes")
-        }),
-        bridge,
+    let approve: Arc<dyn Fn(&str) -> bool + Send + Sync> = Arc::new(|name: &str| {
+        let answer = prompt(&format!("Allow device \"{name}\" to attach to this MRT (run commands, read output)? [y/N] "));
+        matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes")
     });
+    if let Some(web_listen) = web {
+        let dir = remote::pair_store_path().and_then(|p| p.parent().map(|d| d.to_path_buf())).ok_or_else(|| anyhow!("no data folder"))?;
+        let (cert, key, fingerprint) = mrt_mcp::companion::load_or_create_certificate(&dir)?;
+        let web_listener = tokio::net::TcpListener::bind(&web_listen).await.with_context(|| format!("cannot listen on {web_listen}"))?;
+        let companion = Arc::new(mrt_mcp::companion::CompanionHost::new(store.clone(), code.clone(), approve.clone(), bridge.clone()));
+        let port = web_listener.local_addr()?.port();
+        eprintln!("Phone companion: https://<this computer's address>:{port}/  (self-signed certificate; check its SHA-256 fingerprint:");
+        eprintln!("  {fingerprint})");
+        tokio::spawn(async move {
+            if let Err(e) = mrt_mcp::companion::serve_companion(web_listener, &cert, &key, companion).await {
+                eprintln!("mrt: companion stopped: {e}");
+            }
+        });
+    }
+    let host = Arc::new(ShareHost { store, pairing_code: code, host_name: this_device_name(), approve, bridge });
     tokio::select! {
         _ = remote::serve_share(listener, host) => {}
         _ = tokio::signal::ctrl_c() => eprintln!("Sharing stopped."),

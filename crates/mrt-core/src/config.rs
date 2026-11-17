@@ -241,6 +241,10 @@ pub struct SafetyConfig {
     pub require_approval_for_critical: bool,
     /// Case-insensitive substrings; a command containing one is refused outright.
     pub blocked_patterns: Vec<String>,
+    /// Let paired remote devices (the `mrt share --web` companion) answer the Safety
+    /// Gate prompt. Off by default: any program that can reach the local bridge could
+    /// otherwise approve its own commands.
+    pub remote_approvals: bool,
 }
 
 impl Default for SafetyConfig {
@@ -250,6 +254,7 @@ impl Default for SafetyConfig {
             require_approval_for_moderate: false,
             require_approval_for_critical: true,
             blocked_patterns: Vec::new(),
+            remote_approvals: false,
         }
     }
 }

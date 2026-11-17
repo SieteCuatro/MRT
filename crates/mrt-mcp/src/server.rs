@@ -88,6 +88,9 @@ pub enum GuiUiCommand {
     /// Shows, hides (minimizes) or toggles the window: `"show"`, `"hide"` or `"toggle"`
     /// (the quick terminal, `mrt quick`).
     SetWindow { action: String },
+    /// Answers the Safety Gate prompt the window shows, from a paired remote device
+    /// (`mrt share --web`). The window ignores it unless `safety.remote_approvals` is on.
+    SafetyDecision { approve: bool, device: String },
 }
 
 #[derive(Clone)]
@@ -105,6 +108,9 @@ pub struct MrtMcpServerState {
     pub owned_processes: Arc<Mutex<OwnedProcessMap>>,
     /// Baseline for `mrt_compare_process_snapshots` when no block ids are given.
     pub process_baseline: Arc<Mutex<Option<ProcessSnapshot>>>,
+    /// The Safety Gate prompt the GUI shows (command, risk, reason), mirrored for
+    /// paired remote devices.
+    pub pending_approval: Arc<Mutex<Option<Value>>>,
 }
 
 impl Default for MrtMcpServerState {
@@ -140,6 +146,7 @@ impl Default for MrtMcpServerState {
             process_sampler: SharedProcessSampler::new(),
             owned_processes: Arc::new(Mutex::new(HashMap::new())),
             process_baseline: Arc::new(Mutex::new(None)),
+            pending_approval: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -459,6 +466,7 @@ impl MrtMcpServerState {
                         "mosaic_layout": { "type": "string", "enum": ["grid", "columns", "rows", "focus"], "description": "Optional Mosaic arrangement: even grid, side-by-side columns, stacked rows, or focus (active terminal large, others beside it)" },
                         "explorer": { "type": "boolean", "description": "Optional toggle for the left Folder Explorer side panel" },
                         "toolbox": { "type": ["boolean", "string"], "description": "Optional: true/false toggles the Toolbox side panel; \"network\" or \"task_manager\" opens it on that tab; \"hidden\" closes it" },
+                        "safety": { "type": "string", "enum": ["approve", "deny"], "description": "Answer the Safety Gate prompt shown in the window. Ignored unless the user enabled safety.remote_approvals; meant for paired remote devices." },
                         "window": { "type": "string", "enum": ["show", "hide", "toggle", "quit"], "description": "Optional: bring the MRT window to the front, minimize it, toggle between the two (quick terminal), or quit MRT (stopping what still runs)" }
                     }
                 }),
@@ -832,6 +840,7 @@ pub async fn execute_mrt_mcp_tool(
                 "pty_count": pty_count,
                 "block_count": block_count,
                 "gui_attached": state.gui_tx.is_some(),
+                "pending_approval": state.pending_approval.lock().unwrap().clone(),
                 "available_shells": shells
             });
             McpToolCallResult::text(
@@ -1844,6 +1853,10 @@ pub async fn execute_mrt_mcp_tool(
                     tab: Some(tab.clone()),
                 }),
                 _ => {}
+            }
+            if let Some(decision) = args.get("safety").and_then(|v| v.as_str()) {
+                let device = args.get("device").and_then(|v| v.as_str()).unwrap_or("remote device").to_string();
+                state.notify_gui(GuiUiCommand::SafetyDecision { approve: decision.eq_ignore_ascii_case("approve"), device });
             }
             if let Some(action) = args.get("window").and_then(|v| v.as_str()) {
                 state.notify_gui(GuiUiCommand::SetWindow { action: action.to_ascii_lowercase() });

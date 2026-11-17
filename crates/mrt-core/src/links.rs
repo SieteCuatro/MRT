@@ -63,13 +63,25 @@ pub fn classify_uri(uri: &str) -> LinkTarget {
             // Some tools append `#L12` or `:12` to file links.
             if let Some((p, line)) = path.rsplit_once("#L").or_else(|| path.rsplit_once('#')) {
                 if let Ok(line) = line.parse::<u32>() {
-                    return LinkTarget::File { path: p.to_string(), line: Some(line), column: None };
+                    return LinkTarget::File {
+                        path: p.to_string(),
+                        line: Some(line),
+                        column: None,
+                    };
                 }
             }
             if let Some((p, line, column)) = split_line_col(&path) {
-                return LinkTarget::File { path: p.to_string(), line: Some(line), column };
+                return LinkTarget::File {
+                    path: p.to_string(),
+                    line: Some(line),
+                    column,
+                };
             }
-            return LinkTarget::File { path, line: None, column: None };
+            return LinkTarget::File {
+                path,
+                line: None,
+                column: None,
+            };
         }
     }
     LinkTarget::Url(uri.to_string())
@@ -101,7 +113,10 @@ fn percent_decode_lossy(input: &str) -> String {
 pub fn detect_links(text: &str) -> Vec<DetectedLink> {
     let mut links = Vec::new();
     let mut start = None;
-    for (i, c) in text.char_indices().chain(std::iter::once((text.len(), ' '))) {
+    for (i, c) in text
+        .char_indices()
+        .chain(std::iter::once((text.len(), ' ')))
+    {
         if c.is_whitespace() {
             if let Some(s) = start.take() {
                 if let Some(link) = scan_token(&text[s..i], s) {
@@ -143,7 +158,9 @@ fn scan_token(token: &str, offset: usize) -> Option<DetectedLink> {
     for (colon, _) in candidate.match_indices(':') {
         let path = &candidate[..colon];
         let after = &candidate[colon + 1..];
-        let Some((line, line_len)) = leading_number(after) else { continue };
+        let Some((line, line_len)) = leading_number(after) else {
+            continue;
+        };
         if line == 0 || !looks_like_path(path) {
             continue;
         }
@@ -157,7 +174,11 @@ fn scan_token(token: &str, offset: usize) -> Option<DetectedLink> {
         }
         return Some(DetectedLink {
             range: offset + lead..offset + lead + end,
-            target: LinkTarget::File { path: path.to_string(), line: Some(line), column },
+            target: LinkTarget::File {
+                path: path.to_string(),
+                line: Some(line),
+                column,
+            },
         });
     }
     None
@@ -235,7 +256,11 @@ fn split_line_col(s: &str) -> Option<(&str, u32, Option<u32>)> {
 
 /// Heuristic: does `path` look like a file path rather than a host, time or ratio?
 fn looks_like_path(path: &str) -> bool {
-    if path.contains("://") || path.chars().any(|c| c.is_control() || matches!(c, '<' | '>' | '|' | '*' | '?' | '"')) {
+    if path.contains("://")
+        || path
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '<' | '>' | '|' | '*' | '?' | '"'))
+    {
         return false;
     }
     let file_name = path.rsplit(['/', '\\']).next().unwrap_or(path);
@@ -245,14 +270,12 @@ fn looks_like_path(path: &str) -> bool {
     let has_separator = path.contains('/') || path.contains('\\');
     // A file extension that starts with a letter (`main.rs`, `app.tsx`), which
     // rules out IPs and version numbers like `127.0.0.1` or `1.2`.
-    let has_extension = file_name
-        .rsplit_once('.')
-        .is_some_and(|(stem, ext)| {
-            !stem.is_empty()
-                && ext.len() <= 12
-                && ext.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
-                && ext.chars().all(|c| c.is_ascii_alphanumeric())
-        });
+    let has_extension = file_name.rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty()
+            && ext.len() <= 12
+            && ext.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            && ext.chars().all(|c| c.is_ascii_alphanumeric())
+    });
     has_extension || (has_separator && file_name.chars().any(|c| c.is_alphabetic()))
 }
 
@@ -268,7 +291,11 @@ mod tests {
     }
 
     fn file(path: &str, line: u32, column: Option<u32>) -> LinkTarget {
-        LinkTarget::File { path: path.into(), line: Some(line), column }
+        LinkTarget::File {
+            path: path.into(),
+            line: Some(line),
+            column,
+        }
     }
 
     #[test]
@@ -277,9 +304,18 @@ mod tests {
         assert_eq!(
             found(text),
             vec![
-                ("https://example.com/docs", LinkTarget::Url("https://example.com/docs".into())),
-                ("http://x.dev/a_(b)", LinkTarget::Url("http://x.dev/a_(b)".into())),
-                ("https://y.io/q?a=1&b=2", LinkTarget::Url("https://y.io/q?a=1&b=2".into())),
+                (
+                    "https://example.com/docs",
+                    LinkTarget::Url("https://example.com/docs".into())
+                ),
+                (
+                    "http://x.dev/a_(b)",
+                    LinkTarget::Url("http://x.dev/a_(b)".into())
+                ),
+                (
+                    "https://y.io/q?a=1&b=2",
+                    LinkTarget::Url("https://y.io/q?a=1&b=2".into())
+                ),
                 ("ftp://f.org/x", LinkTarget::Url("ftp://f.org/x".into())),
             ]
         );
@@ -329,12 +365,22 @@ mod tests {
 
     #[test]
     fn classifies_osc8_targets() {
-        assert_eq!(classify_uri("https://a.b"), LinkTarget::Url("https://a.b".into()));
+        assert_eq!(
+            classify_uri("https://a.b"),
+            LinkTarget::Url("https://a.b".into())
+        );
         assert_eq!(
             classify_uri("file://host/home/me/my%20file.rs"),
-            LinkTarget::File { path: "/home/me/my file.rs".into(), line: None, column: None }
+            LinkTarget::File {
+                path: "/home/me/my file.rs".into(),
+                line: None,
+                column: None
+            }
         );
-        assert_eq!(classify_uri("file:///C:/x/y.rs:7:2"), file("C:/x/y.rs", 7, Some(2)));
+        assert_eq!(
+            classify_uri("file:///C:/x/y.rs:7:2"),
+            file("C:/x/y.rs", 7, Some(2))
+        );
         assert_eq!(classify_uri("file:///x/y.rs#L9"), file("/x/y.rs", 9, None));
     }
 

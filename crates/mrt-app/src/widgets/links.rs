@@ -90,7 +90,11 @@ pub fn render_spans_with_links(
             .is_some_and(|row| row.rect.expand(1.0).contains(local.to_pos2()));
         let index = cursor.ccursor.index;
         let hovered = on_text
-            .then(|| links.iter().find(|l| l.chars.start <= index && index < l.chars.end.max(l.chars.start + 1)))
+            .then(|| {
+                links
+                    .iter()
+                    .find(|l| l.chars.start <= index && index < l.chars.end.max(l.chars.start + 1))
+            })
             .flatten();
         if let Some(link) = hovered {
             let modifier = ui.input(|i| i.modifiers.command);
@@ -167,7 +171,9 @@ fn collect_links(spans: &[AnsiSpan], text: &str) -> Vec<LinkRegion> {
         if let Some(uri) = &span.link {
             match regions.last_mut() {
                 // Adjacent spans of one hyperlink (different colors) merge.
-                Some(last) if last.bytes.end == offset && &last.label == uri => last.bytes.end = end,
+                Some(last) if last.bytes.end == offset && &last.label == uri => {
+                    last.bytes.end = end
+                }
                 _ => regions.push(LinkRegion {
                     bytes: offset..end,
                     chars: 0..0,
@@ -179,7 +185,10 @@ fn collect_links(spans: &[AnsiSpan], text: &str) -> Vec<LinkRegion> {
         offset = end;
     }
     for found in detect_links(text) {
-        if regions.iter().any(|r| r.bytes.start < found.range.end && found.range.start < r.bytes.end) {
+        if regions
+            .iter()
+            .any(|r| r.bytes.start < found.range.end && found.range.start < r.bytes.end)
+        {
             continue;
         }
         regions.push(LinkRegion {
@@ -198,7 +207,11 @@ fn collect_links(spans: &[AnsiSpan], text: &str) -> Vec<LinkRegion> {
 
 /// Opens a link. Returns `Ok(Some(cmd))` when the app must run `cmd`
 /// (a terminal editor inside the `:tui` overlay).
-pub fn open_target(ctx: &egui::Context, target: &LinkTarget, cwd: &str) -> Result<Option<String>, String> {
+pub fn open_target(
+    ctx: &egui::Context,
+    target: &LinkTarget,
+    cwd: &str,
+) -> Result<Option<String>, String> {
     match target {
         LinkTarget::Url(url) => {
             if !is_openable_uri(url) {
@@ -216,7 +229,8 @@ pub fn open_target(ctx: &egui::Context, target: &LinkTarget, cwd: &str) -> Resul
 
 fn resolve_path(path: &str, cwd: &str) -> PathBuf {
     let p = Path::new(path);
-    let mut full = if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
+    let mut full = if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\"))
+    {
         directories::BaseDirs::new()
             .map(|d| d.home_dir().join(rest))
             .unwrap_or_else(|| p.to_path_buf())
@@ -255,7 +269,9 @@ fn editor_style(program: &str) -> (EditorStyle, bool) {
         .unwrap_or(program)
         .to_ascii_lowercase();
     match stem.as_str() {
-        "code" | "code-insiders" | "codium" | "vscodium" | "cursor" | "windsurf" => (EditorStyle::VsCode, false),
+        "code" | "code-insiders" | "codium" | "vscodium" | "cursor" | "windsurf" => {
+            (EditorStyle::VsCode, false)
+        }
         "subl" | "sublime_text" | "zed" | "zeditor" | "mate" => (EditorStyle::PathColon, false),
         "hx" | "helix" => (EditorStyle::PathColon, true),
         "gvim" | "mvim" => (EditorStyle::PlusLine, false),
@@ -268,7 +284,12 @@ fn editor_style(program: &str) -> (EditorStyle, bool) {
 }
 
 /// Builds the editor arguments for `path` at `line:col`.
-fn editor_args(style: &EditorStyle, path: &str, line: Option<u32>, column: Option<u32>) -> Vec<String> {
+fn editor_args(
+    style: &EditorStyle,
+    path: &str,
+    line: Option<u32>,
+    column: Option<u32>,
+) -> Vec<String> {
     let loc = match (line, column) {
         (Some(l), Some(c)) => format!("{path}:{l}:{c}"),
         (Some(l), None) => format!("{path}:{l}"),
@@ -328,7 +349,11 @@ fn configured_editor() -> Option<Vec<String>> {
         .find(|w| !w.is_empty())
 }
 
-fn open_in_editor(path: &Path, line: Option<u32>, column: Option<u32>) -> Result<Option<String>, String> {
+fn open_in_editor(
+    path: &Path,
+    line: Option<u32>,
+    column: Option<u32>,
+) -> Result<Option<String>, String> {
     let path_str = path.to_string_lossy().to_string();
     let Some(words) = configured_editor() else {
         return open_with_os(&path_str);
@@ -337,14 +362,22 @@ fn open_in_editor(path: &Path, line: Option<u32>, column: Option<u32>) -> Result
     let (style, terminal) = editor_style(program);
     let terminal = terminal
         || (matches!(style, EditorStyle::PlusLineColon)
-            && base_args.iter().any(|a| matches!(a.as_str(), "-nw" | "-t" | "-tty" | "--tty")));
+            && base_args
+                .iter()
+                .any(|a| matches!(a.as_str(), "-nw" | "-t" | "-tty" | "--tty")));
     let args = editor_args(&style, &path_str, line, column);
     if terminal {
         // Terminal editors need a TTY: run them in the full-screen TUI overlay.
         let quoted: Vec<String> = std::iter::once(program.clone())
             .chain(base_args.iter().cloned())
             .chain(args)
-            .map(|a| if a.contains(char::is_whitespace) { format!("\"{a}\"") } else { a })
+            .map(|a| {
+                if a.contains(char::is_whitespace) {
+                    format!("\"{a}\"")
+                } else {
+                    a
+                }
+            })
             .collect();
         return Ok(Some(format!(":tui {}", quoted.join(" "))));
     }
@@ -380,7 +413,9 @@ fn resolve_program(program: &str) -> PathBuf {
     if !cfg!(windows) || p.extension().is_some() || p.components().count() > 1 {
         return p;
     }
-    let Some(path_var) = std::env::var_os("PATH") else { return p };
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return p;
+    };
     for dir in std::env::split_paths(&path_var) {
         for ext in ["exe", "cmd", "bat", "com"] {
             let candidate = dir.join(format!("{program}.{ext}"));
@@ -394,7 +429,9 @@ fn resolve_program(program: &str) -> PathBuf {
 
 fn spawn_detached(mut cmd: Command) -> std::io::Result<()> {
     use std::process::Stdio;
-    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -412,7 +449,10 @@ mod tests {
         let p = "/src/main.rs";
         let (vs, t) = editor_style("code");
         assert!(!t);
-        assert_eq!(editor_args(&vs, p, Some(3), Some(4)), ["--goto", "/src/main.rs:3:4"]);
+        assert_eq!(
+            editor_args(&vs, p, Some(3), Some(4)),
+            ["--goto", "/src/main.rs:3:4"]
+        );
         let (vim, t) = editor_style("/usr/bin/nvim");
         assert!(t);
         assert_eq!(editor_args(&vim, p, Some(3), Some(4)), ["+3", p]);
@@ -438,9 +478,19 @@ mod tests {
     #[test]
     fn collects_osc8_and_detected_links_without_overlap() {
         let spans = vec![
-            AnsiSpan { text: "see ".into(), ..Default::default() },
-            AnsiSpan { text: "docs".into(), link: Some("https://a.dev".into()), ..Default::default() },
-            AnsiSpan { text: " or ünï src/lib.rs:4 https://b.dev".into(), ..Default::default() },
+            AnsiSpan {
+                text: "see ".into(),
+                ..Default::default()
+            },
+            AnsiSpan {
+                text: "docs".into(),
+                link: Some("https://a.dev".into()),
+                ..Default::default()
+            },
+            AnsiSpan {
+                text: " or ünï src/lib.rs:4 https://b.dev".into(),
+                ..Default::default()
+            },
         ];
         let text: String = spans.iter().map(|s| s.text.as_str()).collect();
         let links = collect_links(&spans, &text);
@@ -449,7 +499,10 @@ mod tests {
         assert_eq!(links[0].chars, 4..8);
         assert_eq!(links[1].label, "src/lib.rs:4");
         let c = &links[1].chars;
-        assert_eq!(text.chars().skip(c.start).take(c.len()).collect::<String>(), "src/lib.rs:4");
+        assert_eq!(
+            text.chars().skip(c.start).take(c.len()).collect::<String>(),
+            "src/lib.rs:4"
+        );
         assert_eq!(links[2].target, LinkTarget::Url("https://b.dev".into()));
     }
 

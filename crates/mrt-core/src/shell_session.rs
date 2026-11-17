@@ -1282,6 +1282,33 @@ mod tests {
         }
     }
 
+    /// The GUI starts sessions with the user's own config (`load_user_config`), unlike
+    /// the tests above. Every POSIX shell must still become ready that way, including
+    /// a fresh account with no `.zshrc` / `.bashrc` / fish config at all.
+    #[cfg(unix)]
+    #[test]
+    fn posix_sessions_start_with_user_config() {
+        for kind in [ShellKind::Bash, ShellKind::Zsh, ShellKind::Fish, ShellKind::Sh] {
+            let Some(shell) = find_shell(kind.clone()) else { continue };
+            let options = ShellSessionOptions {
+                load_user_config: true,
+                ready_timeout: Duration::from_secs(15),
+                ..Default::default()
+            };
+            match ShellSession::spawn(&shell, &std::env::temp_dir(), options) {
+                Ok(session) => {
+                    let out = run(&session, "echo ready-2");
+                    assert_eq!(out.plain_output().trim(), "ready-2", "{kind:?}");
+                }
+                Err(ShellSessionError::IntegrationTimeout { transcript, .. })
+                | Err(ShellSessionError::StartupExited { transcript, .. }) => {
+                    panic!("{kind:?} with user config never became ready. Output:\n{}", transcript.escape_debug())
+                }
+                Err(error) => panic!("{kind:?}: {error}"),
+            }
+        }
+    }
+
     #[test]
     fn fish_session_keeps_state() {
         if let Some(shell) = find_shell(ShellKind::Fish) {

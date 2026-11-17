@@ -457,6 +457,9 @@ pub fn render_task_manager_tab(
                             if ui.small_button("Scan ports").clicked() {
                                 event = Some(TaskManagerEvent::ScanPorts);
                             }
+                            if ui.small_button("Services").on_hover_text(":services — system services; :service start|stop|restart <name>").clicked() {
+                                event = Some(TaskManagerEvent::Control(":services".into()));
+                            }
                         });
                         ui.add_space(4.0);
                         ui.horizontal_wrapped(|ui| {

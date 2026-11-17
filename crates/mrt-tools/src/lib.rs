@@ -4,6 +4,7 @@ pub mod http_inspector;
 pub mod net_inspector;
 pub mod process_control;
 pub mod process_inspector;
+pub mod service_inspector;
 pub mod structured_diff;
 pub mod web_fetch;
 pub mod ws_inspector;
@@ -30,4 +31,7 @@ pub use ws_inspector::{inspect_websocket, parse_ws_command, WsFrameEntry, WsSess
 pub use process_control::{
     apply_control, control_outcomes_markdown, parse_control_command, plan_control, ControlAction, ControlOutcome,
     ControlRequest, Priority,
+};
+pub use service_inspector::{
+    list_services, parse_service_command, service_shell_command, services_to_table, ServiceAction, ServiceEntry,
 };

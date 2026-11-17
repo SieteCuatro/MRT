@@ -590,6 +590,9 @@ pub struct MrtGuiApp {
     /// A window action from `mrt quick` / `mrt_control_gui` (`show`, `hide`, `toggle`),
     /// applied in the next frame.
     pub(crate) pending_window: Option<String>,
+    /// A `:service` action turned into its shell command, submitted next frame through
+    /// the Safety Gate.
+    pub(crate) pending_service_command: Option<String>,
     /// When running blocks were last copied into the MCP mirror.
     mirror_synced_at: std::cell::Cell<Option<Instant>>,
 }
@@ -816,6 +819,7 @@ impl MrtGuiApp {
             layout_next_check: Instant::now(),
             copy_mode: None,
             pending_window: None,
+            pending_service_command: None,
             mirror_synced_at: std::cell::Cell::new(None),
         };
         app.apply_config_side_effects();
@@ -1220,6 +1224,23 @@ impl MrtGuiApp {
     }
 
     /// Resolves a kill request against a fresh snapshot; the result opens the Safety Gate.
+    /// `:services [filter]`: a table of system services.
+    fn spawn_services_list(&mut self, tab_id: Uuid, cwd: PathBuf, raw_input: String, filter: String) {
+        let tx = self.tx.clone();
+        self.busy_count += 1;
+        self.runtime.spawn(async move {
+            let started = Instant::now();
+            let block = match mrt_tools::list_services(&filter).await {
+                Ok(services) => {
+                    let (structured, text) = mrt_tools::services_to_table(&services);
+                    CommandBlock::new_structured(&raw_input, "mrt-proc", cwd.display().to_string(), text, structured, 0, started.elapsed().as_millis() as u64)
+                }
+                Err(e) => CommandBlock::new_completed(&raw_input, "mrt-proc", cwd.display().to_string(), e.to_string(), 1, 0),
+            };
+            let _ = tx.send(AsyncWorkerEvent::BlockCompleted { tab_id, block, updated_cwd: None });
+        });
+    }
+
     /// `:suspend`, `:resume`, `:priority`: resolved like `:kill`; Critical targets are
     /// refused and the rest changed at once (each change can be undone).
     fn spawn_process_control(&mut self, tab_id: Uuid, cwd: PathBuf, raw_input: String, request: mrt_tools::ControlRequest) {
@@ -1436,6 +1457,21 @@ impl MrtGuiApp {
             match rest.trim().parse::<u32>() {
                 Ok(pid) => self.spawn_proc_command(tab_id, cwd, raw_input.to_string(), pid),
                 Err(_) => self.push_block(tab_id, Self::process_error_block(raw_input, &cwd, "Usage: :proc <pid>")),
+            }
+            return true;
+        }
+        if let Some(filter) = command_args(raw_input, ":services") {
+            self.spawn_services_list(tab_id, cwd, raw_input.to_string(), filter.trim().to_string());
+            return true;
+        }
+        if command_args(raw_input, ":service").is_some() {
+            match mrt_tools::parse_service_command(raw_input) {
+                // Submitted like typed input: the Safety Gate always asks for service control.
+                Ok((action, name)) => {
+                    let command = mrt_tools::service_shell_command(std::env::consts::OS, action, &name);
+                    self.pending_service_command = Some(command);
+                }
+                Err(e) => self.push_block(tab_id, Self::process_error_block(raw_input, &cwd, e.to_string())),
             }
             return true;
         }
@@ -4606,6 +4642,9 @@ impl eframe::App for MrtGuiApp {
         self.handle_keybindings(ctx);
         self.update_copy_mode(ctx);
         self.apply_window_action(ctx);
+        if let Some(command) = self.pending_service_command.take() {
+            self.submit_input(Some(command), false);
+        }
         self.process_tui_session(ctx);
         self.maybe_spawn_process_tick();
         if let Some(idx) = self.notifier.update(ctx, &self.tabs, self.active_tab, self.mosaic) {

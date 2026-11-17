@@ -57,8 +57,9 @@ impl JsonRpcResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpTool {
     pub name: String,
+    #[serde(default)]
     pub description: String,
-    #[serde(rename = "inputSchema")]
+    #[serde(rename = "inputSchema", default)]
     pub input_schema: Value,
 }
 
@@ -66,8 +67,9 @@ pub struct McpTool {
 pub struct McpResource {
     pub uri: String,
     pub name: String,
+    #[serde(default)]
     pub description: String,
-    #[serde(rename = "mimeType")]
+    #[serde(rename = "mimeType", default)]
     pub mime_type: String,
 }
 
@@ -75,6 +77,8 @@ pub struct McpResource {
 pub struct McpContentItem {
     #[serde(rename = "type")]
     pub content_type: String,
+    /// Empty for non-text content (images, audio, embedded resources).
+    #[serde(default)]
     pub text: String,
 }
 

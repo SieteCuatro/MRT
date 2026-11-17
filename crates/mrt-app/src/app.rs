@@ -23,7 +23,8 @@ use mrt_core::{
     InteractivePty, RiskLevel, SafetyAssessment, ShellProfile, StructuredOutput,
 };
 use mrt_mcp::{
-    start_gui_bridge_listener, GuiUiCommand, McpHostManager, McpTabSession, MrtMcpServerState,
+    start_gui_bridge_listener, parse_http_headers, GuiUiCommand, McpHostManager, McpServerConfig,
+    McpServerStatus, McpTabSession, McpTransportKind, MrtMcpServerState,
 };
 use mrt_tools::{
     execute_http_request, fetch_url_as_markdown, generate_markdown_bug_report, inspect_dns,
@@ -2516,22 +2517,42 @@ impl MrtGuiApp {
             }
             SidePanelEvent::ConnectExternalMcp {
                 name,
+                transport,
                 command,
                 args,
+                url,
+                headers,
             } => {
                 let tx = self.tx.clone();
                 let mut host = self.mcp_host.clone();
-                let arg_list: Vec<String> =
-                    args.split_whitespace().map(|s| s.to_string()).collect();
+                // Invalid header lines are reported as a failed server row (without the values).
+                let config = match transport {
+                    McpTransportKind::Stdio => Ok(McpServerConfig::stdio(
+                        name,
+                        command,
+                        args.split_whitespace().map(|s| s.to_string()).collect(),
+                    )),
+                    McpTransportKind::Http => match parse_http_headers(&headers) {
+                        Ok(headers) => Ok(McpServerConfig::http(name, url.trim(), headers)),
+                        Err(e) => Err(McpServerStatus::failed(
+                            McpServerConfig::http(name, url.trim(), Vec::new()),
+                            e.to_string(),
+                        )),
+                    },
+                };
                 self.busy_count += 1;
-                self.runtime.spawn(async move {
-                    if let Ok(status) = host
-                        .connect_external_stdio_server(name, command, arg_list)
-                        .await
-                    {
+                match config {
+                    Ok(config) => {
+                        self.runtime.spawn(async move {
+                            if let Ok(status) = host.connect_external_server(config).await {
+                                let _ = tx.send(AsyncWorkerEvent::ExternalMcpConnected(status));
+                            }
+                        });
+                    }
+                    Err(status) => {
                         let _ = tx.send(AsyncWorkerEvent::ExternalMcpConnected(status));
                     }
-                });
+                }
             }
             SidePanelEvent::RunHttpInspector { method, url, body } => {
                 let cmd = if body.trim().is_empty() || method == "GET" {

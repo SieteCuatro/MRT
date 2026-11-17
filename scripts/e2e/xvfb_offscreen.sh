@@ -18,5 +18,5 @@ exec unshare --user --map-root-user --mount bash -c '
   ln -sf "'"$R"'/usr/bin/xkbcomp" "'"$FAKE"'/xkbcomp"
   mount --bind "'"$FAKE"'" /usr/bin
   export LD_LIBRARY_PATH="'"$R"'/usr/lib/x86_64-linux-gnu"
-  exec "'"$R"'/usr/bin/Xvfb" :99 -screen 0 1280x800x24 -xkbdir "'"$R"'/usr/share/X11/xkb" -nolisten tcp
+  exec "'"$R"'/usr/bin/Xvfb" :99 -screen 0 1280x800x24 -xkbdir "'"$R"'/usr/share/X11/xkb" -nolisten tcp -nolisten unix
 '

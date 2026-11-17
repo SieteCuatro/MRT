@@ -107,4 +107,4 @@ MRT integrates native support for the **OSC 133 semantic prompt specification**,
 - Other shells (`sh`, Nushell, WSL, Git Bash kinds) get a comment saying OSC 133 is not supported.
 
 ### Status
-The parser and scripts are a library API with unit tests. The GUI does not inject the scripts or read markers yet: each command block runs in its own shell process (`-Command` / `/C` / `-c`), so the exit code comes from the process itself. Wiring OSC 133 into persistent PTY tabs is tracked in the [Roadmap](../ROADMAP.md#everyday-terminal-use).
+The parser and scripts are a library API with unit tests. The GUI does not inject the scripts or read markers yet: each command block runs in its own shell process (`-Command` / `/C` / `-c`), so the exit code comes from the process itself. Wiring OSC 133 into persistent PTY tabs is tracked in the [Roadmap](../ROADMAP.md#milestone-2--everyday-terminal-use).

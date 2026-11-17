@@ -175,7 +175,9 @@ See the [Toolbox guide](TOOLBOX.md#6-task-manager--process-tools-process_inspect
 
 ---
 
-`mrt_control_gui` also takes `"window": "show" | "hide" | "toggle"` to bring the window to the front or minimize it (`mrt quick` uses it).
+`mrt_control_gui` also takes `"window": "show" | "hide" | "toggle" | "quit"` (`mrt quick` and `mrt quit` use it), and `"safety": "approve" | "deny"` to answer the window's Safety Gate prompt; the window ignores `safety` unless the user set `safety.remote_approvals = true`, and records each answer. `mrt_get_session_state` reports `pending_approval` (command, risk, reason, tab) while a prompt is open.
+
+Remote devices paired with `mrt share` reach these same tools through an encrypted relay; see [SESSION_SERVER.md](SESSION_SERVER.md).
 
 `mrt server` serves the same tools headless and keeps PTY sessions running between client connections; `mrt_pty_read` with `drain: true` returns only what a client has not read yet. See [SESSION_SERVER.md](SESSION_SERVER.md).
 

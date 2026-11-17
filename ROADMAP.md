@@ -47,18 +47,18 @@ These items make MRT usable as a person's main terminal.
 
 Inspired by tmux and Rex. This also builds the base for the remote-connection plan below.
 
-- **Session server.** *(started: `mrt server` is a headless server for tabs, blocks and PTYs on the bridge, used by the CLI and agents; the GUI does not attach to it yet. Design for the rest, upgrades and remote connections: [docs/SESSION_SERVER.md](docs/SESSION_SERVER.md))* Move PTYs, shells, and running blocks into a background `mrt --server` process. The GUI becomes a client that attaches over the existing token-authenticated local bridge (`mrt-mcp::bridge`). *Done when:* closing the window mid-build and reopening it shows the same tabs, finished blocks, and live output.
-- **Layout restore.** *(implemented for the GUI: `layout.json`, `terminal.restore_layout`; restoring after a session-server restart waits for the session server)* Save tabs, splits, shells, and working directories, and restore them after the server itself restarts (fresh shells, same layout).
-- **Survive upgrades.** Hand running sessions from the old server to the new one when MRT updates, or keep the old server running until its sessions end.
+- **Session server.** *(implemented: closing the window with work running keeps MRT running in the background and `mrt` reopens the same window with its tabs, blocks and live output; `mrt server` is a headless server for the CLI and agents. A separate shell-owning server process the GUI attaches to is described in [docs/SESSION_SERVER.md](docs/SESSION_SERVER.md))* Move PTYs, shells, and running blocks into a background `mrt --server` process. The GUI becomes a client that attaches over the existing token-authenticated local bridge (`mrt-mcp::bridge`). *Done when:* closing the window mid-build and reopening it shows the same tabs, finished blocks, and live output.
+- **Layout restore.** *(implemented: `layout.json`, `terminal.restore_layout`; also used when a new MRT version replaces an idle older one)* Save tabs, splits, shells, and working directories, and restore them after the server itself restarts (fresh shells, same layout).
+- **Survive upgrades.** *(implemented by keeping the old instance: a new version replaces an idle older window and leaves one with running commands alone until they finish)* Hand running sessions from the old server to the new one when MRT updates, or keep the old server running until its sessions end.
 - **Command-line control.** *(implemented against the running window: `mrt list|send|capture|split` with `--json` and documented exit codes)* An `mrt` CLI that talks to the server with tmux-style targets: `mrt send`, `mrt capture`, `mrt split`, `mrt list`, all with `--json` and documented exit codes. These are thin wrappers around the existing MCP tools.
 
 ### Remote connections between MRT instances
 
 Attach to an existing MRT tab from a second computer running Windows, macOS, or Linux. A developer who starts a build on a Linux workstation can open that same tab on a Windows laptop, see earlier command blocks, follow live output, and enter the next command. Show the host name, shell, and working directory in the attached tab.
 
-- **Local network.** Pair two devices on the same LAN with host approval and share a selected tab over an encrypted connection. The host owns the shell, processes, and command blocks and can revoke access. Authenticate with a paired key, not only network identity.
-- **Reconnect milestone.** Start a build on the host, attach from the laptop, and disconnect the laptop mid-build. When it reconnects to the same tab, the build should have continued and the laptop should show the missed output exactly once, including the exit status if the build finished.
-- **Over the internet.** Extend tab attachment and reconnection to paired devices on different networks. Choose the internet transport after validating the LAN milestone.
+- **Local network.** *(implemented: `mrt share`, `mrt pair`, `mrt attach`, `--host`; SPAKE2 pairing code, host approval, Noise encryption, paired keys only, revocation)* Pair two devices on the same LAN with host approval and share a selected tab over an encrypted connection. The host owns the shell, processes, and command blocks and can revoke access. Authenticate with a paired key, not only network identity.
+- **Reconnect milestone.** *(implemented: `mrt attach` reconnects on its own and shows missed output once, with the exit status; covered by a test)* Start a build on the host, attach from the laptop, and disconnect the laptop mid-build. When it reconnects to the same tab, the build should have continued and the laptop should show the missed output exactly once, including the exit status if the build finished.
+- **Over the internet.** *(works through any reachable address, port forwarding or a VPN, with the same pairing and encryption; no relay service)* Extend tab attachment and reconnection to paired devices on different networks. Choose the internet transport after validating the LAN milestone.
 
 ## Milestone 5 — A terminal built for AI agents
 
@@ -83,7 +83,7 @@ MRT already has a 31-tool MCP server. These items make that easy to use and visi
 - Quick terminal: a drop-down window on a global hotkey. *(implemented as `mrt quick`, bound to an OS-level hotkey, with an optional drop-down placement; MRT does not register global hotkeys itself)*
 - Themes from a file, including importing common theme formats. *(implemented: MRT TOML, Windows Terminal, Alacritty, Ghostty and iTerm2 themes)*
 - Accessibility: screen-reader output for blocks and the grid, and high-contrast themes. *(implemented: AccessKit labels for blocks, screen text for the TUI grid, `high-contrast` theme)*
-- A mobile companion app that attaches to a session server (after Milestone 4). *(waits for the session server)*
+- A mobile companion app that attaches to a session server (after Milestone 4). *(implemented as a web app: `mrt share --web`)*
 - Suspend/resume, priority changes, and service management in the Task Manager (needs `NtSuspendProcess` on Windows). *(implemented: `:suspend`, `:resume`, `:priority`, `:services` and `:service start|stop|restart`, with Task Manager buttons; service control always goes through the Safety Gate)*
 
 ## Shipped

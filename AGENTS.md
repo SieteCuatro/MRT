@@ -39,6 +39,7 @@ The Cargo workspace contains 5 modular crates:
 - **`crates/mrt-mcp`**:
   - `protocol.rs`: JSON-RPC 2.0 and Model Context Protocol (MCP) types.
   - `bridge.rs`: Token-authenticated localhost TCP bridge (`mcp-bridge.json`) so external `mrt --mcp-server` processes transparently control a running MRT GUI window.
+  - `remote.rs` & `companion.rs`: Remote connections (`mrt share`: SPAKE2 pairing, Noise-encrypted relay to the bridge, paired keys only) and the HTTPS phone companion (`mrt share --web`).
   - `server.rs`: MRT as an MCP Server (`mrt --mcp-server` or live GUI bridge), exposing 31 tools across session & multi-tab control (`mrt_get_session_state`, `mrt_list_tabs`, `mrt_create_tab`, `mrt_switch_tab`, `mrt_close_tab`, `mrt_configure_tab`), command execution & block inspection/diffing/triage (`mrt_run_command`, `mrt_list_blocks`, `mrt_get_block`, `mrt_search_blocks`, `mrt_compare_blocks`, `mrt_diagnose_block`, `mrt_clear_blocks`), interactive PTYs (`mrt_pty_spawn`, `mrt_pty_write`, `mrt_pty_read`, `mrt_pty_resize`, `mrt_pty_list`, `mrt_pty_kill`), live GUI control (`mrt_control_gui`), AI translation (`mrt_ai_translate`), and internet & diagnostic tools (`mrt_http_request`, `mrt_web_fetch`, `mrt_inspect_ports`, `mrt_inspect_dns`, `mrt_generate_bug_report`, `mrt_inspect_ws`), and the Task Manager (`mrt_list_processes`, `mrt_inspect_process`, `mrt_kill_process`, `mrt_compare_process_snapshots`), plus 5 MCP resources.
   - `client.rs`: MRT as an MCP Host, connecting to in-process loopback and external `stdio` or Streamable HTTP MCP servers through one shared session layer (with one-click presets for Filesystem, Git, Memory, SQLite, Fetch).
   - `transport.rs`: `stdio` and Streamable HTTP transports (JSON/SSE responses, `Mcp-Session-Id`, `MCP-Protocol-Version`, GET listen stream, `Last-Event-ID` resume, redacted custom headers).
@@ -48,6 +49,7 @@ The Cargo workspace contains 5 modular crates:
 - **`crates/mrt-app`**:
   - `main.rs`: Entrypoint (`#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]`), CLI flag handler (`--mcp-server`, `--version`, `--help`, and the `mrt agent setup|show|remove` subcommand in `agent_setup.rs`), and `eframe` native GPU launcher.
   - `copy_mode.rs` & `hooks.rs`: Keyboard copy mode over a tab's blocks, and `[[hooks]]` event commands run in the background (`CREATE_NO_WINDOW`, `MRT_*` environment). Named `[[actions]]` (`run:<name>`) and pane broadcast (`:broadcast`) live in `app.rs`.
+  - `remote_cli.rs`: `mrt share`, `mrt pair`, `mrt attach` and `--host`.
   - `server.rs`: `mrt server`, a headless session server on the bridge (design for GUI attach, upgrades and remote sessions: `docs/SESSION_SERVER.md`).
   - `cli.rs` & `layout.rs`: `mrt list|send|capture|split` over the MCP bridge (thin wrappers around MCP tools, documented exit codes), and saving / restoring the window layout (`layout.json`, `terminal.restore_layout`).
   - `config_runtime.rs`: Loads the config file at startup, polls it for changes, and applies it to the GUI (font size, default shell, AI preferences, startup MCP servers, keymap, notification settings) with an in-window notice for errors.

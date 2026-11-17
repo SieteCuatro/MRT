@@ -261,6 +261,8 @@ pub struct ActiveTuiSession {
     /// Text selected by dragging (when the program does not take the mouse, or with
     /// Shift), and whether a selection drag is in progress.
     pub selection: Option<crate::widgets::term_view::Selection>,
+    /// Keyboard copy mode over the grid (`copy_mode` while the program has the keyboard).
+    pub grid_copy: Option<crate::copy_mode::GridCopy>,
     pub selecting: bool,
     /// `None` for the full-screen overlay; `Some(0)` / `Some(1)` for a session drawn
     /// inside the primary / secondary pane of a split tab.
@@ -293,6 +295,7 @@ impl ActiveTuiSession {
             mouse_cell: None,
             wheel_accum: 0.0,
             selection: None,
+            grid_copy: None,
             selecting: false,
             pane,
         }
@@ -317,9 +320,58 @@ impl ActiveTuiSession {
         fresh
     }
 
+    /// Starts copy mode at the program's cursor.
+    fn start_grid_copy(&mut self) {
+        let cursor = self.term.snapshot().cursor;
+        let grid = crate::copy_mode::GridCopy::new(cursor.col, cursor.row);
+        self.selection = Some(grid.selection());
+        self.grid_copy = Some(grid);
+    }
+
+    /// Copy-mode keys: they move the selection instead of reaching the program.
+    fn grid_copy_keys(&mut self, ctx: &egui::Context) {
+        let Some(mut grid) = self.grid_copy.take() else { return };
+        let keys: Vec<(egui::Key, egui::Modifiers)> = ctx.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::Key { key, pressed: true, modifiers, .. } => Some((*key, *modifiers)),
+                    _ => None,
+                })
+                .collect()
+        });
+        let (cols, rows) = (self.term.cols(), self.term.rows());
+        for (key, modifiers) in keys {
+            match grid.apply(key, modifiers, cols, rows) {
+                crate::copy_mode::GridOutcome::Stay => {}
+                crate::copy_mode::GridOutcome::Copy { whole_line } => {
+                    let selection = if whole_line {
+                        let row = grid.cursor.1;
+                        crate::widgets::term_view::Selection { anchor: (0, row), head: (cols.saturating_sub(1), row) }
+                    } else {
+                        grid.selection()
+                    };
+                    ctx.copy_text(crate::widgets::term_view::selection_text(&self.term.snapshot(), &selection));
+                    self.selection = None;
+                    return;
+                }
+                crate::copy_mode::GridOutcome::Exit => {
+                    self.selection = None;
+                    return;
+                }
+            }
+        }
+        self.selection = Some(grid.selection());
+        self.grid_copy = Some(grid);
+    }
+
     /// Sends this frame's keyboard input to the program. Keys bound to MRT actions
     /// (e.g. `exit_tui`) were already removed by `handle_keybindings`.
     fn forward_keys(&mut self, ctx: &egui::Context) -> Vec<u8> {
+        if self.grid_copy.is_some() {
+            self.grid_copy_keys(ctx);
+            return Vec::new();
+        }
         let modes = self.term.modes();
         // egui-winit turns Ctrl+C (Cmd+C on macOS) into `Event::Copy` with no key event.
         // It copies the selection when there is one, with Ctrl+Shift+C, and on macOS,
@@ -4150,9 +4202,22 @@ impl MrtGuiApp {
             Action::ToggleMosaic => self.mosaic = !self.mosaic,
             Action::OpenTaskManager => self.open_task_manager(None),
             Action::Find => self.find.open(),
-            Action::CopyMode => {
-                self.copy_mode = self.tabs.get(self.active_tab).and_then(|t| crate::copy_mode::CopyMode::new(&t.blocks));
-            }
+            Action::CopyMode => match self.focused_tui() {
+                // Inside a full-screen program: copy mode over its grid.
+                Some(FocusedTui::Overlay) => {
+                    if let Some(session) = self.active_tui.as_mut() {
+                        session.start_grid_copy();
+                    }
+                }
+                Some(FocusedTui::Pane(index)) => {
+                    if let Some(session) = self.pane_tuis.get_mut(index) {
+                        session.start_grid_copy();
+                    }
+                }
+                None => {
+                    self.copy_mode = self.tabs.get(self.active_tab).and_then(|t| crate::copy_mode::CopyMode::new(&t.blocks));
+                }
+            },
             Action::ToggleBroadcast => {
                 if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                     tab.broadcast = !tab.broadcast;

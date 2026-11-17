@@ -43,6 +43,9 @@ The binary is `target/release/mrt` (`mrt.exe` on Windows).
 | `--mcp-server` | Runs the MCP server over stdio for AI clients. Forwards to a running GUI window when one is open, otherwise runs headless. See the [MCP Guide](MCP_GUIDE.md). |
 | `--version`, `-V` | Prints the version. |
 | `--help`, `-h` | Prints usage. |
+| `agent setup [--agent claude\|codex\|gemini\|all] [--user\|--project] [--dry-run]` | Registers MRT's MCP server and an `mrt` skill with Claude Code, Codex CLI and Gemini CLI. See [Connect coding agents](MCP_GUIDE.md#21-one-command-setup-for-coding-agents-mrt-agent-setup). |
+| `agent show` | Prints the MCP command line and the agent instructions, for agents `setup` does not know. |
+| `agent remove [same flags]` | Removes exactly what `agent setup` added. |
 
 On macOS and Linux, MRT loads your login shell's `PATH` at startup, so tools installed through Homebrew, `nvm`, `cargo`, etc. are found even when MRT is launched from the Dock or a desktop launcher.
 
@@ -140,6 +143,8 @@ MRT stores its files in the per-user local data directory:
 | `history.sqlite` | Every completed command block (command, output, shell, folder, exit code) and your saved runbooks. **Search history** searches it; queries of 3+ characters use the FTS5 trigram index, shorter ones a plain substring match. Output can contain secrets that commands printed; delete the file to wipe history. |
 | `mcp-bridge.json` | Port and per-session token of the running GUI's MCP bridge. Written at startup (`0600` on macOS/Linux) and removed on exit. A stale file left after a crash is ignored when no GUI answers. |
 
+`mrt agent setup` writes to the coding agents' own files (`~/.claude.json`, `~/.codex/config.toml`, `~/.gemini/settings.json` and `skills/mrt/SKILL.md` folders; see the [MCP Guide](MCP_GUIDE.md#21-one-command-setup-for-coding-agents-mrt-agent-setup)). Before changing an existing file it saves a copy next to it as `<file>.mrt-backup-<date>-<time>`.
+
 MRT does not read a configuration file yet. [`mrt.example.toml`](../mrt.example.toml) shows the planned schema.
 
 ---
@@ -151,6 +156,7 @@ MRT does not read a configuration file yet. [`mrt.example.toml`](../mrt.example.
 | `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY` | AI provider keys, checked in this order. See [AI Providers](AI_PROVIDERS_AND_AGENTS.md). |
 | `OLLAMA_MODEL`, `OLLAMA_HOST` | Use a local Ollama model (default host `http://localhost:11434`). |
 | `MRT_MCP_BRIDGE_PORT`, `MRT_MCP_BRIDGE_TOKEN` | Point `mrt --mcp-server` at a specific GUI bridge instead of reading `mcp-bridge.json`. |
+| `CODEX_HOME` | Where `mrt agent setup` finds Codex CLI's `config.toml` (default `~/.codex`). |
 | `RUST_LOG` | Log level for the GUI's stderr logs (default `info`), e.g. `RUST_LOG=debug`. |
 
 With no AI variables set, MRT uses its offline heuristic engine, so `#` prompts and **Diagnose** always work.
@@ -166,7 +172,8 @@ With no AI variables set, MRT uses its offline heuristic engine, so `#` prompts 
 | A command waits forever | It is probably waiting for input. Press **■ Stop** on the block and rerun it with `:tui <command>`. |
 | `export VAR=…` has no effect on the next command | Each command runs in a new shell process. Combine them on one line (`export X=1 && ./run.sh`) or use a script. |
 | The AI answer looks generic | No provider key is set, or the provider failed and MRT fell back to the offline engine. Check the provider name in the proposal card. |
-| An MCP client cannot see the open GUI | Make sure the GUI is running and that the client starts the same `mrt` binary with `--mcp-server`. Use **Copy MCP Config** in the MCP Hub for the exact path. |
+| An MCP client cannot see the open GUI | Make sure the GUI is running and that the client starts the same `mrt` binary with `--mcp-server`. Use **Copy MCP Config** in the MCP Hub for the exact path. If you moved or rebuilt `mrt` elsewhere, run `mrt agent setup` again to update the path. |
+| `mrt agent setup` says *skipped* | The agent already has an `mrt` MCP server or `mrt` skill that MRT did not write. MRT leaves it alone; rename or delete it, then run setup again. |
 | Linux build fails with missing `xcb` / `X11` / `udev` | Install the packages listed in [§1](#1-install). |
 
 Bug reports are welcome: run `:report` on the failed block and paste the result (secrets are redacted, but review it first) into a GitHub issue.

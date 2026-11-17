@@ -89,6 +89,9 @@ pub struct TerminalTab {
     pub remote: Option<Vec<String>>,
     /// Keys typed into one pane's program go to the programs of every pane (`:broadcast`).
     pub broadcast: bool,
+    /// Agent sandbox tab (`:sandbox`): commands always start in this folder, and every
+    /// command the Safety Gate does not rate Safe waits for approval, whatever the config.
+    pub sandbox_root: Option<PathBuf>,
 }
 
 impl TerminalTab {
@@ -111,6 +114,7 @@ impl TerminalTab {
             activity: ActivityTracker::new(),
             remote: None,
             broadcast: false,
+            sandbox_root: None,
         }
     }
 
@@ -582,6 +586,7 @@ impl MrtGuiApp {
                 cwd: first_tab.cwd.clone(),
                 blocks: Vec::new(),
                 activity: None,
+                sandbox_root: None,
             }];
         }
         if let Ok(mut active_guard) = mcp_state.active_tab_id.lock() {
@@ -1930,6 +1935,7 @@ impl MrtGuiApp {
                         cwd: t.cwd.clone(),
                         blocks: t.blocks.clone(),
                         activity: Some(t.activity.snapshot(Instant::now())),
+                        sandbox_root: t.sandbox_root.clone(),
                     }
                 })
                 .collect();
@@ -2121,6 +2127,8 @@ impl MrtGuiApp {
                         if was_streaming {
                             tab.activity.command_finished(block.exit_code.unwrap_or(1), Instant::now());
                         }
+                        // A sandbox tab's folder never moves.
+                        let updated_cwd = if tab.sandbox_root.is_some() { None } else { updated_cwd };
                         let cwd_changed = updated_cwd.as_ref().is_some_and(|new_cwd| *new_cwd != tab.cwd);
                         hook_events.push(crate::hooks::HookEvent {
                             event: if block.exit_code.unwrap_or(0) == 0 { "command_finished" } else { "command_failed" },
@@ -2245,7 +2253,7 @@ impl MrtGuiApp {
         tab.history_cursor = None;
 
         let tab_id = tab.id;
-        let cwd = tab.cwd.clone();
+        let cwd = tab.sandbox_root.clone().unwrap_or_else(|| tab.cwd.clone());
         let shell = self
             .shells
             .get(tab.active_shell_idx)
@@ -2410,7 +2418,12 @@ impl MrtGuiApp {
         }
         if !bypass_safety {
             let assessment = assess_command(&raw_input);
-            if self.config_state.config.safety.requires_approval(&assessment) {
+            let needs_approval = if tab.sandbox_root.is_some() {
+                assessment.risk != RiskLevel::Safe
+            } else {
+                self.config_state.config.safety.requires_approval(&assessment)
+            };
+            if needs_approval {
                 self.pending_safety = Some(PendingSafetyApproval {
                     tab_id,
                     assessment,
@@ -2420,6 +2433,25 @@ impl MrtGuiApp {
                 });
                 return;
             }
+        }
+
+        if raw_input == ":assist" || raw_input.starts_with(":assist ") {
+            let question = raw_input.trim_start_matches(":assist").trim();
+            let question = if question.is_empty() {
+                "Why did the last failed command fail, and what changed since it last worked?".to_string()
+            } else {
+                question.to_string()
+            };
+            let shell_label = shell.kind.short_label().to_string();
+            self.spawn_assist(tab_id, cwd, shell_label, raw_input, question);
+            return;
+        }
+
+        if raw_input == ":sandbox" || raw_input.starts_with(":sandbox ") {
+            let arg = raw_input.trim_start_matches(":sandbox").trim();
+            let root = if arg.is_empty() { cwd.clone() } else { cwd.join(arg) };
+            self.open_sandbox_tab(root);
+            return;
         }
 
         if raw_input == ":broadcast" || raw_input.starts_with(":broadcast ") {
@@ -3567,6 +3599,15 @@ fn read_directory(path: &std::path::Path) -> std::io::Result<Vec<(PathBuf, bool)
 
 /// Builds the key resolver: the default keymap plus user overrides
 /// (`binding -> action`) from the config file's `[keybindings]` table.
+/// `canonicalize` on Windows returns `\\?\C:\...`; drop that prefix for display and shells.
+fn dunce_path(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC") => PathBuf::from(rest),
+        _ => path,
+    }
+}
+
 pub(crate) fn load_key_resolver(overrides: &HashMap<String, String>) -> (KeyResolver, Vec<String>) {
     let (keymap, issues) = Keymap::with_overrides(overrides, Platform::current());
     (KeyResolver::new(keymap), issues.iter().map(|i| i.to_string()).collect())
@@ -3715,6 +3756,95 @@ impl MrtGuiApp {
         }
         crate::copy_mode::render(ctx, &mode, &tab.blocks);
         self.copy_mode = Some(mode);
+    }
+
+    /// `:assist`: a multi-step investigation with MRT's read-only MCP tools (see
+    /// `mrt_ai::assist`). Each tool call streams into the block; the answer and any
+    /// suggested command land in the block's AI panel, whose "Apply fix" goes through
+    /// the Safety Gate like typed input.
+    fn spawn_assist(&mut self, tab_id: Uuid, cwd: PathBuf, shell_label: String, raw_input: String, question: String) {
+        // The tools read the MCP mirror, so bring it up to date first.
+        self.sync_mcp_from_gui();
+        let state = self.mcp_host.local_server_state.clone();
+        let mut running = CommandBlock::new_completed(&raw_input, "mrt-ai", cwd.display().to_string(), "", 0, 0);
+        running.exit_code = None;
+        let block_id = running.id;
+        let timestamp = running.timestamp;
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+            tab.blocks.push(running);
+        }
+        let output = std::sync::Arc::new(std::sync::Mutex::new(format!("Question: {question}\n")));
+        self.running_output.insert(block_id, (tab_id, output.clone()));
+        let tx = self.tx.clone();
+        self.busy_count += 1;
+        self.runtime.spawn(async move {
+            let started = Instant::now();
+            let mut trace = format!("Question: {question}\n");
+            let outcome = mrt_ai::run_assist(
+                &question,
+                &shell_label,
+                &cwd.display().to_string(),
+                |tool, arguments| {
+                    let state = state.clone();
+                    async move {
+                        let request = mrt_mcp::JsonRpcRequest {
+                            jsonrpc: "2.0".into(),
+                            id: Some(serde_json::json!(1)),
+                            method: "tools/call".into(),
+                            params: Some(serde_json::json!({ "name": tool, "arguments": arguments })),
+                        };
+                        match mrt_mcp::handle_mcp_jsonrpc(&state, request).await.and_then(|r| r.result) {
+                            Some(result) => result["content"]
+                                .as_array()
+                                .map(|items| items.iter().filter_map(|i| i["text"].as_str()).collect::<Vec<_>>().join("\n"))
+                                .unwrap_or_default(),
+                            None => "The tool returned no result.".to_string(),
+                        }
+                    }
+                },
+                |step| {
+                    let line = format!("→ {} {}\n", step.tool, step.arguments);
+                    trace.push_str(&line);
+                    if let Ok(mut pending) = output.lock() {
+                        pending.push_str(&line);
+                    }
+                },
+            )
+            .await;
+            trace.push_str(&format!("\nAnswered by {} after {} tool call(s).\n", outcome.provider, outcome.steps.len()));
+            let mut block = CommandBlock::new_completed(
+                &raw_input,
+                "mrt-ai",
+                cwd.display().to_string(),
+                trace,
+                0,
+                started.elapsed().as_millis() as u64,
+            );
+            block.id = block_id;
+            block.timestamp = timestamp;
+            block.ai_explanation = Some(outcome.answer);
+            block.ai_suggested_fix = outcome.command;
+            let _ = tx.send(AsyncWorkerEvent::BlockCompleted { tab_id, block, updated_cwd: None });
+        });
+    }
+
+    /// Opens an agent sandbox tab rooted at `root` (`:sandbox [folder]`).
+    pub(crate) fn open_sandbox_tab(&mut self, root: PathBuf) {
+        let root = match std::fs::canonicalize(&root) {
+            Ok(path) if path.is_dir() => dunce_path(path),
+            _ => {
+                let cwd = self.tabs[self.active_tab].cwd.clone();
+                let tab_id = self.tabs[self.active_tab].id;
+                self.push_block(tab_id, Self::process_error_block(":sandbox", &cwd, format!("{} is not a folder.", root.display())));
+                return;
+            }
+        };
+        let shell_idx = self.tabs.get(self.active_tab).map(|t| t.active_shell_idx).unwrap_or(0);
+        let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
+        let mut tab = TerminalTab::new(format!("sandbox {name}"), shell_idx, root.clone());
+        tab.sandbox_root = Some(root);
+        self.tabs.push(tab);
+        self.active_tab = self.tabs.len() - 1;
     }
 
     fn open_new_tab(&mut self, shell_idx: usize) {
@@ -5817,6 +5947,58 @@ mod tests {
     /// A remote tab's commands go to the SSH session and never run on this machine: with
     /// an unreachable host the first block reports the connection failure instead of the
     /// local `hostname`.
+    #[test]
+    fn assist_investigates_the_failed_block_with_mcp_tools() {
+        // The built-in plan only; never call a provider from tests.
+        mrt_ai::set_ai_preferences(mrt_ai::AiPreferences { provider: Some("offline".into()), ..Default::default() });
+        let mut app = MrtGuiApp::new();
+        let ok = CommandBlock::new_completed("cargo test", "bash", "/src", "test a ... ok
+", 0, 10);
+        let failed = CommandBlock::new_completed("cargo test", "bash", "/src", "test a ... FAILED
+error: test failed
+", 101, 10);
+        let failed_id = failed.id;
+        app.tabs[0].blocks.push(ok);
+        app.tabs[0].blocks.push(failed);
+        app.submit_input(Some(":assist".into()), false);
+        assert_eq!(app.tabs[0].blocks.last().unwrap().exit_code, None, "running while it investigates");
+        pump_one(&mut app);
+        let block = app.tabs[0].blocks.last().unwrap();
+        assert_eq!(block.shell_name, "mrt-ai");
+        assert!(block.plain_output.contains("→ mrt_compare_blocks"), "{}", block.plain_output);
+        assert!(block.plain_output.contains(&failed_id.to_string()), "uses the ids it found");
+        let answer = block.ai_explanation.as_deref().unwrap_or("");
+        assert!(answer.contains("`cargo test` failed (exit code 101)"), "{answer}");
+        assert!(answer.contains("earlier run"), "{answer}");
+    }
+
+    #[test]
+    fn sandbox_tabs_pin_their_folder_and_ask_before_anything_not_safe() {
+        let mut app = MrtGuiApp::new();
+        app.config_state.config.safety.enabled = false; // the sandbox asks anyway
+        let root = std::env::temp_dir().join(format!("mrt-sandbox-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        app.tabs[0].cwd = root.clone();
+        app.submit_input(Some(":sandbox sub".into()), false);
+        assert_eq!(app.tabs.len(), 2);
+        let sandbox = app.tabs[1].sandbox_root.clone().expect("sandbox tab");
+        assert!(sandbox.ends_with("sub"));
+        assert_eq!(app.tabs[1].title, "sandbox sub");
+
+        app.submit_input(Some("del notes.txt".into()), false);
+        let pending = app.pending_safety.take().expect("Moderate commands wait for approval in a sandbox");
+        assert_eq!(pending.cwd, sandbox);
+
+        app.submit_input(Some(":sandbox does-not-exist".into()), false);
+        assert_eq!(app.tabs.len(), 2, "no tab for a missing folder");
+        app.sync_mcp_from_gui();
+        let mirrored = app.mcp_host.local_server_state.tabs.lock().unwrap()[1].sandbox_root.clone();
+        assert_eq!(mirrored, Some(sandbox.clone()));
+        let layout = app.capture_layout();
+        assert_eq!(layout.tabs[1].sandbox.as_ref(), Some(&sandbox));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn named_actions_broadcast_and_copy_mode() {
         let mut app = MrtGuiApp::new();

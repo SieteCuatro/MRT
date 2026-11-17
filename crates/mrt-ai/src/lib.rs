@@ -1,3 +1,5 @@
+pub mod assist;
+pub use assist::{run_assist, AssistOutcome, AssistStep, ASSIST_TOOLS};
 use anyhow::Result;
 use mrt_core::{ShellKind, ShellProfile};
 use serde::{Deserialize, Serialize};

@@ -32,6 +32,9 @@ pub struct SavedTab {
     pub remote: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split: Option<SavedSplit>,
+    /// Root of an agent sandbox tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -80,6 +83,7 @@ impl MrtGuiApp {
                     shell: shell_id(tab.active_shell_idx),
                     cwd: tab.cwd.clone(),
                     remote: tab.remote.clone(),
+                    sandbox: tab.sandbox_root.clone(),
                     split: tab.secondary_pane.as_ref().and_then(|pane| {
                         let direction = match tab.split_direction {
                             SplitDirection::Horizontal => "horizontal",
@@ -114,6 +118,11 @@ impl MrtGuiApp {
                 let cwd = if saved.remote.is_some() { std::env::temp_dir() } else { folder(&saved.cwd) };
                 let mut tab = TerminalTab::new(saved.title.clone(), shell_idx(&saved.shell), cwd);
                 tab.remote = saved.remote.clone().filter(|args| !args.is_empty());
+                // A sandbox whose folder is gone becomes a normal tab, never an unbounded one.
+                if let Some(root) = saved.sandbox.as_ref().filter(|r| r.is_dir()) {
+                    tab.sandbox_root = Some(root.clone());
+                    tab.cwd = root.clone();
+                }
                 if let Some(split) = &saved.split {
                     let direction = match split.direction.as_str() {
                         "vertical" => SplitDirection::Vertical,
@@ -174,6 +183,7 @@ mod tests {
                     shell: shell.clone(),
                     cwd: dir.clone(),
                     remote: None,
+                    sandbox: None,
                     split: Some(SavedSplit { direction: "vertical".into(), shell: "no-such-shell".into(), cwd: dir.join("gone") }),
                 },
                 SavedTab {
@@ -182,6 +192,7 @@ mod tests {
                     cwd: "/home/me".into(),
                     remote: Some(vec!["me@box".into()]),
                     split: None,
+                    sandbox: None,
                 },
             ],
         };

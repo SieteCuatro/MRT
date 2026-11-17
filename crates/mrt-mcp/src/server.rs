@@ -37,6 +37,10 @@ pub struct McpTabSession {
     /// whose state is derived from their blocks instead.
     #[serde(skip)]
     pub activity: Option<ActivitySnapshot>,
+    /// Set for an agent sandbox tab (`:sandbox`): commands always start in this
+    /// folder, and `mrt_run_command` runs only commands the Safety Gate rates Safe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_root: Option<PathBuf>,
 }
 
 /// JSON for a tab's activity (`state`, `progress`, `tone`, `agent`, `detail`, `command`).
@@ -120,6 +124,7 @@ impl Default for MrtMcpServerState {
             cwd: cwd.clone(),
             blocks: Vec::new(),
             activity: None,
+            sandbox_root: None,
         };
         Self {
             cwd: Arc::new(Mutex::new(cwd)),
@@ -803,6 +808,7 @@ pub async fn execute_mrt_mcp_tool(
                         "cwd": t.cwd.display().to_string(),
                         "block_count": t.blocks.len(),
                         "activity": tab_activity_json(t),
+                        "sandbox": t.sandbox_root.as_ref().map(|r| r.display().to_string()),
                     })
                 })
                 .collect();
@@ -848,6 +854,7 @@ pub async fn execute_mrt_mcp_tool(
                         "cwd": t.cwd.display().to_string(),
                         "block_count": t.blocks.len(),
                         "activity": tab_activity_json(t),
+                        "sandbox": t.sandbox_root.as_ref().map(|r| r.display().to_string()),
                     })
                 })
                 .collect();
@@ -888,6 +895,7 @@ pub async fn execute_mrt_mcp_tool(
                 cwd: cwd.clone(),
                 blocks: Vec::new(),
                 activity: None,
+                sandbox_root: None,
             };
             tabs.push(session);
             drop(tabs);
@@ -1421,6 +1429,20 @@ pub async fn execute_mrt_mcp_tool(
                     .find(|t| t.id == tid)
                     .map(|t| (t.shell_id.clone(), t.cwd.clone()))
             });
+            let sandbox_root = target_tab_id.and_then(|tid| {
+                state.tabs.lock().unwrap().iter().find(|t| t.id == tid).and_then(|t| t.sandbox_root.clone())
+            });
+            // Sandbox tabs: only Safe commands run unattended, always from the sandbox folder.
+            if sandbox_root.is_some() && safety.risk != RiskLevel::Safe {
+                return McpToolCallResult::text(
+                    format!(
+                        "Refused: the target is an agent sandbox tab, where only commands the Safety Gate rates Safe run without approval ({} risk: {}). Ask the user to run it, or send it with mrt_control_gui (input_text + submit_input) so they can approve it in the MRT window.",
+                        safety.risk.label(),
+                        safety.reason
+                    ),
+                    true,
+                );
+            }
 
             let requested_shell = args
                 .get("shell")
@@ -1432,15 +1454,24 @@ pub async fn execute_mrt_mcp_tool(
                 return McpToolCallResult::text("No shell available on host", true);
             };
 
-            let cwd = args
-                .get("cwd")
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .or_else(|| tab_defaults.map(|(_, c)| c))
-                .unwrap_or_else(|| state.cwd.lock().unwrap().clone());
+            let cwd = match &sandbox_root {
+                Some(root) => root.clone(),
+                None => args
+                    .get("cwd")
+                    .and_then(|v| v.as_str())
+                    .map(PathBuf::from)
+                    .or_else(|| tab_defaults.map(|(_, c)| c))
+                    .unwrap_or_else(|| state.cwd.lock().unwrap().clone()),
+            };
 
             match execute_command_in_shell(&shell_profile, cmd, &cwd).await {
                 Ok(res) => {
+                    // A sandbox tab's folder never moves.
+                    let res = if sandbox_root.is_some() {
+                        mrt_core::pty::CommandExecutionResult { updated_cwd: None, ..res }
+                    } else {
+                        res
+                    };
                     let effective_cwd = res.updated_cwd.clone().unwrap_or_else(|| cwd.clone());
                     if res.updated_cwd.is_some() {
                         *state.cwd.lock().unwrap() = effective_cwd.clone();
@@ -2271,4 +2302,48 @@ pub async fn run_stdio_mcp_server(state: MrtMcpServerState) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod sandbox_tests {
+    use super::*;
+
+    async fn call(state: &MrtMcpServerState, name: &str, arguments: Value) -> (String, bool) {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!(1)),
+            method: "tools/call".into(),
+            params: Some(json!({ "name": name, "arguments": arguments })),
+        };
+        let resp = handle_mcp_jsonrpc(state, req).await.unwrap();
+        let result = resp.result.unwrap();
+        let text = result["content"][0]["text"].as_str().unwrap_or("").to_string();
+        (text, result["isError"].as_bool().unwrap_or(false))
+    }
+
+    #[tokio::test]
+    async fn sandbox_tabs_run_only_safe_commands_in_their_folder() {
+        let state = MrtMcpServerState::default();
+        let root = std::env::temp_dir().join(format!("mrt-sandbox-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        {
+            let mut tabs = state.tabs.lock().unwrap();
+            tabs[0].sandbox_root = Some(root.clone());
+            tabs[0].cwd = root.clone();
+        }
+        let moderate = "del notes.txt";
+        assert_eq!(assess_command(moderate).risk, RiskLevel::Moderate);
+        let (text, is_error) = call(&state, "mrt_run_command", json!({ "command": moderate, "tab_id": "0" })).await;
+        assert!(is_error);
+        assert!(text.contains("sandbox"), "{text}");
+
+        let (text, _) = call(&state, "mrt_run_command", json!({ "command": "echo inside", "tab_id": "0", "cwd": "/" })).await;
+        let summary: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(summary["exit_code"], 0, "{text}");
+        assert_eq!(summary["cwd"].as_str().unwrap(), root.display().to_string(), "the cwd argument is ignored");
+
+        let (text, _) = call(&state, "mrt_list_tabs", json!({})).await;
+        assert!(text.contains("\"sandbox\""), "{text}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

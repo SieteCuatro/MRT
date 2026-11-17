@@ -2431,6 +2431,7 @@ dependencies = [
  "mrt-ai",
  "mrt-core",
  "mrt-tools",
+ "reqwest",
  "serde",
  "serde_json",
  "similar",

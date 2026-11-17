@@ -2,7 +2,7 @@ use crate::theme::Palette;
 use crate::widgets::task_manager::{TaskManagerEvent, TaskManagerState};
 use crate::widgets::toolbox::ToolboxTab;
 use egui::{RichText, Ui};
-use mrt_mcp::McpHostManager;
+use mrt_mcp::{McpHostManager, McpTransportKind};
 use mrt_tools::{PortEntry, ProcessSnapshot};
 use serde_json::Value;
 
@@ -15,10 +15,15 @@ pub enum SidePanelEvent {
         tool_name: String,
         args_json: String,
     },
+    /// Connect an external MCP server. `command`/`args` are used for stdio, `url`/`headers`
+    /// (one `Name: value` per line) for Streamable HTTP.
     ConnectExternalMcp {
         name: String,
+        transport: McpTransportKind,
         command: String,
         args: String,
+        url: String,
+        headers: String,
     },
     RunHttpInspector {
         method: String,
@@ -49,6 +54,11 @@ pub struct SidePanelState {
     pub new_mcp_name: String,
     pub new_mcp_cmd: String,
     pub new_mcp_args: String,
+    pub new_mcp_transport: McpTransportKind,
+    pub new_mcp_url: String,
+    /// One `Name: value` header per line; masked in the UI unless `show_mcp_headers` is on.
+    pub new_mcp_headers: String,
+    pub show_mcp_headers: bool,
     pub mcp_tool_args_input: String,
     pub http_method: String,
     pub http_url: String,
@@ -70,6 +80,10 @@ impl Default for SidePanelState {
             new_mcp_name: "custom-mcp".to_string(),
             new_mcp_cmd: "mrt".to_string(),
             new_mcp_args: "--mcp-server".to_string(),
+            new_mcp_transport: McpTransportKind::Stdio,
+            new_mcp_url: "http://127.0.0.1:8000/mcp".to_string(),
+            new_mcp_headers: String::new(),
+            show_mcp_headers: false,
             mcp_tool_args_input: "{}".to_string(),
             http_method: "GET".to_string(),
             http_url: "https://httpbin.org/json".to_string(),
@@ -178,7 +192,7 @@ pub fn render_mcp_side_panel(
                         );
                     });
                     ui.label(
-                        RichText::new(&srv.config.command)
+                        RichText::new(srv.config.target_display())
                             .size(11.0)
                             .monospace()
                             .color(Palette::TEXT_SECONDARY),
@@ -260,6 +274,7 @@ pub fn render_mcp_side_panel(
             ];
             for (name, cmd, args) in presets {
                 if ui.small_button(name).on_hover_text(format!("Load preset: {cmd} {args}")).clicked() {
+                    state.new_mcp_transport = McpTransportKind::Stdio;
                     state.new_mcp_name = format!("{name}-server").to_lowercase();
                     state.new_mcp_cmd = cmd.to_string();
                     state.new_mcp_args = args.to_string();
@@ -270,29 +285,64 @@ pub fn render_mcp_side_panel(
         ui.add_space(8.0);
         ui.separator();
         ui.label(
-            RichText::new("Connect External Stdio Server")
+            RichText::new("Connect External Server")
                 .size(12.0)
                 .strong()
                 .color(Palette::TEXT_SECONDARY),
         );
         ui.horizontal(|ui| {
+            ui.label(RichText::new("Transport").size(11.5).color(Palette::TEXT_MUTED));
+            for kind in [McpTransportKind::Stdio, McpTransportKind::Http] {
+                ui.selectable_value(&mut state.new_mcp_transport, kind, kind.label());
+            }
+        });
+        ui.horizontal(|ui| {
             ui.label(RichText::new("Name").size(11.5).color(Palette::TEXT_MUTED));
             ui.text_edit_singleline(&mut state.new_mcp_name);
         });
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Cmd").size(11.5).color(Palette::TEXT_MUTED));
-            ui.text_edit_singleline(&mut state.new_mcp_cmd);
-        });
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Args").size(11.5).color(Palette::TEXT_MUTED));
-            ui.text_edit_singleline(&mut state.new_mcp_args);
-        });
+        match state.new_mcp_transport {
+            McpTransportKind::Stdio => {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Cmd").size(11.5).color(Palette::TEXT_MUTED));
+                    ui.text_edit_singleline(&mut state.new_mcp_cmd);
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Args").size(11.5).color(Palette::TEXT_MUTED));
+                    ui.text_edit_singleline(&mut state.new_mcp_args);
+                });
+            }
+            McpTransportKind::Http => {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("URL").size(11.5).color(Palette::TEXT_MUTED));
+                    ui.text_edit_singleline(&mut state.new_mcp_url);
+                });
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("Headers (one `Name: value` per line)")
+                            .size(11.5)
+                            .color(Palette::TEXT_MUTED),
+                    );
+                    ui.checkbox(&mut state.show_mcp_headers, "Show");
+                });
+                ui.add(
+                    egui::TextEdit::multiline(&mut state.new_mcp_headers)
+                        .font(egui::TextStyle::Monospace)
+                        .password(!state.show_mcp_headers)
+                        .hint_text("Authorization: Bearer <token>")
+                        .desired_rows(2)
+                        .desired_width(f32::INFINITY),
+                );
+            }
+        }
         ui.add_space(4.0);
         if ui.button("Connect Server").clicked() {
             event = Some(SidePanelEvent::ConnectExternalMcp {
                 name: state.new_mcp_name.clone(),
+                transport: state.new_mcp_transport,
                 command: state.new_mcp_cmd.clone(),
                 args: state.new_mcp_args.clone(),
+                url: state.new_mcp_url.clone(),
+                headers: state.new_mcp_headers.clone(),
             });
         }
     });

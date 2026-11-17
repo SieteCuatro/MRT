@@ -152,6 +152,33 @@ Inside the MRT GUI, open the **MCP Hub** side panel on the right:
    - `McpHostManager::connect_external_stdio_server` spawns the server (with `CREATE_NO_WINDOW` on Windows so no console window flashes), performs the `initialize` and `tools/list` handshake, and renders every discovered tool in the side panel.
    - Clicking **Invoke Tool** executes `tools/call` and renders the returned MCP content directly as a `CommandBlock` in your active terminal tab.
 
+### 5.1 Remote (HTTP) servers
+
+Besides `stdio`, the MCP Hub connects to remote MCP servers over **Streamable HTTP**. In the connect form, set **Transport** to `HTTP` and fill in a **Name**, the server's MCP endpoint **URL** (e.g., `https://example.com/mcp`) and optional **Headers**, one `Name: value` per line (e.g., `Authorization: Bearer <token>`). The headers box is masked unless **Show** is ticked. Errors such as a bad URL, an HTTP 401 or an invalid header line show as a red server row.
+
+External servers keep one **live session**: a stdio server keeps running between tool calls, and an HTTP server keeps its `Mcp-Session-Id`.
+
+#### Transports (`crates/mrt-mcp/src/transport.rs`)
+
+Both transports sit behind one `Transport` type; the session logic in `client.rs` (`McpClientSession`: request ids, `initialize`, paginated `*/list`, `tools/call`, 300 s request timeout) is shared.
+
+| | stdio | Streamable HTTP |
+| :--- | :--- | :--- |
+| Framing | One JSON-RPC message per line on the child's stdin/stdout. Non-JSON lines are skipped. | Every message is a `POST` to the single MCP endpoint with `Accept: application/json, text/event-stream`. |
+| Responses | The line whose `id` matches. | Either one `application/json` body or a `text/event-stream` (SSE) stream; MRT reads the stream until the matching response arrives. Notifications MRT sends get `202 Accepted`. |
+| Session | The child process. | `Mcp-Session-Id` from the `initialize` response, sent on every later request. `MCP-Protocol-Version: <negotiated version>` is sent on every request after `initialize`. |
+| Server-initiated messages | Read between responses. | Read from SSE responses and from the optional `GET` listen stream MRT opens after initialization (a `405` answer means the server has none). |
+| Session lost | Child exited → MRT respawns it and retries the call once. | `404` while a session id is set → MRT sends `DELETE`, re-initializes and retries the call once. |
+| Broken stream | — | An SSE response that closes before its result is resumed with `GET` + `Last-Event-ID`, honouring the server's `retry:` delay (up to 5 times). |
+
+MRT implements the Streamable HTTP transport of MCP revision [2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#streamable-http) and offers protocol version `2025-11-25` in `initialize` (the server may negotiate an older one). The newer stateless revision 2026-07-28 (no `initialize`, no `Mcp-Session-Id`) is not supported yet.
+
+Server requests: MRT answers `ping` with an empty result and declines everything else (sampling, roots, elicitation) with `-32601`. Notifications and requests are kept (newest 200 per server) and can be read with `McpHostManager::drain_server_events(server_name)`.
+
+**Header secrecy**: header values are never logged, never put into error messages, and `McpHttpHeader`'s `Debug` output prints `<redacted>`. The server row shows only the URL and header *names*. MRT refuses headers it manages itself (`Accept`, `Content-Type`, `Mcp-Session-Id`, `MCP-Protocol-Version`, `Last-Event-ID`, …).
+
+The HTTP transport is tested in [`crates/mrt-mcp/tests/http_transport.rs`](../crates/mrt-mcp/tests/http_transport.rs) against a small in-test HTTP MCP server. The tests cover JSON and SSE responses, session reuse and expiry, stream resumption and header redaction.
+
 ---
 
 ## 6. How Contributors Can Add a New Built-in MCP Tool

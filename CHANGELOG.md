@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### New
+- **Drag tabs** in the sidebar to reorder them.
+- **Resize split panes** by dragging the line between them (double-click to split evenly again); the size is saved with the layout.
+- **Scroll a program's history**: in `:tui` and pane programs, the wheel scrolls back through output that left the screen when the program does not use the mouse, a draggable scrollbar shows the position, and typing returns to the live screen.
 - **Icon**: `mrt.exe` has MRT's icon (the sidebar's `›_` mark) and version information in its file properties, the window and taskbar show it on Windows and Linux, and the Linux archive includes `mrt.desktop` and `mrt.png` for a menu entry. The icon is drawn by `scripts/icons/make_icon.py`.
 
 ### Notes

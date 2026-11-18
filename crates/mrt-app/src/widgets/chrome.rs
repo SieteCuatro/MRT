@@ -91,6 +91,9 @@ pub fn nav_row(
 pub struct TabRowResponse {
     pub selected: bool,
     pub close: bool,
+    /// The row started being dragged (to reorder the tabs).
+    pub drag_started: bool,
+    pub rect: Rect,
 }
 
 /// A two-line sidebar row for a terminal tab with a status dot and a close
@@ -106,7 +109,8 @@ pub fn tab_row(
 ) -> TabRowResponse {
     let width = ui.available_width();
     let height = if compact { 40.0 } else { 46.0 };
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), Sense::click_and_drag());
+    let drag_started = response.drag_started();
     row_background(ui, rect, &response, active);
     let time = ui.input(|i| i.time);
     let painter = ui.painter();
@@ -136,6 +140,8 @@ pub fn tab_row(
         return TabRowResponse {
             selected: response.clicked(),
             close: false,
+            drag_started,
+            rect,
         };
     }
 
@@ -219,6 +225,8 @@ pub fn tab_row(
     TabRowResponse {
         selected: response.clicked() && !close,
         close,
+        drag_started,
+        rect,
     }
 }
 

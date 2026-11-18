@@ -28,10 +28,10 @@ MRT already covers much of this: vertical tab sidebar, scrollback search, key ta
 
 ## Milestone 8 — Tabs, windows and scrolling
 
-- **Drag tabs.** Reorder tabs by dragging them in the sidebar, as Mosaic tiles already can.
+- **Drag tabs.** *(implemented: drag a row in the sidebar; a line shows the drop position)* Reorder tabs by dragging them in the sidebar, as Mosaic tiles already can.
 - **Several windows.** Open a second window (egui viewports) and move a tab to another window or into a new one. *Done when:* a tab moved to a new window keeps its shell, blocks and running command.
-- **Scrollbars and smooth scrolling.** A scrollbar for the TUI grid's scrollback (blocks already scroll), and smooth scrolling with the touchpad.
-- **Resize splits with the mouse.** Drag the divider between panes.
+- **Scrollbars and smooth scrolling.** *(scrollbar implemented: over a program's screen, draggable, and the wheel scrolls its history when the program does not take the mouse; smooth touchpad scrolling is still open)* A scrollbar for the TUI grid's scrollback (blocks already scroll), and smooth scrolling with the touchpad.
+- **Resize splits with the mouse.** *(implemented: drag the divider, double-click to reset; saved in the layout)* Drag the divider between panes.
 
 ## Milestone 9 — Text input
 

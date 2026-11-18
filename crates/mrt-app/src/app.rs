@@ -777,6 +777,8 @@ pub struct MrtGuiApp {
     pub(crate) palette_window: u32,
     /// The settings window (`settings.rs`).
     pub(crate) settings: crate::settings::SettingsState,
+    /// Hosts from `~/.ssh/config`, read each time the Command Palette opens.
+    pub(crate) ssh_hosts: Vec<mrt_core::ssh_config::SshHost>,
     /// One screen emulator per agent PTY and the transcript bytes it has read.
     pub(crate) agent_screens: HashMap<Uuid, (TerminalEmulator, usize)>,
     /// The session host that runs tab commands (`None` until connected, in tests, or
@@ -1086,6 +1088,7 @@ impl MrtGuiApp {
             pending_window_closes: Vec::new(),
             palette_window: 0,
             settings: Default::default(),
+            ssh_hosts: Vec::new(),
             agent_screens: HashMap::new(),
             session_host: Arc::new(std::sync::Mutex::new(None)),
             host_blocks: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
@@ -6623,6 +6626,7 @@ impl MrtGuiApp {
         // Universal Command Palette (Ctrl+K / Ctrl+P), in the window it was opened in.
         if self.show_command_palette && !palette_was_open {
             self.palette_window = self.current_window;
+            self.ssh_hosts = mrt_core::ssh_config::load_ssh_hosts();
         }
         if self.show_command_palette && self.palette_window == self.current_window {
             let mut close_palette = false;
@@ -6782,6 +6786,27 @@ impl MrtGuiApp {
                                         }
                                         if palette_row(ui, icon, title, cmd).clicked() {
                                             cmd_to_run = Some(cmd.to_string());
+                                            close_palette = true;
+                                        }
+                                    }
+                                }
+                                // Hosts from ~/.ssh/config: open a remote tab (`:ssh <alias>`).
+                                let ssh_rows: Vec<(String, String)> = self
+                                    .ssh_hosts
+                                    .iter()
+                                    .map(|h| (format!("SSH to {}", h.alias), h.target()))
+                                    .filter(|(title, target)| matches(title, &format!("{target} ssh")))
+                                    .collect();
+                                if !ssh_rows.is_empty() {
+                                    section_label(ui, "   SSH hosts");
+                                    for (title, target) in ssh_rows {
+                                        results += 1;
+                                        let cmd = format!(":ssh {}", title.trim_start_matches("SSH to "));
+                                        if first_cmd.is_none() && first_action.is_none() && first_shell.is_none() {
+                                            first_cmd = Some(cmd.clone());
+                                        }
+                                        if palette_row(ui, "⇄", &title, &target).clicked() {
+                                            cmd_to_run = Some(cmd);
                                             close_palette = true;
                                         }
                                     }

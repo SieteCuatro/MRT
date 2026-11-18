@@ -12,6 +12,7 @@ pub mod shell_integration;
 pub mod term;
 pub mod theme_file;
 pub mod shell_session;
+pub mod ssh_config;
 pub mod vt;
 pub mod worktree;
 

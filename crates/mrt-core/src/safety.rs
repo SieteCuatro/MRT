@@ -90,6 +90,8 @@ pub fn assess_command(command: &str) -> SafetyAssessment {
         ("git push --force", "Overwrites remote Git commit history"),
         ("git push -f", "Overwrites remote Git commit history"),
         ("git clean -fd", "Permanently deletes untracked files and directories"),
+        ("worktree remove --force", "Deletes a git worktree folder together with its uncommitted changes"),
+        ("worktree remove -f", "Deletes a git worktree folder together with its uncommitted changes"),
         ("kubectl delete", "Deletes Kubernetes cluster resources"),
         ("terraform destroy", "Destroys managed cloud infrastructure"),
         ("shutdown", "Initiates system shutdown or reboot"),
@@ -105,6 +107,16 @@ pub fn assess_command(command: &str) -> SafetyAssessment {
                 requires_approval: true,
             };
         }
+    }
+
+    // `-D` and `-d` differ only in case, so this one looks at the command as typed.
+    if lower.contains("git ") && lower.contains("branch") && (command.contains(" -D") || lower.contains("--delete --force")) {
+        return SafetyAssessment {
+            command: command.to_string(),
+            risk: RiskLevel::Critical,
+            reason: "Deletes a git branch even when its commits are not merged anywhere".to_string(),
+            requires_approval: true,
+        };
     }
 
     if let Some((risk, reason)) = assess_service_control(&lower) {
@@ -133,7 +145,22 @@ pub fn assess_command(command: &str) -> SafetyAssessment {
         ("chmod 777", "Grants world-writable permissions"),
         ("curl ", "Performs outbound network transfer"),
         ("invoke-webrequest", "Performs outbound network request"),
+        ("gh pr create", "Opens a pull request on GitHub"),
     ];
+
+    let git_moderate = match git_subcommand(&lower) {
+        Some("push") => Some("Publishes commits to a remote repository"),
+        Some("merge") => Some("Merges another branch into the checked-out branch"),
+        _ => None,
+    };
+    if let Some(explanation) = git_moderate {
+        return SafetyAssessment {
+            command: command.to_string(),
+            risk: RiskLevel::Moderate,
+            reason: explanation.to_string(),
+            requires_approval: false,
+        };
+    }
 
     for (pattern, explanation) in moderate_rules {
         if lower.contains(pattern) {
@@ -152,6 +179,26 @@ pub fn assess_command(command: &str) -> SafetyAssessment {
         reason: "Standard command execution".to_string(),
         requires_approval: false,
     }
+}
+
+/// The git subcommand of a (lower-cased) command line, skipping git's own options
+/// such as `-C <folder>` and `-c key=value`: `git -C repo merge x` gives `merge`.
+fn git_subcommand(lower: &str) -> Option<&str> {
+    let mut words = lower.split_whitespace().skip_while(|w| {
+        let w = w.trim_matches('"');
+        !(w == "git" || w == "git.exe" || w.ends_with("/git") || w.ends_with("\\git.exe"))
+    });
+    words.next()?;
+    while let Some(word) = words.next() {
+        match word {
+            "-c" | "-C" | "--git-dir" | "--work-tree" | "--namespace" => {
+                words.next();
+            }
+            w if w.starts_with('-') => {}
+            w => return Some(w),
+        }
+    }
+    None
 }
 
 /// Process names whose termination can crash the session, log the user out, or destabilise
@@ -316,6 +363,23 @@ mod tests {
         // Mentions of "kill" outside command position are not process control.
         let g = assess_command("git commit -m \"kill the flaky test\"");
         assert_eq!(g.risk, RiskLevel::Safe);
+    }
+
+    #[test]
+    fn git_publishing_merging_and_discarding_are_rated() {
+        assert_eq!(assess_command("git push -u origin feat").risk, RiskLevel::Moderate);
+        assert_eq!(assess_command("gh pr create --fill").risk, RiskLevel::Moderate);
+        assert_eq!(assess_command("git -C repo merge --no-ff feat").risk, RiskLevel::Moderate);
+        assert_eq!(assess_command("git branch -D feat").risk, RiskLevel::Critical);
+        assert_eq!(assess_command("git branch --delete --force feat").risk, RiskLevel::Critical);
+        assert_eq!(assess_command("git branch -d feat").risk, RiskLevel::Safe, "-d refuses unmerged branches");
+        assert_eq!(assess_command("git worktree remove --force ../x").risk, RiskLevel::Critical);
+        assert_eq!(assess_command("git worktree remove ../x").risk, RiskLevel::Safe, "refuses with changes");
+        assert_eq!(assess_command("git status").risk, RiskLevel::Safe);
+        assert_eq!(assess_command(r#"git -C "C:\src\proj" push -u origin feat"#).risk, RiskLevel::Moderate);
+        assert_eq!(assess_command("git -c core.editor=true merge feat").risk, RiskLevel::Moderate);
+        assert_eq!(assess_command("git log --grep merge").risk, RiskLevel::Safe, "only the subcommand counts");
+        assert_eq!(assess_command("echo git push").risk, RiskLevel::Moderate, "conservative: git anywhere in the line");
     }
 
     #[test]

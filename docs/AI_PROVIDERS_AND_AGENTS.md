@@ -29,7 +29,11 @@ flowchart TD
 - `model` replaces the default model of the provider named in `provider`.
 - `ollama_endpoint` sets the Ollama URL, and `model` with `provider = "ollama"` enables Ollama without `OLLAMA_MODEL`.
 
-Environment variables win: keys come only from the environment, and `OLLAMA_MODEL` / `OLLAMA_HOST` override `model` / `ollama_endpoint`.
+Environment variables win: `OLLAMA_MODEL` / `OLLAMA_HOST` override `model` / `ollama_endpoint`, and an API key set in the environment is used before one in the keyring.
+
+### Keys in the OS keyring
+
+API keys never go in the config file. Besides the environment, MRT reads them from the OS keyring: Windows Credential Manager, the macOS Keychain, or the Secret Service on Linux (GNOME Keyring, KWallet). This way MRT started from a desktop launcher or the Start menu, without your shell's environment, still finds them. Store or remove a key in **Settings → API keys**; it is kept under the service `mrt` with the variable name as the account (`mrt` / `OPENAI_API_KEY`), so other keyring tools can see and delete it too. MRT reads each key from the keyring once (on a thread of its own, never inside an async task) and caches it until you store or remove one. `MRT_NO_KEYRING=1` turns the keyring off. The code is `mrt_ai::keys` (`lookup`, `key_source`, `store_api_key`, `delete_api_key`); `plan_ai_backends` gets `keys::lookup` as its variable source.
 
 ### Environment Variables Reference
 

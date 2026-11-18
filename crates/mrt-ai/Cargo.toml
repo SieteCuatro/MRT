@@ -13,3 +13,6 @@ serde_json.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
 tracing.workspace = true
+# API keys in the OS keyring: Windows Credential Manager, the macOS Keychain, or the
+# Secret Service over zbus (pure Rust, no libdbus) on Linux.
+keyring = { version = "3.6", default-features = false, features = ["windows-native", "apple-native", "async-secret-service", "tokio", "crypto-rust"] }

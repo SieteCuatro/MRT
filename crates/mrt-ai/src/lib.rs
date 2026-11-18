@@ -1,4 +1,5 @@
 pub mod assist;
+pub mod keys;
 pub mod usage;
 pub use assist::{run_assist, AssistOutcome, AssistStep, ASSIST_TOOLS};
 pub use usage::{format_usd, group_digits, set_ai_prices, usage_from_response, AiPrice, AiUsage};
@@ -52,7 +53,7 @@ pub async fn translate_nl_to_command(
 
     let system_prompt = build_system_prompt(cleaned_query, shell, cwd, mcp_tool_names);
 
-    let backends = plan_ai_backends(&|name| std::env::var(name).ok(), &ai_preferences());
+    let backends = plan_ai_backends(&crate::keys::lookup, &ai_preferences());
 
     // Every reply costs tokens, also one that was not usable.
     let mut usage = AiUsage::default();
@@ -170,10 +171,10 @@ impl AiBackend {
 
 const DEFAULT_OLLAMA_HOST: &str = "http://localhost:11434";
 
-/// Resolves which providers to try, in order, from environment variables (`env`)
-/// and the configuration preferences. Environment variables win over the config:
-/// keys come only from the environment, and `OLLAMA_MODEL` / `OLLAMA_HOST`
-/// override `ai.model` / `ai.ollama_endpoint` for Ollama.
+/// Resolves which providers to try, in order, from variables (`env`: the
+/// environment, then the OS keyring for API keys, see [`keys::lookup`]) and the
+/// configuration preferences. Variables win over the config: `OLLAMA_MODEL` /
+/// `OLLAMA_HOST` override `ai.model` / `ai.ollama_endpoint` for Ollama.
 pub fn plan_ai_backends(
     env: &dyn Fn(&str) -> Option<String>,
     preferences: &AiPreferences,

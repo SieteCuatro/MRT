@@ -285,7 +285,7 @@ where
     F: FnMut(String, Value) -> Fut,
     Fut: Future<Output = String>,
 {
-    let backends = plan_ai_backends(&|name| std::env::var(name).ok(), &ai_preferences());
+    let backends = plan_ai_backends(&crate::keys::lookup, &ai_preferences());
     run_assist_with(question, shell, cwd, &backends, &mut call_tool, &mut on_step).await
 }
 

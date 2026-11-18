@@ -41,6 +41,13 @@ pub struct SavedTab {
     /// Git worktree of a worktree tab.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<mrt_core::worktree::Worktree>,
+    /// The window the tab is in (0 = the main window).
+    #[serde(default, skip_serializing_if = "is_main_window")]
+    pub window: u32,
+}
+
+fn is_main_window(window: &u32) -> bool {
+    *window == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -95,6 +102,7 @@ impl MrtGuiApp {
                     remote: tab.remote.clone(),
                     sandbox: tab.sandbox_root.clone(),
                     worktree: tab.worktree.clone(),
+                    window: tab.window,
                     split: tab.secondary_pane.as_ref().and_then(|pane| {
                         let direction = match tab.split_direction {
                             SplitDirection::Horizontal => "horizontal",
@@ -140,6 +148,7 @@ impl MrtGuiApp {
                 }
                 // A worktree removed outside MRT leaves a normal tab.
                 tab.worktree = saved.worktree.clone().filter(|w| w.path.is_dir());
+                tab.window = saved.window;
                 if let Some(split) = &saved.split {
                     let direction = match split.direction.as_str() {
                         "vertical" => SplitDirection::Vertical,
@@ -159,6 +168,7 @@ impl MrtGuiApp {
         self.tabs = tabs;
         self.active_tab = layout.active_tab.min(self.tabs.len() - 1);
         self.mosaic = layout.mosaic;
+        self.reopen_saved_windows();
     }
 
     /// Saves the layout when it changed since the last save (checked every few
@@ -204,6 +214,7 @@ mod tests {
                     remote: None,
                     sandbox: None,
                     worktree: None,
+                    window: 0,
                     split: Some(SavedSplit { direction: "vertical".into(), shell: "no-such-shell".into(), cwd: dir.join("gone"), ratio: Some(0.7) }),
                 },
                 SavedTab {
@@ -215,6 +226,7 @@ mod tests {
                     split: None,
                     sandbox: None,
                     worktree: None,
+                    window: 3,
                 },
             ],
         };
@@ -225,8 +237,10 @@ mod tests {
 
         app.restore_layout(&loaded, &dir);
         assert_eq!(app.tabs.len(), 2);
-        assert_eq!(app.active_tab, 1);
+        assert_eq!(app.active_tab, 0, "the saved active tab is in another window; the main one shows its own");
         assert!(app.mosaic);
+        assert_eq!(app.tabs[1].window, 3, "the second tab was in its own window");
+        assert_eq!(app.windows.iter().map(|w| (w.id, w.active)).collect::<Vec<_>>(), vec![(3, app.tabs[1].id)]);
         assert_eq!(app.tabs[0].title, "build");
         assert_eq!(app.tabs[0].cwd, dir);
         assert_eq!(app.tabs[0].split_direction, SplitDirection::Vertical);

@@ -71,7 +71,45 @@ pub fn grid_dims(available: Vec2, cell: Vec2) -> (u16, u16) {
 /// `id` must be the same every frame for this terminal: egui hit-tests clicks against
 /// the widget rectangles of the previous frame by id, so an automatic id that shifts
 /// with the surrounding layout would make clicks miss the terminal.
+/// Where a smooth scroll of `lines` (positive = back into the history) leaves a view
+/// at `offset` whole lines plus `frac` of the next one, with `max` lines of history:
+/// the new whole lines and fraction. Touchpads send fractions of a line per event.
+pub fn smooth_scroll(offset: usize, frac: f32, lines: f32, max: usize) -> (usize, f32) {
+    let position = (offset as f32 + frac + lines).clamp(0.0, max as f32);
+    let whole = (position.floor() as usize).min(max);
+    let frac = if whole >= max { 0.0 } else { position - whole as f32 };
+    // Snap tiny remainders so the grid lines up with the cells again.
+    if frac < 0.01 {
+        (whole, 0.0)
+    } else if frac > 0.99 && whole < max {
+        (whole + 1, 0.0)
+    } else {
+        (whole, frac)
+    }
+}
+
+/// The view scrolled `shift` pixels further back than `snapshot` (smooth scrolling):
+/// rows move down by `shift` and `above`, the history line above the snapshot, shows
+/// at the top.
+#[derive(Clone, Copy, Default)]
+pub struct SmoothShift<'a> {
+    pub shift: f32,
+    pub above: Option<&'a [TermCell]>,
+}
+
 pub fn paint_terminal(ui: &mut Ui, id: egui::Id, snapshot: &TermSnapshot, font: &FontId, cell: Vec2, focused: bool) -> Response {
+    paint_terminal_shifted(ui, id, snapshot, font, cell, focused, SmoothShift::default())
+}
+
+pub fn paint_terminal_shifted(
+    ui: &mut Ui,
+    id: egui::Id,
+    snapshot: &TermSnapshot,
+    font: &FontId,
+    cell: Vec2,
+    focused: bool,
+    smooth: SmoothShift<'_>,
+) -> Response {
     let size = Vec2::new(cell.x * snapshot.cols as f32, cell.y * snapshot.rows as f32);
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let response = ui.interact(rect, id, Sense::click_and_drag());
@@ -81,8 +119,13 @@ pub fn paint_terminal(ui: &mut Ui, id: egui::Id, snapshot: &TermSnapshot, font: 
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, TERM_BG());
 
+    let origin = rect.top() + smooth.shift;
+    if let Some(row) = smooth.above.filter(|_| smooth.shift > 0.0) {
+        paint_row_backgrounds(&painter, row, rect.left(), origin - cell.y, cell);
+        paint_row_text(ui, &painter, row, rect.left(), origin - cell.y, cell, font);
+    }
     for (row_index, row) in snapshot.cells.iter().enumerate() {
-        let top = rect.top() + row_index as f32 * cell.y;
+        let top = origin + row_index as f32 * cell.y;
         paint_row_backgrounds(&painter, row, rect.left(), top, cell);
         paint_row_text(ui, &painter, row, rect.left(), top, cell, font);
     }
@@ -91,7 +134,7 @@ pub fn paint_terminal(ui: &mut Ui, id: egui::Id, snapshot: &TermSnapshot, font: 
     if cursor.visible && cursor.row < snapshot.rows && cursor.col < snapshot.cols {
         let cell_at = snapshot.cell(cursor.row, cursor.col);
         let width = if cell_at.is_some_and(|c| c.wide) { 2.0 } else { 1.0 };
-        let min = Pos2::new(rect.left() + cursor.col as f32 * cell.x, rect.top() + cursor.row as f32 * cell.y);
+        let min = Pos2::new(rect.left() + cursor.col as f32 * cell.x, origin + cursor.row as f32 * cell.y);
         let cursor_rect = Rect::from_min_size(min, Vec2::new(cell.x * width, cell.y));
         let color = Palette::ACCENT_TEXT();
         if !focused {
@@ -319,6 +362,23 @@ fn draw_text(ui: &Ui, painter: &egui::Painter, text: &str, pos: Pos2, style: Cel
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn smooth_scroll_moves_by_fractions_and_clamps() {
+        use super::smooth_scroll;
+        // A touchpad sends a third of a line three times: one line in all.
+        let (mut offset, mut frac) = (0, 0.0);
+        for _ in 0..3 {
+            (offset, frac) = smooth_scroll(offset, frac, 1.0 / 3.0, 100);
+        }
+        assert_eq!((offset, frac), (1, 0.0));
+        let (offset, frac) = smooth_scroll(5, 0.0, 0.5, 100);
+        assert_eq!(offset, 5);
+        assert!((frac - 0.5).abs() < 1e-4);
+        assert_eq!(smooth_scroll(5, 0.5, -0.5, 100), (5, 0.0));
+        assert_eq!(smooth_scroll(1, 0.2, -3.0, 100), (0, 0.0), "the live screen is the bottom");
+        assert_eq!(smooth_scroll(99, 0.5, 4.0, 100), (100, 0.0), "the oldest line is the top");
+    }
+
     #[test]
     fn scrollbar_thumb_follows_the_view() {
         use super::{scrollbar_offset, scrollbar_thumb};

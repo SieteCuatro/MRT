@@ -176,13 +176,20 @@ impl CommandNotifier {
         self.unseen.get(&tab_id).copied().unwrap_or(0)
     }
 
+    /// [`observe_with`](Self::observe_with) for a single window.
+    #[cfg(test)]
+    pub fn observe(&mut self, tabs: &[TerminalTab], view: ViewState) -> Vec<Notice> {
+        self.observe_with(tabs, view, &[])
+    }
+
     /// Records blocks that finished since the last call, updates badges, and returns
     /// the notifications to send. Blocks present on the first call are never announced.
-    pub fn observe(&mut self, tabs: &[TerminalTab], view: ViewState) -> Vec<Notice> {
+    /// `also_visible` are tabs on screen in MRT's other windows.
+    pub fn observe_with(&mut self, tabs: &[TerminalTab], view: ViewState, also_visible: &[Uuid]) -> Vec<Notice> {
         let mut notices = Vec::new();
         let mut total = 0;
         for (idx, tab) in tabs.iter().enumerate() {
-            let visible = view.tab_visible(idx);
+            let visible = view.tab_visible(idx) || also_visible.contains(&tab.id);
             for block in all_blocks(tab) {
                 total += 1;
                 let Some(exit_code) = block.exit_code else {
@@ -223,17 +230,20 @@ impl CommandNotifier {
 
     /// Per-frame hook: sends notifications for newly finished commands and returns the
     /// index of a tab to switch to when the user clicked one.
-    pub fn update(&mut self, ctx: &egui::Context, tabs: &[TerminalTab], active_tab: usize, mosaic: bool) -> Option<usize> {
+    /// `also_visible`: tabs shown in MRT's other windows.
+    pub fn update(&mut self, ctx: &egui::Context, tabs: &[TerminalTab], active_tab: usize, mosaic: bool, also_visible: &[Uuid]) -> Option<usize> {
+        // Focused: any MRT window has the keyboard and is not minimized.
         let window_focused = ctx.input(|i| {
             let viewport = i.viewport();
-            viewport.focused.unwrap_or(true) && !viewport.minimized.unwrap_or(false)
+            let main = viewport.focused.unwrap_or(true) && !viewport.minimized.unwrap_or(false);
+            main || i.raw.viewports.values().any(|v| v.focused == Some(true) && !v.minimized.unwrap_or(false))
         });
         let view = ViewState {
             window_focused,
             active_tab,
             mosaic,
         };
-        for notice in self.observe(tabs, view) {
+        for notice in self.observe_with(tabs, view, also_visible) {
             self.deliver(ctx, notice);
         }
         let clicked = self.click_rx.try_iter().last()?;
@@ -478,6 +488,15 @@ mod tests {
         finish(&mut tabs[1].blocks[0], 0, 60_000);
         assert!(n.observe(&tabs, mosaic).is_empty());
         assert_eq!(n.unseen(tabs[1].id), 0);
+
+        // A tab shown in another window is visible too.
+        tabs.push(tab("C"));
+        tabs[2].blocks.push(running("cargo test"));
+        let main_only = view(true, 0);
+        n.observe_with(&tabs, main_only, &[tabs[2].id]);
+        finish(&mut tabs[2].blocks[0], 0, 60_000);
+        assert!(n.observe_with(&tabs, main_only, &[tabs[2].id]).is_empty());
+        assert_eq!(n.unseen(tabs[2].id), 0);
     }
 
     #[test]

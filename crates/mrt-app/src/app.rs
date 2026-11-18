@@ -237,6 +237,9 @@ pub struct PendingSafetyApproval {
     pub cwd: PathBuf,
     /// `Some` when the approval stops processes instead of running a shell command.
     pub kill: Option<PendingKill>,
+    /// `Some` when the approval throws a worktree away (`:worktree discard`): the tab
+    /// closes, then MRT removes the folder and deletes the branch itself.
+    pub worktree_discard: Option<mrt_core::worktree::Worktree>,
 }
 
 /// A `:top` block that is refreshed in place until stopped.
@@ -1467,6 +1470,7 @@ impl MrtGuiApp {
                     assessment: plan.assessment,
                     shell,
                     cwd,
+                    worktree_discard: None,
                 });
             }
         }
@@ -2906,6 +2910,7 @@ impl MrtGuiApp {
                     shell,
                     cwd,
                     kill: None,
+                    worktree_discard: None,
                 });
                 return;
             }
@@ -2937,6 +2942,7 @@ impl MrtGuiApp {
             let args: Vec<&str> = raw_input.trim_start_matches(":worktree").split_whitespace().collect();
             match args.as_slice() {
                 [] | ["list"] => self.list_worktrees(tab_id, &cwd, &raw_input),
+                [action @ ("review" | "merge" | "pr" | "discard")] => self.worktree_action(tab_id, &shell, &raw_input, action),
                 [branch] => self.open_worktree_tab(tab_id, &cwd, &raw_input, branch, None),
                 [branch, base] => self.open_worktree_tab(tab_id, &cwd, &raw_input, branch, Some(base)),
                 _ => self.push_block(
@@ -3063,6 +3069,10 @@ impl MrtGuiApp {
 
     fn approve_pending_command(&mut self) {
         if let Some(pending) = self.pending_safety.take() {
+            if let Some(worktree) = pending.worktree_discard {
+                self.discard_worktree(worktree);
+                return;
+            }
             if let Some(kill) = pending.kill {
                 if self.tabs.iter().any(|tab| tab.id == pending.tab_id) {
                     self.spawn_kill_execution(pending.tab_id, pending.cwd, pending.assessment.command, kill);
@@ -3204,6 +3214,7 @@ impl MrtGuiApp {
                 shell,
                 cwd,
                 kill: None,
+                worktree_discard: None,
             });
             return;
         }
@@ -4670,6 +4681,115 @@ impl MrtGuiApp {
         });
     }
 
+    /// `:worktree review|merge|pr|discard` in a worktree tab. Review is read-only;
+    /// merge, pr and discard always wait for the Safety Gate, whatever the config.
+    fn worktree_action(&mut self, tab_id: Uuid, shell: &ShellProfile, command: &str, action: &str) {
+        let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) else { return };
+        let cwd = tab.cwd.clone();
+        let Some(worktree) = tab.worktree.clone() else {
+            self.push_block(tab_id, Self::process_error_block(command, &cwd, "This is not a worktree tab; open one with :worktree <branch>."));
+            return;
+        };
+        let base = match mrt_core::worktree::base_branch(&worktree) {
+            Ok(base) => base,
+            Err(e) => {
+                self.push_block(tab_id, Self::process_error_block(command, &cwd, e));
+                return;
+            }
+        };
+        let ask = |command: String, risk: RiskLevel, reason: String, discard: Option<mrt_core::worktree::Worktree>| PendingSafetyApproval {
+            tab_id,
+            assessment: SafetyAssessment { command, risk, reason, requires_approval: true },
+            shell: shell.clone(),
+            cwd: worktree.path.clone(),
+            kill: None,
+            worktree_discard: discard,
+        };
+        match action {
+            "review" => {
+                let block = match mrt_core::worktree::review(&worktree) {
+                    Ok(review) => {
+                        let mut block = CommandBlock::new_completed(
+                            command,
+                            PROCESS_BLOCK_SHELL,
+                            cwd.display().to_string(),
+                            review.render(&worktree),
+                            0,
+                            0,
+                        );
+                        block.structured = StructuredOutput::RawText;
+                        block
+                    }
+                    Err(e) => Self::process_error_block(command, &cwd, e),
+                };
+                self.push_block(tab_id, block);
+            }
+            "merge" => match mrt_core::worktree::merge_blocker(&worktree, &base) {
+                Some(why) => self.push_block(tab_id, Self::process_error_block(command, &cwd, why)),
+                None => {
+                    self.pending_safety = Some(ask(
+                        mrt_core::worktree::merge_command(&worktree, &shell.kind),
+                        RiskLevel::Moderate,
+                        format!("Merges {} into {base} in the main checkout ({}).", worktree.branch, worktree.repo.display()),
+                        None,
+                    ));
+                }
+            },
+            "pr" => match mrt_core::worktree::pr_blocker(&worktree, &shell.kind) {
+                Some(why) => self.push_block(tab_id, Self::process_error_block(command, &cwd, why)),
+                None => {
+                    self.pending_safety = Some(ask(
+                        mrt_core::worktree::pr_command(&worktree, &base, &shell.kind),
+                        RiskLevel::Moderate,
+                        format!("Pushes {} to origin and opens a pull request into {base} on GitHub.", worktree.branch),
+                        None,
+                    ));
+                }
+            },
+            _ => {
+                self.pending_safety = Some(ask(
+                    mrt_core::worktree::discard_command(&worktree),
+                    RiskLevel::Critical,
+                    format!(
+                        "Closes this tab, deletes the folder {} with any uncommitted changes, and deletes the branch {} with any commits not merged elsewhere.",
+                        worktree.path.display(),
+                        worktree.branch
+                    ),
+                    Some(worktree.clone()),
+                ));
+            }
+        }
+    }
+
+    /// After the Safety Gate approved `:worktree discard`: closes the worktree's tab
+    /// (ending its shell, which on Windows would hold the folder), then removes the
+    /// folder and the branch, and reports in the tab that becomes active.
+    fn discard_worktree(&mut self, worktree: mrt_core::worktree::Worktree) {
+        if let Some(id) = self.tabs.iter().find(|t| t.worktree.as_ref().is_some_and(|w| w.path == worktree.path)).map(|t| t.id) {
+            if self.tabs.len() == 1 {
+                // Never leave the window without a tab: open one in the main checkout first.
+                let shell_idx = self.tabs[0].active_shell_idx;
+                self.tabs.push(TerminalTab::new("Tab 1".into(), shell_idx, worktree.repo.clone()));
+            }
+            self.close_terminal_now(id);
+        }
+        let tab_id = self.tabs[self.active_tab].id;
+        let cwd = self.tabs[self.active_tab].cwd.clone();
+        let command = format!(":worktree discard {}", worktree.branch);
+        let block = match mrt_core::worktree::discard(&worktree) {
+            Ok(()) => CommandBlock::new_completed(
+                &command,
+                PROCESS_BLOCK_SHELL,
+                cwd.display().to_string(),
+                format!("Discarded {}: removed {} and deleted the branch.", worktree.branch, worktree.path.display()),
+                0,
+                0,
+            ),
+            Err(e) => Self::process_error_block(&command, &cwd, format!("Could not discard {}: {e}", worktree.branch)),
+        };
+        self.push_block(tab_id, block);
+    }
+
     /// `:worktree list`: the worktrees of the repository that contains `cwd`.
     fn list_worktrees(&mut self, tab_id: Uuid, cwd: &std::path::Path, command: &str) {
         let block = match mrt_core::worktree::list(cwd) {
@@ -5201,6 +5321,7 @@ impl MrtGuiApp {
 
     /// Header: working directory, command palette pill and layout controls.
     fn render_header(&mut self, ctx: &egui::Context) {
+        let mut worktree_action = None;
         egui::TopBottomPanel::top("mrt_header")
             .frame(
                 egui::Frame::none()
@@ -5259,7 +5380,29 @@ impl MrtGuiApp {
                         }
                     });
                 });
+                // A worktree tab gets a second row with its branch and the review actions.
+                if let Some(wt) = self.tabs.get(self.active_tab).and_then(|t| t.worktree.as_ref()) {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        let base = wt.base.clone().unwrap_or_else(|| "base".into());
+                        chip(ui, &format!("{} → {base}", wt.branch), Palette::BG_OVERLAY(), Palette::TEXT_BODY());
+                        ui.add_space(4.0);
+                        for (label, action, hint) in [
+                            ("Review", "review", "Commits, files and diff against the base branch (:worktree review)"),
+                            ("Merge", "merge", "Merge into the base branch in the main checkout (:worktree merge)"),
+                            ("Open PR", "pr", "Push the branch and open a pull request with gh (:worktree pr)"),
+                            ("Discard", "discard", "Delete the worktree folder and the branch (:worktree discard)"),
+                        ] {
+                            if ui.small_button(label).on_hover_text(hint).clicked() {
+                                worktree_action = Some(format!(":worktree {action}"));
+                            }
+                        }
+                    });
+                }
             });
+        if let Some(command) = worktree_action {
+            self.submit_input(Some(command), false);
+        }
     }
 }
 
@@ -6449,6 +6592,7 @@ mod tests {
             shell: shell.clone(),
             cwd: cwd.clone(),
             kill: None,
+            worktree_discard: None,
         });
         app.tabs.push(TerminalTab::new("Other".into(), 0, cwd.join("missing-directory")));
         app.active_tab = 1;
@@ -6476,6 +6620,7 @@ mod tests {
             shell: app.shells[0].clone(),
             cwd: app.tabs[0].cwd.clone(),
             kill: None,
+            worktree_discard: None,
         });
         app.approve_pending_command();
         assert_eq!(app.busy_count, 0);
@@ -7320,6 +7465,103 @@ error: test failed
         app.process_mcp_ui_commands();
         assert_eq!(app.tabs[app.active_tab].input_line, "");
         assert_eq!(app.tabs[app.active_tab].blocks.last().unwrap().command, ":worktree list");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn worktree_review_merge_and_discard_go_through_the_safety_gate() {
+        let git_ok = std::process::Command::new("git").arg("--version").output().is_ok_and(|o| o.status.success());
+        if !git_ok {
+            return;
+        }
+        let base = std::env::temp_dir().join(format!("mrt-wt-review-{}", Uuid::new_v4().simple()));
+        let repo = base.join("proj");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let mut cmd = std::process::Command::new("git");
+            cmd.current_dir(dir).args(args);
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x08000000);
+            }
+            let out = cmd.output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.email", "test@example.invalid"]);
+        git(&repo, &["config", "user.name", "MRT test"]);
+        git(&repo, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(repo.join("a.txt"), "a").unwrap();
+        git(&repo, &["add", "a.txt"]);
+        git(&repo, &["commit", "-q", "-m", "first"]);
+
+        let mut app = MrtGuiApp::new();
+        app.tabs[0].cwd = repo.clone();
+        // Not a worktree tab yet.
+        app.submit_input(Some(":worktree review".into()), false);
+        assert_eq!(app.tabs[0].blocks.last().unwrap().exit_code, Some(1));
+
+        app.submit_input(Some(":worktree feat-review".into()), false);
+        let wt = app.tabs[1].worktree.clone().expect("worktree tab");
+        assert_eq!(wt.base.as_deref(), Some("main"));
+        std::fs::write(wt.path.join("b.txt"), "from the worktree").unwrap();
+        git(&wt.path, &["add", "b.txt"]);
+        git(&wt.path, &["commit", "-q", "-m", "add b"]);
+
+        app.submit_input(Some(":worktree review".into()), false);
+        let review = app.tabs[1].blocks.last().unwrap().clone();
+        assert_eq!(review.exit_code, Some(0));
+        assert!(review.plain_output.contains("feat-review → main: 1 commit ahead"), "{}", review.plain_output);
+        assert!(review.plain_output.contains("add b") && review.plain_output.contains("+from the worktree"), "{}", review.plain_output);
+
+        // No origin remote: Open PR explains instead of asking.
+        app.submit_input(Some(":worktree pr".into()), false);
+        assert!(app.pending_safety.is_none());
+        assert!(app.tabs[1].blocks.last().unwrap().plain_output.contains("origin"));
+
+        // Merge always asks, even with the gate off, then really merges.
+        app.config_state.config.safety.enabled = false;
+        app.submit_input(Some(":worktree merge".into()), false);
+        let pending = app.pending_safety.as_ref().expect("merge waits for approval");
+        assert_eq!(pending.assessment.risk, RiskLevel::Moderate);
+        assert!(pending.assessment.command.contains("merge --no-ff --no-edit feat-review"), "{}", pending.assessment.command);
+        let merge_command = pending.assessment.command.clone();
+        app.approve_pending_command();
+        let start = Instant::now();
+        let merged = loop {
+            if let Some(block) = app.tabs[1].blocks.iter().find(|b| b.command == merge_command && b.exit_code.is_some()) {
+                break block.clone();
+            }
+            assert!(start.elapsed() < Duration::from_secs(60), "merge did not finish");
+            pump_one(&mut app);
+        };
+        assert_eq!(merged.exit_code, Some(0), "{}", merged.plain_output);
+        assert!(repo.join("b.txt").exists(), "merged into main");
+
+        // Merge refuses when the main checkout is on another branch.
+        git(&repo, &["checkout", "-q", "-b", "other"]);
+        app.submit_input(Some(":worktree merge".into()), false);
+        assert!(app.pending_safety.is_none());
+        assert!(app.tabs[1].blocks.last().unwrap().plain_output.contains("check out main"));
+        git(&repo, &["checkout", "-q", "main"]);
+
+        // Discard is Critical; cancelling keeps everything, approving removes the
+        // tab, the folder and the branch.
+        std::fs::write(wt.path.join("draft.txt"), "x").unwrap();
+        app.submit_input(Some(":worktree discard".into()), false);
+        assert_eq!(app.pending_safety.as_ref().unwrap().assessment.risk, RiskLevel::Critical);
+        app.deny_pending_command();
+        assert!(wt.path.exists());
+        app.submit_input(Some(":worktree discard".into()), false);
+        app.approve_pending_command();
+        assert_eq!(app.tabs.len(), 1);
+        assert!(!wt.path.exists());
+        assert!(!git(&repo, &["branch", "--list", "feat-review"]).contains("feat-review"));
+        let notice = app.tabs[0].blocks.last().unwrap();
+        assert_eq!(notice.exit_code, Some(0), "{}", notice.plain_output);
+        app.shell_pool.close_tab(app.tabs[0].id);
         let _ = std::fs::remove_dir_all(&base);
     }
 

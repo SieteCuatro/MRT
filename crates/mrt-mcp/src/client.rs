@@ -780,7 +780,7 @@ mod tests {
         let me = std::process::id();
 
         let list = host
-            .call_tool("mrt-native-mcp", "mrt_list_processes", json!({ "filter": me.to_string(), "limit": 5 }))
+            .call_tool("mrt-native-mcp", "mrt_list_processes", json!({ "filter": me.to_string(), "limit": 200 }))
             .await
             .unwrap();
         assert!(!list.is_error, "{}", list.content[0].text);

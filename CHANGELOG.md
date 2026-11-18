@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.3.1 — 2026-11-18
 
 ### New
 - **Drag tabs** in the sidebar to reorder them.
@@ -10,6 +10,7 @@
 
 ### Notes
 - The User Guide explains the Windows SmartScreen warning ("Windows protected your PC") that unsigned downloads show, and how to run MRT anyway.
+- The Windows and Linux archives were built locally (Linux with `scripts/release/build-linux.sh`, glibc 2.17 or newer) and tested on Windows and Linux. There are no macOS archives, and the binaries are not code-signed yet.
 
 ## v0.3.0 — 2026-11-18
 

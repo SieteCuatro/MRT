@@ -97,6 +97,32 @@ pub struct TerminalTab {
     pub worktree: Option<mrt_core::worktree::Worktree>,
     /// Tokens and estimated cost of the AI requests made from this tab (`#`, `:assist`).
     pub ai_usage: mrt_ai::AiUsage,
+    /// Share of the tab the first pane takes in a split (0.15–0.85), set by dragging
+    /// the divider.
+    pub split_ratio: f32,
+}
+
+/// The split ratio for the divider dragged to `pos` along a split `length` long that
+/// starts at `start`; kept between 15% and 85% so neither pane disappears.
+pub fn split_ratio_at(pos: f32, start: f32, length: f32) -> f32 {
+    if length <= 0.0 {
+        return 0.5;
+    }
+    ((pos - start) / length).clamp(0.15, 0.85)
+}
+
+/// The tab a dragged tab is dropped on: the row under `y`, or the first or last row
+/// when the pointer is above or below the list.
+pub fn tab_drop_target(rows: &[(Uuid, egui::Rect)], y: f32) -> Option<Uuid> {
+    let first = rows.first()?;
+    let last = rows.last()?;
+    if y < first.1.top() {
+        return Some(first.0);
+    }
+    if y > last.1.bottom() {
+        return Some(last.0);
+    }
+    rows.iter().find(|(_, r)| y >= r.top() && y <= r.bottom()).map(|(id, _)| *id).or(Some(last.0))
 }
 
 /// Closing a worktree tab waits for this prompt: remove the worktree folder or keep it.
@@ -131,6 +157,7 @@ impl TerminalTab {
             sandbox_root: None,
             worktree: None,
             ai_usage: mrt_ai::AiUsage::default(),
+            split_ratio: 0.5,
         }
     }
 
@@ -463,8 +490,12 @@ impl ActiveTuiSession {
         }
         let bytes = crate::term_input::encode_events(&events, &modes);
         if !bytes.is_empty() {
-            // Typing replaces the selection, as in other terminals.
+            // Typing replaces the selection and returns to the live screen, as in
+            // other terminals.
             self.selection = None;
+            if self.grid_copy.is_none() {
+                self.term.set_view_offset(0);
+            }
             let _ = self.pty.send_bytes(&bytes);
         }
         bytes
@@ -511,6 +542,26 @@ impl ActiveTuiSession {
                 cell,
                 focused && window_focused,
             );
+        // Scrollbar over the right edge when there is history to scroll (not on the
+        // alternate screen, which has none).
+        let history = self.term.scrollback_len();
+        let scrollbar = (history > 0 && !snapshot.modes.alt_screen).then(|| {
+            egui::Rect::from_min_max(egui::pos2(response.rect.right() - SCROLLBAR_WIDTH, response.rect.top()), response.rect.max)
+        });
+        if let Some(track) = scrollbar {
+            let rows = self.term.rows() as usize;
+            let id = egui::Id::new(("tui_scrollbar", self.tab_id, self.pane));
+            let bar = ui.interact(track, id, egui::Sense::click_and_drag());
+            let (top, height) = crate::widgets::term_view::scrollbar_thumb(track.height(), rows, history, self.term.view_offset());
+            let thumb = egui::Rect::from_min_size(egui::pos2(track.left() + 2.0, track.top() + top), egui::vec2(track.width() - 4.0, height));
+            if let Some(pos) = bar.interact_pointer_pos().filter(|_| bar.dragged() || bar.clicked()) {
+                let y = pos.y - track.top() - height / 2.0;
+                self.term.set_view_offset(crate::widgets::term_view::scrollbar_offset(track.height(), rows, history, y));
+            }
+            let active = bar.hovered() || bar.dragged() || self.term.view_offset() > 0;
+            let color = if active { Palette::TEXT_SECONDARY() } else { Palette::BORDER_FAINT() };
+            ui.painter().rect_filled(thumb, 3.0, color);
+        }
         // Copy mode status: the search being typed or its position, else the keys.
         if self.grid_copy.is_some() {
             let status = self.grid_search.status();
@@ -566,7 +617,12 @@ impl ActiveTuiSession {
                     },
                 )
             });
-            forward_tui_mouse(ctx, self, response.rect, cell, &snapshot.modes);
+            // The scrollbar strip is not part of the grid for the mouse.
+            let mut mouse_rect = response.rect;
+            if scrollbar.is_some() {
+                mouse_rect.max.x -= SCROLLBAR_WIDTH;
+            }
+            forward_tui_mouse(ctx, self, mouse_rect, cell, &snapshot.modes);
         }
         if let Some(selection) = &self.selection {
             crate::widgets::term_view::paint_selection(ui, response.rect, cell, snapshot.cols, snapshot.rows, selection);
@@ -677,6 +733,8 @@ pub struct MrtGuiApp {
     pub(crate) show_agent_ptys: bool,
     /// Tokens and estimated cost of every AI request since MRT started.
     pub(crate) ai_usage_session: mrt_ai::AiUsage,
+    /// The sidebar tab being dragged to a new place.
+    pub(crate) dragging_tab: Option<Uuid>,
     /// One screen emulator per agent PTY and the transcript bytes it has read.
     pub(crate) agent_screens: HashMap<Uuid, (TerminalEmulator, usize)>,
     /// The session host that runs tab commands (`None` until connected, in tests, or
@@ -978,6 +1036,7 @@ impl MrtGuiApp {
             quit_requested: false,
             show_agent_ptys: false,
             ai_usage_session: mrt_ai::AiUsage::default(),
+            dragging_tab: None,
             agent_screens: HashMap::new(),
             session_host: Arc::new(std::sync::Mutex::new(None)),
             host_blocks: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
@@ -4072,6 +4131,9 @@ fn draw_mosaic_tui(ui: &mut egui::Ui, tab_id: Uuid, screen: &mrt_core::TermSnaps
 /// Sends this frame's mouse input over the TUI grid (`rect`, cells of `cell` size) to
 /// the program: presses, releases and motion as mouse reports when it asked for them,
 /// and the wheel as mouse reports or, on an alternate screen with mode 1007, as arrows.
+/// Width of the scrollbar drawn over a program's screen.
+const SCROLLBAR_WIDTH: f32 = 10.0;
+
 fn forward_tui_mouse(ctx: &egui::Context, session: &mut ActiveTuiSession, rect: egui::Rect, cell: egui::Vec2, modes: &mrt_core::TermModes) {
     use crate::term_input::{encode_mouse, wheel_as_arrows, MouseAction, MouseButton};
     let (cols, rows) = (session.term.cols(), session.term.rows());
@@ -4147,8 +4209,15 @@ fn forward_tui_mouse(ctx: &egui::Context, session: &mut ActiveTuiSession, rect: 
                     let up = session.wheel_accum > 0.0;
                     session.wheel_accum -= session.wheel_accum.signum();
                     let action = if up { MouseAction::WheelUp } else { MouseAction::WheelDown };
-                    let bytes = encode_mouse(action, col, row, modifiers, modes).or_else(|| wheel_as_arrows(up, modes));
-                    out.extend(bytes.unwrap_or_default());
+                    match encode_mouse(action, col, row, modifiers, modes).or_else(|| wheel_as_arrows(up, modes)) {
+                        Some(bytes) => out.extend(bytes),
+                        // The program does not take the wheel: scroll the history.
+                        None if !modes.alt_screen => {
+                            let offset = session.term.view_offset() as i64 + if up { 3 } else { -3 };
+                            session.term.set_view_offset(offset.max(0) as usize);
+                        }
+                        None => {}
+                    }
                 }
             }
             _ => {}
@@ -5156,6 +5225,7 @@ impl MrtGuiApp {
         let mut new_tab_shell = None;
         let mut tab_to_close = None;
         let mut select_tab = None;
+        let mut move_tab = None;
         let mut toggle_history = false;
         let mut toggle_runbooks = false;
         let new_tab_popup = egui::Id::new("mrt_new_tab_popup");
@@ -5265,6 +5335,8 @@ impl MrtGuiApp {
                         *name_counts.entry(folder_of(tab)).or_default() += 1;
                     }
                 }
+                let mut tab_rows: Vec<(Uuid, egui::Rect)> = Vec::new();
+                let mut drag_started = None;
                 for (idx, tab) in self.tabs.iter().enumerate() {
                     let shell = self
                         .shells
@@ -5297,10 +5369,41 @@ impl MrtGuiApp {
                         compact,
                     );
                     self.notifier.paint_badge(ui, badge_top, tab.id, compact);
+                    tab_rows.push((tab.id, row.rect));
+                    if row.drag_started {
+                        drag_started = Some(tab.id);
+                    }
                     if row.close {
                         tab_to_close = Some(tab.id);
                     } else if row.selected {
                         select_tab = Some(idx);
+                    }
+                }
+
+                // Dragging a tab: a line shows where it goes; releasing moves it there.
+                if let Some(id) = drag_started {
+                    self.dragging_tab = Some(id);
+                }
+                if let Some(source) = self.dragging_tab {
+                    let (pointer, released) = ctx.input(|i| (i.pointer.interact_pos(), i.pointer.any_released() || !i.pointer.any_down()));
+                    let target = pointer.and_then(|p| tab_drop_target(&tab_rows, p.y));
+                    if let Some((target, rect)) = target.and_then(|t| tab_rows.iter().find(|(id, _)| *id == t).copied()) {
+                        if target != source {
+                            let from = tab_rows.iter().position(|(id, _)| *id == source).unwrap_or(0);
+                            let to = tab_rows.iter().position(|(id, _)| *id == target).unwrap_or(0);
+                            // Moving down lands after the target row, moving up before it.
+                            let y = if to > from { rect.bottom() } else { rect.top() };
+                            ui.painter().hline(rect.x_range(), y, egui::Stroke::new(2.0_f32, Palette::ACCENT()));
+                        }
+                        ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+                        if released {
+                            self.dragging_tab = None;
+                            if target != source {
+                                move_tab = Some((source, target));
+                            }
+                        }
+                    } else if released {
+                        self.dragging_tab = None;
                     }
                 }
 
@@ -5384,6 +5487,9 @@ impl MrtGuiApp {
         }
         if let Some(id) = tab_to_close {
             self.close_terminal(id);
+        }
+        if let Some((source, target)) = move_tab {
+            self.move_terminal(source, target);
         }
         if toggle_history {
             self.show_history = !self.show_history;
@@ -5969,7 +6075,32 @@ impl eframe::App for MrtGuiApp {
 
             if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                 if tab.split_direction == SplitDirection::Horizontal && tab.secondary_pane.is_some() {
-                    ui.columns(2, |cols| {
+                    // Two columns with a divider between them that can be dragged.
+                    let full = ui.available_rect_before_wrap();
+                    let gap = 10.0;
+                    let width = (full.width() - gap).max(1.0);
+                    let left_w = (width * tab.split_ratio).round();
+                    let left = egui::Rect::from_min_size(full.min, egui::vec2(left_w, full.height()));
+                    let right = egui::Rect::from_min_max(egui::pos2(left.right() + gap, full.top()), full.max);
+                    let divider = egui::Rect::from_min_max(egui::pos2(left.right(), full.top()), egui::pos2(right.left(), full.bottom()));
+                    let handle = ui.interact(divider, egui::Id::new(("split_divider_h", tab.id)), egui::Sense::click_and_drag());
+                    if handle.hovered() || handle.dragged() {
+                        ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    }
+                    if let Some(pos) = handle.interact_pointer_pos().filter(|_| handle.dragged()) {
+                        tab.split_ratio = split_ratio_at(pos.x - gap / 2.0, full.left(), width);
+                    }
+                    if handle.double_clicked() {
+                        tab.split_ratio = 0.5;
+                    }
+                    let line = if handle.hovered() || handle.dragged() { Palette::ACCENT() } else { Palette::BORDER_FAINT() };
+                    ui.painter().vline(divider.center().x, divider.y_range(), egui::Stroke::new(2.0_f32, line));
+                    let mut cols = [
+                        ui.new_child(egui::UiBuilder::new().max_rect(left).layout(egui::Layout::top_down(egui::Align::Min))),
+                        ui.new_child(egui::UiBuilder::new().max_rect(right).layout(egui::Layout::top_down(egui::Align::Min))),
+                    ];
+                    ui.allocate_rect(full, egui::Sense::hover());
+                    {
                         // Left column: Primary pane
                         cols[0].group(|ui| {
                             ui.horizontal(|ui| {
@@ -6041,9 +6172,12 @@ impl eframe::App for MrtGuiApp {
                                 });
                             }
                         });
-                    });
+                    }
                 } else if tab.split_direction == SplitDirection::Vertical && tab.secondary_pane.is_some() {
-                    let half_h = (ui.available_height() / 2.0 - 10.0).max(100.0);
+                    // Pane headers, group margins and the divider take about 80 px.
+                    let usable = (ui.available_height() - 80.0).max(200.0);
+                    let top_h = (usable * tab.split_ratio).max(80.0);
+                    let bottom_h = (usable - top_h).max(80.0);
                     ui.group(|ui| {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("Pane 1 (Top)").strong().color(
@@ -6053,14 +6187,14 @@ impl eframe::App for MrtGuiApp {
                                 tab.active_pane_idx = 0;
                             }
                         });
-                        if let Some(clicked) = draw_pane_tui(ctx, ui, &mut self.pane_tuis, tab.id, 0, Some(half_h), pane_focus_allowed && tab.active_pane_idx == 0, window_focused, &exit_keys, tab.broadcast) {
+                        if let Some(clicked) = draw_pane_tui(ctx, ui, &mut self.pane_tuis, tab.id, 0, Some(top_h), pane_focus_allowed && tab.active_pane_idx == 0, window_focused, &exit_keys, tab.broadcast) {
                                 if clicked {
                                     tab.active_pane_idx = 0;
                                 }
                             } else {
                             egui::ScrollArea::vertical()
                             .id_salt("split_v_primary")
-                            .max_height(half_h)
+                            .max_height(top_h)
                             .stick_to_bottom(stick_to_end)
                             .show(ui, |ui| {
                                 let mut previous_runs = HashMap::new();
@@ -6077,7 +6211,17 @@ impl eframe::App for MrtGuiApp {
                             }
                     });
 
-                    ui.separator();
+                    // The divider between the panes: drag it to resize them.
+                    let (divider, handle) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 10.0), egui::Sense::click_and_drag());
+                    let handle = handle.on_hover_cursor(egui::CursorIcon::ResizeVertical);
+                    if handle.dragged() {
+                        tab.split_ratio = (tab.split_ratio + handle.drag_delta().y / usable).clamp(0.15, 0.85);
+                    }
+                    if handle.double_clicked() {
+                        tab.split_ratio = 0.5;
+                    }
+                    let line = if handle.hovered() || handle.dragged() { Palette::ACCENT() } else { Palette::BORDER_FAINT() };
+                    ui.painter().hline(divider.x_range(), divider.center().y, egui::Stroke::new(2.0_f32, line));
 
                     ui.group(|ui| {
                         let sec = tab.secondary_pane.as_mut().unwrap();
@@ -6089,14 +6233,14 @@ impl eframe::App for MrtGuiApp {
                                 tab.active_pane_idx = 1;
                             }
                         });
-                        if let Some(clicked) = draw_pane_tui(ctx, ui, &mut self.pane_tuis, tab.id, 1, Some(half_h), pane_focus_allowed && tab.active_pane_idx == 1, window_focused, &exit_keys, tab.broadcast) {
+                        if let Some(clicked) = draw_pane_tui(ctx, ui, &mut self.pane_tuis, tab.id, 1, Some(bottom_h), pane_focus_allowed && tab.active_pane_idx == 1, window_focused, &exit_keys, tab.broadcast) {
                                 if clicked {
                                     tab.active_pane_idx = 1;
                                 }
                             } else {
                             egui::ScrollArea::vertical()
                             .id_salt("split_v_secondary")
-                            .max_height(half_h)
+                            .max_height(bottom_h)
                             .stick_to_bottom(stick_to_end)
                             .show(ui, |ui| {
                                 if sec.blocks.is_empty() {
@@ -7388,6 +7532,36 @@ error: test failed
         assert!(session.grid_copy.is_none());
         assert_eq!(session.term.view_offset(), 0, "back to the live screen");
         let _ = session.pty.kill();
+    }
+
+    #[test]
+    fn split_dividers_and_dragged_tabs_land_where_the_pointer_is() {
+        assert_eq!(split_ratio_at(300.0, 100.0, 400.0), 0.5);
+        assert_eq!(split_ratio_at(110.0, 100.0, 400.0), 0.15, "a pane never shrinks away");
+        assert_eq!(split_ratio_at(900.0, 100.0, 400.0), 0.85);
+        assert_eq!(split_ratio_at(5.0, 0.0, 0.0), 0.5);
+
+        let ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
+        let rows: Vec<(Uuid, egui::Rect)> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (*id, egui::Rect::from_min_size(egui::pos2(0.0, 100.0 + 50.0 * i as f32), egui::vec2(200.0, 46.0))))
+            .collect();
+        assert_eq!(tab_drop_target(&rows, 160.0), Some(ids[1]));
+        assert_eq!(tab_drop_target(&rows, 10.0), Some(ids[0]), "above the list: first");
+        assert_eq!(tab_drop_target(&rows, 999.0), Some(ids[2]), "below the list: last");
+        assert_eq!(tab_drop_target(&rows, 148.0), Some(ids[2]), "in the gap between rows: the next one");
+        assert_eq!(tab_drop_target(&[], 10.0), None);
+
+        // Dropping the first tab on the last moves it to the end.
+        let mut app = MrtGuiApp::new();
+        let cwd = app.tabs[0].cwd.clone();
+        app.tabs.push(TerminalTab::new("b".into(), 0, cwd.clone()));
+        app.tabs.push(TerminalTab::new("c".into(), 0, cwd));
+        let (a, c) = (app.tabs[0].id, app.tabs[2].id);
+        app.move_terminal(a, c);
+        assert_eq!(app.tabs[2].id, a);
+        assert_eq!(app.tabs[0].title, "b");
     }
 
     #[test]

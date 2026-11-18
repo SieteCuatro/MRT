@@ -29,6 +29,25 @@ pub fn TERM_BG() -> Color32 {
 /// `glyph_width` is not enough: text layout rounds glyph positions, so a run of N
 /// characters can be wider than N × `glyph_width`, which pushed the last character of
 /// each row past the grid. Measuring a long run gives the real per-cell advance.
+/// The scrollbar thumb for a grid with `history` lines above `rows` visible ones,
+/// scrolled `offset` lines back: `(top, height)` within a track `track` pixels tall.
+pub fn scrollbar_thumb(track: f32, rows: usize, history: usize, offset: usize) -> (f32, f32) {
+    let total = (history + rows).max(1) as f32;
+    let height = (track * rows as f32 / total).clamp(24.0_f32.min(track), track);
+    let travel = track - height;
+    let from_top = if history == 0 { 1.0 } else { (history - offset.min(history)) as f32 / history as f32 };
+    (travel * from_top, height)
+}
+
+/// The scroll offset for a thumb dragged so its top is `y` pixels down the track:
+/// the inverse of [`scrollbar_thumb`].
+pub fn scrollbar_offset(track: f32, rows: usize, history: usize, y: f32) -> usize {
+    let (_, height) = scrollbar_thumb(track, rows, history, 0);
+    let travel = (track - height).max(1.0);
+    let from_top = (y / travel).clamp(0.0, 1.0);
+    history - (from_top * history as f32).round() as usize
+}
+
 pub fn cell_size(ui: &Ui, font: &FontId) -> Vec2 {
     const SAMPLE: usize = 100;
     ui.fonts(|fonts| {
@@ -300,6 +319,22 @@ fn draw_text(ui: &Ui, painter: &egui::Painter, text: &str, pos: Pos2, style: Cel
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scrollbar_thumb_follows_the_view() {
+        use super::{scrollbar_offset, scrollbar_thumb};
+        // 25 rows on screen, 75 in history: the thumb is a quarter of the track.
+        let (top, height) = scrollbar_thumb(400.0, 25, 75, 0);
+        assert_eq!((top, height), (300.0, 100.0), "live screen: thumb at the bottom");
+        assert_eq!(scrollbar_thumb(400.0, 25, 75, 75).0, 0.0, "oldest line: thumb at the top");
+        assert_eq!(scrollbar_thumb(400.0, 25, 75, 30).0, 180.0);
+        // Dragging is the inverse, clamped at both ends.
+        assert_eq!(scrollbar_offset(400.0, 25, 75, 180.0), 30);
+        assert_eq!(scrollbar_offset(400.0, 25, 75, -50.0), 75);
+        assert_eq!(scrollbar_offset(400.0, 25, 75, 999.0), 0);
+        // A huge history still leaves a thumb you can grab.
+        assert_eq!(scrollbar_thumb(400.0, 25, 1_000_000, 0).1, 24.0);
+    }
+
     use super::*;
 
     #[test]

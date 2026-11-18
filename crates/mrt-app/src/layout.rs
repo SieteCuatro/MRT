@@ -49,6 +49,9 @@ pub struct SavedSplit {
     pub direction: String,
     pub shell: String,
     pub cwd: PathBuf,
+    /// Share of the tab the first pane takes (0.5 when missing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ratio: Option<f32>,
 }
 
 /// `layout.json` in MRT's local data folder (next to the history database).
@@ -102,6 +105,7 @@ impl MrtGuiApp {
                             direction: direction.into(),
                             shell: shell_id(pane.active_shell_idx),
                             cwd: pane.cwd.clone(),
+                            ratio: Some(tab.split_ratio),
                         })
                     }),
                 })
@@ -142,6 +146,7 @@ impl MrtGuiApp {
                         _ => SplitDirection::Horizontal,
                     };
                     tab.split(direction, shells_count);
+                    tab.split_ratio = split.ratio.unwrap_or(0.5).clamp(0.15, 0.85);
                     if let Some(pane) = tab.secondary_pane.as_mut() {
                         pane.active_shell_idx = shell_idx(&split.shell);
                         pane.cwd = folder(&split.cwd);
@@ -199,7 +204,7 @@ mod tests {
                     remote: None,
                     sandbox: None,
                     worktree: None,
-                    split: Some(SavedSplit { direction: "vertical".into(), shell: "no-such-shell".into(), cwd: dir.join("gone") }),
+                    split: Some(SavedSplit { direction: "vertical".into(), shell: "no-such-shell".into(), cwd: dir.join("gone"), ratio: Some(0.7) }),
                 },
                 SavedTab {
                     id: None,
@@ -225,6 +230,7 @@ mod tests {
         assert_eq!(app.tabs[0].title, "build");
         assert_eq!(app.tabs[0].cwd, dir);
         assert_eq!(app.tabs[0].split_direction, SplitDirection::Vertical);
+        assert_eq!(app.tabs[0].split_ratio, 0.7, "the divider position is restored");
         let pane = app.tabs[0].secondary_pane.as_ref().unwrap();
         assert_eq!(pane.cwd, dir, "a folder that no longer exists falls back");
         assert_eq!(app.tabs[1].remote.as_deref(), Some(&["me@box".to_string()][..]));

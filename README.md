@@ -6,6 +6,9 @@ Dual-licensed under the [MIT License or The Unlicense](LICENSE), at your option.
 
 ## Features
 
+- **Tabs, Windows and Splits**: drag tabs to reorder them, move a tab to another window (`:window new`, or right-click it) without stopping what it runs, and drag the line between split panes to resize them.
+- **Settings Window**: `Ctrl+,` opens a searchable form for the common settings, keybindings with their conflicts, and API keys stored in the OS keyring (Windows Credential Manager, macOS Keychain, Secret Service).
+- **Agents Working in Parallel**: `:worktree <branch>` gives each agent its own git worktree tab, with Review, Merge, Open PR and Discard through the Safety Gate; `mrt send --idle` queues work to a tab that is free, and every AI request shows its tokens and estimated cost (`:ai-usage`).
 - **Polyglot Shell Support & Split Panes**: Auto-discovers and runs PowerShell (`pwsh`, `powershell`), Windows Batch (`cmd.exe`), Bash, Git Bash, WSL, Zsh, Fish, Nushell, and `sh` in multi-tab, horizontal/vertical split panes (`:split-h`, `:split-v`, `:unsplit`), or Mosaic split-grid layouts, with a synchronized Folder Explorer.
 - **Interactive Terminal Mode (TUI)**: Run full-screen interactive console programs (`vim`, `nano`, `htop`, `lazygit`, `less`, etc., or via `:tui <cmd>`) in an overlay that emulates a real terminal screen (`alacritty_terminal`): cursor movement, colors, the alternate screen, and resizing with the window. Keys and the mouse are sent the xterm way (arrows, function keys, Ctrl/Alt+letter, bracketed paste, clicks and the wheel), and you can drag to select and copy text. In a split tab the program runs inside the active pane instead; `Ctrl+Q` exits, and the session is saved as a command block.
 - **Inline Images**: iTerm2 (`imgcat`), kitty graphics and Sixel images show inside command blocks.
@@ -14,7 +17,7 @@ Dual-licensed under the [MIT License or The Unlicense](LICENSE), at your option.
 - **Your Own Actions and Hooks**: `[[actions]]` add commands and key bindings to the Command Palette, `[[hooks]]` run scripts when commands finish or fail, copy mode selects output with the keyboard, and `:broadcast` types into every pane.
 - **Sessions that Outlive the Window, from Anywhere**: closing the window keeps running work alive (`mrt` brings it back), upgrades never cut running sessions, and `mrt share` / `mrt attach` let paired computers and phones follow and drive your tabs over an end-to-end encrypted connection.
 - **Scriptable from the Shell**: `mrt list`, `mrt send`, `mrt capture` and `mrt split` control the open window (with `--json`), and the window's tabs, splits and folders are restored at the next start.
-- **Remote Tabs over SSH**: `:ssh user@host` opens a tab whose commands run on the host with blocks, exit codes and folder tracking; the shell integration is typed into the remote Bash/Zsh, so nothing is installed there.
+- **Remote Tabs over SSH**: `:ssh user@host` opens a tab whose commands run on the host with blocks, exit codes and folder tracking; the shell integration is typed into the remote Bash/Zsh, so nothing is installed there. The hosts in `~/.ssh/config` are listed in the Command Palette.
 - **Fast with Huge Output**: output is parsed incrementally while it streams, each block keeps a bounded tail (`terminal.max_block_output_mb`) and draws its last lines with **Show more**, and the idle window barely repaints. `Ctrl+F` finds text in every block.
 - **Fonts**: pick any installed font or a font file, with fallbacks for icons and symbols (`terminal.font_family`, `terminal.font_fallback`).
 - **Persistent Shells**: Each tab keeps one long-lived shell with OSC 133 shell integration (PowerShell, CMD, Bash, Git Bash, Zsh, Fish, sh), so `cd`, variables, aliases and activated environments carry over from one command to the next, and **Stop** interrupts the command without losing the shell. WSL and Nushell, a busy shell, or `terminal.persistent_shell = false` run each command in its own process instead.
@@ -45,11 +48,13 @@ Dual-licensed under the [MIT License or The Unlicense](LICENSE), at your option.
   - **MCP Host**: Connects to external MCP servers over `stdio` or Streamable HTTP (with custom headers such as `Authorization`) from the GUI's MCP Hub panel, with one-click presets for common servers (Filesystem, Git, Memory Graph, SQLite, Fetch).
 - **Safety Approval Gate**: Classifies commands (`Safe`, `Moderate`, `Critical`) across Bash, PowerShell, CMD/Batch, Git, SQL, Kubernetes, and process control (`kill`, `pkill`, `taskkill`, `Stop-Process`, …); prompts for confirmation in the GUI for `Critical` and process-control commands and blocks unapproved `Critical` commands over MCP.
 - **Provider-Agnostic AI with Streaming**: Translates natural-language prompts (`#` or `?`) into shell-specific commands and streams AI error diagnoses token-by-token directly into failed blocks, with an offline heuristic fallback when no API key is configured.
-- **Automated CI/CD Distribution**: Multi-platform release matrix in GitHub Actions publishing ready-to-use binaries for Windows (x86_64 ZIP), Linux (tar.gz, glibc 2.17 or newer), and macOS (Intel & Apple Silicon tar.gz).
+- **Releases**: each [GitHub Release](https://github.com/SieteCuatro/MRT/releases) has a Windows (x86_64 ZIP) and a Linux (x86_64 tar.gz, glibc 2.17 or newer) archive. An optional update check (`[updates] check = true`) tells you when a newer one is out. macOS archives are not published yet.
 
 ## Quick Start
 
-Prebuilt binaries for Windows, Linux, and macOS are attached to each [GitHub Release](https://github.com/SieteCuatro/MRT/releases). To build from source you need a stable Rust toolchain; on Linux also install the GUI build dependencies listed in the [User Guide](docs/USER_GUIDE.md#1-install).
+New to MRT? Start with the [Getting Started guide](docs/GETTING_STARTED.md) ([en español](docs/GUIA_DE_INICIO.md)).
+
+Prebuilt binaries for Windows and Linux are attached to each [GitHub Release](https://github.com/SieteCuatro/MRT/releases). To build from source you need a stable Rust toolchain; on Linux also install the GUI build dependencies listed in the [User Guide](docs/USER_GUIDE.md#1-install).
 
 ```bash
 git clone https://github.com/SieteCuatro/MRT.git
@@ -89,6 +94,7 @@ MRT checks the API keys in the environment, or stored in the OS keyring from **S
 
 ## Documentation
 
+- [Getting Started](docs/GETTING_STARTED.md) / [Guía de inicio](docs/GUIA_DE_INICIO.md) — A step-by-step tour for new users, in English and Spanish.
 - [User Guide](docs/USER_GUIDE.md) — Install, prompt commands, keyboard shortcuts, data files, and troubleshooting.
 - [Architecture Overview](docs/ARCHITECTURE.md) — 5-crate workspace design and data flow.
 - [MCP Guide](docs/MCP_GUIDE.md) — Tool schemas, resources, Live GUI Bridge, and client setup.

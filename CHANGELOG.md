@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### New
+- **Getting Started guides**: a step-by-step tour for new users in [English](docs/GETTING_STARTED.md) and [Spanish](docs/GUIA_DE_INICIO.md), linked from the README and the User Guide.
+
+### Fixed
+- Switching to a tab that is in another window (`mrt_switch_tab`, or a restored layout whose active tab was in another window) now shows it in that window, instead of falling back to the main window's first tab.
+
+### Docs
+- README, Architecture, Core & Shells and the User Guide list the features and modules added since v0.4.0, and no longer mention macOS archives that are not published.
+
 ## v0.5.0 — 2026-11-18
 
 Settings and secrets: [Milestone 10 of the roadmap](ROADMAP.md) is complete.

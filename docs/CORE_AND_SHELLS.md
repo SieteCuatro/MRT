@@ -10,13 +10,19 @@
 | :--- | :--- | :--- |
 | **`pty`** | [`src/pty.rs`](../crates/mrt-core/src/pty.rs) | Multi-shell discovery (`ShellProfile`), per-command & streaming shell execution (`execute_command_in_shell`, `execute_command_streaming`, `execute_command_streaming_with_pid`), and streaming `portable-pty` sessions (`InteractivePty`). |
 | **`vt`** | [`src/vt.rs`](../crates/mrt-core/src/vt.rs) | ANSI / VT100 escape sequence state machine powered by `vte`, producing styled `AnsiSpan` vectors and stripped plain text, plus OSC 7 / OSC 8 / OSC 52 handling. |
-| **`term`** | [`src/term.rs`](../crates/mrt-core/src/term.rs) | Terminal grid emulator (`TerminalEmulator`) wrapping `alacritty_terminal`: turns PTY bytes into a screen of cells with cursor, scrollback, alternate screen, title, input modes, and replies for the PTY. Library only; not wired into the GUI yet. |
+| **`term`** | [`src/term.rs`](../crates/mrt-core/src/term.rs) | Terminal grid emulator (`TerminalEmulator`) wrapping `alacritty_terminal`: turns PTY bytes into a screen of cells with cursor, scrollback, alternate screen, title, input modes, and replies for the PTY. Draws full-screen programs in the TUI overlay and split panes, and agents' PTYs (`:agents`). |
 | **`links`** | [`src/links.rs`](../crates/mrt-core/src/links.rs) | Detects plain-text URLs and `path:line[:col]` locations in output, classifies OSC 8 targets, and lists the URL schemes MRT will open. |
 | **`block`** | [`src/block.rs`](../crates/mrt-core/src/block.rs) | `CommandBlock` data model and automatic `StructuredOutput` detector (JSON, CSV/TSV Tables, Markdown, HTTP results). |
 | **`safety`** | [`src/safety.rs`](../crates/mrt-core/src/safety.rs) | Cross-shell destructive command classifier (`RiskLevel::Safe`, `Moderate`, `Critical`) powering the MRT Safety Approval Gate. |
 | **`activity`** | [`src/activity.rs`](../crates/mrt-core/src/activity.rs) | Per-tab `ActivityTracker` (idle, running, progress, waiting for input, succeeded, failed): parses `OSC 9;4` progress and MRT's `OSC 678;status=…` sequence, recognises agent CLIs (`claude`, `codex`, `gemini`, `aider`), and applies conservative "waiting for input" heuristics. See the [User Guide](USER_GUIDE.md#tab-activity-status). |
 | **`shell_integration`** | [`src/shell_integration.rs`](../crates/mrt-core/src/shell_integration.rs) | OSC 133 / OSC 7 parsers and shell integration scripts for Bash, Git Bash, sh, Zsh, Fish, PowerShell, and CMD. |
 | **`shell_session`** | [`src/shell_session.rs`](../crates/mrt-core/src/shell_session.rs) | Persistent shell per tab (`ShellSession`): one long-lived PTY shell with the integration script injected, `run(command)` handles that stream output and resolve with exit code, duration and cwd, and a fallback signal when markers never arrive. |
+| **`images`**, **`grid_images`** | [`src/images.rs`](../crates/mrt-core/src/images.rs), [`src/grid_images.rs`](../crates/mrt-core/src/grid_images.rs) | Inline images (iTerm2, kitty, Sixel) decoded with size limits, for blocks and for the terminal grid. |
+| **`theme_file`** | [`src/theme_file.rs`](../crates/mrt-core/src/theme_file.rs) | Theme files (MRT, Windows Terminal, Alacritty, Ghostty, iTerm2) and the process-wide ANSI palette. |
+| **`config`** | [`src/config.rs`](../crates/mrt-core/src/config.rs) | `config.toml` + `.mrt.toml` schema, layered merge and the debounced watcher. |
+| **`worktree`** | [`src/worktree.rs`](../crates/mrt-core/src/worktree.rs) | Git worktrees for worktree tabs: create, list, review, merge / PR command lines, discard. |
+| **`pty_host`** | [`src/pty_host.rs`](../crates/mrt-core/src/pty_host.rs) | PTYs owned by the session host and their event stream. |
+| **`ssh_config`** | [`src/ssh_config.rs`](../crates/mrt-core/src/ssh_config.rs) | `Host` aliases of `~/.ssh/config` (with `Include`) for the Command Palette. |
 | **`platform`** | [`src/platform.rs`](../crates/mrt-core/src/platform.rs) | OS-specific environment hydration (macOS/Linux login `$PATH` loader and Windows `AttachConsole` CLI helper). |
 
 ---

@@ -206,6 +206,7 @@ Images appear where they were printed, scaled down to the block's width and at m
 - Full-screen programs typed in a remote tab (`vim`, `htop`, `less`…) open in the TUI overlay through `ssh -tt host 'cd <folder> && vim …'`.
 - Commands in a remote tab never run on this computer. If the connection fails, the block explains why; the next command tries to connect again.
 - The Explorer shows local folders only.
+- The Command Palette lists the hosts in `~/.ssh/config` under **SSH hosts** (each `Host` name without wildcards, with its user, host name and port; `Include` files are read too). Choosing one runs `:ssh <name>`, so `ssh` applies the rest of that host's settings.
 
 ### Notifications for long commands
 

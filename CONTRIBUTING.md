@@ -34,6 +34,7 @@ RUSTFLAGS="-D warnings" cargo test --workspace --locked
 | You changed… | Update |
 | :--- | :--- |
 | A prompt command (`:http`, `:ps`, …), keyboard shortcut, or data file | [docs/USER_GUIDE.md](docs/USER_GUIDE.md), plus [docs/TOOLBOX.md](docs/TOOLBOX.md) for tools |
+| Something a new user meets in the first steps (install, the prompt, tabs, AI setup, settings) | [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) and its Spanish version [docs/GUIA_DE_INICIO.md](docs/GUIA_DE_INICIO.md) |
 | An MCP tool or resource (name, arguments, count) | [docs/MCP_GUIDE.md](docs/MCP_GUIDE.md), the tool count in [README.md](README.md), [AGENTS.md](AGENTS.md), and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | Shells, the PTY engine, block classification, or Safety Gate rules | [docs/CORE_AND_SHELLS.md](docs/CORE_AND_SHELLS.md) |
 | AI providers, models, or environment variables | [docs/AI_PROVIDERS_AND_AGENTS.md](docs/AI_PROVIDERS_AND_AGENTS.md) and the table in [README.md](README.md) |

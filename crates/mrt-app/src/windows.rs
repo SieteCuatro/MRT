@@ -105,6 +105,14 @@ impl MrtGuiApp {
             self.tabs.push(TerminalTab::new(format!("Tab {} ({label})", self.tabs.len() + 1), shell_idx, cwd));
         }
         if self.tabs.get(self.active_tab).is_none_or(|t| t.window != 0) {
+            // A tab of another window was made active (`mrt_switch_tab`, a restored
+            // layout): that window shows it, and the main window keeps one of its own.
+            if let Some(tab) = self.tabs.get(self.active_tab) {
+                let (id, window) = (tab.id, tab.window);
+                if let Some(extra) = self.windows.iter_mut().find(|w| w.id == window) {
+                    extra.active = id;
+                }
+            }
             self.active_tab = self.tabs.iter().position(|t| t.window == 0).unwrap_or(0);
         }
         if self.palette_window != 0 && !self.windows.iter().any(|w| w.id == self.palette_window) {

@@ -7824,6 +7824,14 @@ error: test failed
         assert_eq!(app.windows[0].active, app.tabs[2].id);
         assert_eq!(app.tabs[app.active_tab].window, 0);
 
+        // Switching to a tab of the other window (as `mrt_switch_tab` does) shows it there.
+        let other = app.tabs[2].id;
+        app.windows[0].active = app.tabs.iter().find(|t| t.window == app.windows[0].id && t.id != other).map_or(other, |t| t.id);
+        app.active_tab = 2;
+        app.normalize_windows();
+        assert_eq!(app.windows[0].active, other);
+        assert_eq!(app.tabs[app.active_tab].window, 0);
+
         // `:window main` from that window's prompt brings the tab back.
         app.current_window = app.windows[0].id;
         app.active_tab = 2;

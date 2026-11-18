@@ -60,6 +60,7 @@ flowchart LR
 - **Terminal grid (`term.rs`, `grid_images.rs`)**: `TerminalEmulator` wraps `alacritty_terminal` for full-screen programs and places image sequences (taken out by `GraphicsSplitter`) in the grid.
 - **Blocks (`block.rs`)**: `CommandBlock` with incremental `append_output`, a per-block output limit, inline images, and structured classification (JSON, CSV/TSV tables, Markdown, HTTP).
 - **Safety Gate (`safety.rs`)**: Safe / Moderate / Critical across shells, Git, SQL, Kubernetes, process control and service control.
+- **SSH hosts (`ssh_config.rs`)**: the `Host` aliases of `~/.ssh/config` (with `Include` files) for the Command Palette.
 - **Activity (`activity.rs`), links (`links.rs`), configuration (`config.rs`), platform helpers (`platform.rs`)**: tab status from OSC 9;4 / OSC 678 / heuristics; URL and `path:line` detection; layered `config.toml` + `.mrt.toml` with a watcher (`[[actions]]`, `[[hooks]]`, keybindings, theme, fonts, limits); login-shell `PATH`, console attach and the data folder.
 
 ### 2. `mrt-tools` — network tools and Task Manager
@@ -77,10 +78,13 @@ flowchart LR
 ### 4. `mrt-ai` — AI providers and assistance
 - `lib.rs`: Gemini, Anthropic, OpenAI, xAI, DeepSeek, OpenRouter, Ollama and the offline engine; translation and streamed error diagnosis.
 - `assist.rs`: `:assist` multi-step investigations over MRT's read-only MCP tools (model-driven, or a built-in offline plan).
+- `usage.rs`: token use and estimated cost of every request (`[ai.prices]`).
+- `keys.rs`: API keys from the environment, then the OS keyring (`keyring`: Windows Credential Manager, macOS Keychain, Secret Service over zbus).
 
 ### 5. `mrt-app` — the GUI and the command-line entry points
 - `main.rs` dispatches `mrt` subcommands (`agent`, `list|send|capture|split|quick|quit`, `share|pair|attach`, `server`, `session-host`, `--mcp-server`) before starting the window.
-- `app.rs`: tabs, panes, Mosaic, blocks, TUI overlay and pane programs, Safety Gate modal, Command Palette, remote and sandbox tabs, `:assist`, background mode and reattach.
+- `app.rs`: tabs, panes, Mosaic, blocks, TUI overlay and pane programs, Safety Gate modal, Command Palette, remote, sandbox and worktree tabs, `:assist`, background mode and reattach.
+- `windows.rs` (extra windows as egui viewports, each drawing its own tabs), `settings.rs` (the settings window, writing `config.toml` with `toml_edit`), `update_check.rs` (the opt-in GitHub Releases check).
 - `session_host.rs` (the host process and its client), `shell_pool.rs` (in-window persistent shells and SSH sessions), `layout.rs`, `cli.rs`, `remote_cli.rs`, `server.rs`.
 - `keymap.rs`, `copy_mode.rs`, `hooks.rs`, `find.rs`, `fonts.rs`, `theme.rs`, `config_runtime.rs`, `notifications.rs`, `history.rs`, `term_input.rs`, and `widgets/` (block view with tail rendering and images, term view with grid images, links, activity, toolbox, task manager, side panels).
 
@@ -91,5 +95,5 @@ flowchart LR
 - **Tests**: `RUSTFLAGS="-D warnings" cargo test --workspace --locked` runs unit tests in every crate and `crates/mrt-app/tests/e2e_processes.rs`, which starts real `mrt` processes (`server`, `share`, `pair`, `--host`, `session-host`) with separate `MRT_DATA_DIR`s. `scripts/e2e/` drives the real window on an offscreen X server (crash and reattach, feature tour).
 - **CI (`.github/workflows/ci.yml`)**: the same test command on Ubuntu, Windows and macOS for pushes to `main` and pull requests. *Currently disabled in the repository settings (no GitHub Actions minutes); run the tests locally before merging.*
 - **Benchmarks (`.github/workflows/bench.yml`)**: manual `criterion` throughput suite; see [PERFORMANCE.md](PERFORMANCE.md).
-- **Release (`.github/workflows/release.yml`)**: on `v*` tags, release builds for Windows (ZIP), Linux and macOS Intel / Apple Silicon (tar.gz) attached to the GitHub Release. *Currently disabled (no Actions minutes): v0.2.0 was published with Windows and Linux archives built locally (`cargo build --release --locked`).*
+- **Release (`.github/workflows/release.yml`)**: on `v*` tags, release builds for Windows (ZIP), Linux and macOS Intel / Apple Silicon (tar.gz) attached to the GitHub Release. *Currently disabled (no Actions minutes): every release since v0.2.0 is published with Windows and Linux archives built locally (`cargo build --release --locked` on Windows, `scripts/release/build-linux.sh` for Linux; see [CONTRIBUTING.md](../CONTRIBUTING.md#building-release-archives)).*
 - **Icon and packaging metadata**: `scripts/icons/make_icon.py` draws the icon (the sidebar's `›_` brand mark) into `crates/mrt-app/assets/mrt.ico` (embedded in `mrt.exe` by `crates/mrt-app/build.rs` with `mrt.rc`, together with the version information), `assets/mrt-256.png` (the window and taskbar icon, `ViewportBuilder::with_icon`) and `packaging/linux/mrt.png`. `packaging/linux/mrt.desktop` (`Icon=mrt`, `StartupWMClass=mrt`, matching the window's app id) and the icon ship in the Linux archive; `packaging/macos/Info.plist` is not used yet.

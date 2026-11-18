@@ -7,14 +7,14 @@ How to install and use **Modern Rust Terminal (MRT)** day to day: the prompt, ev
 ## 1. Install
 
 ### Prebuilt binaries
-Every `v*` tag publishes archives on the [GitHub Releases](https://github.com/SieteCuatro/MRT/releases) page:
+Each release on the [GitHub Releases](https://github.com/SieteCuatro/MRT/releases) page has:
 
 | Platform | Archive |
 | :--- | :--- |
 | Windows (x86_64) | `mrt-<tag>-x86_64-pc-windows-msvc.zip` |
 | Linux (x86_64) | `mrt-<tag>-x86_64-unknown-linux-gnu.tar.gz` |
-| macOS (Intel) | `mrt-<tag>-x86_64-apple-darwin.tar.gz` |
-| macOS (Apple Silicon) | `mrt-<tag>-aarch64-apple-darwin.tar.gz` |
+
+There are no macOS archives yet; on a Mac, [build from source](#build-from-source). New to MRT? The [Getting Started guide](GETTING_STARTED.md) ([en español](GUIA_DE_INICIO.md)) walks through the first steps.
 
 The Windows archive contains `mrt.exe`; the Linux archive contains `mrt`, plus `mrt.desktop` and `mrt.png` for a menu entry. Put the binary somewhere on your `PATH`. On Linux, for the menu entry and its icon:
 
@@ -224,7 +224,7 @@ Click **🔔 Notifications** in the sidebar to turn desktop notifications off, c
 | :--- | :--- | :--- |
 | `Enter` | Composer | Runs the command. |
 | `↑` / `↓` | Composer | Previous / next command in this tab. |
-| `Ctrl+K` or `Ctrl+P` | Anywhere | Opens the Command Palette (layout, tools, processes, AI, shells). |
+| `Ctrl+K` or `Ctrl+P` | Anywhere | Opens the Command Palette (actions, tools, processes, AI, SSH hosts, shells). |
 | `Enter` | Command Palette | Runs the first match, or the typed text as a command when nothing matches. |
 | `Esc` | Command Palette / Safety Gate | Closes the palette / cancels the pending command. |
 | `Ctrl+Q` | Interactive TUI mode | Ends the session and saves its transcript as a block. |
@@ -445,7 +445,7 @@ MRT stores its files in the per-user local data directory:
 | File | Contents |
 | :--- | :--- |
 | `history.sqlite` | Every completed command block (command, output, shell, folder, exit code) and your saved runbooks. **Search history** searches it; queries of 3+ characters use the FTS5 trigram index, shorter ones a plain substring match. Output can contain secrets that commands printed; delete the file to wipe history. |
-| `layout.json` | The window's tabs, splits, shells, folders and remote (SSH) tabs, saved while MRT runs and when it closes, and reopened at the next start with fresh shells (`terminal.restore_layout`). Command blocks are not restored; they are in `history.sqlite`. Delete the file to start with one tab. |
+| `layout.json` | The tabs (and which window each is in), splits, shells, folders and remote (SSH) tabs, saved while MRT runs and when it closes, and reopened at the next start with fresh shells (`terminal.restore_layout`). Command blocks are not restored; they are in `history.sqlite`. Delete the file to start with one tab. |
 | `session-host.json` | Port, token and PID of the running session host (`0600` on macOS/Linux); removed when the host exits. |
 | `remote.json` | This device's key pair for remote connections, the devices allowed to attach (`guests`) and the hosts it paired with (`hosts`). Written `0600` on macOS/Linux. Delete it to forget all pairings. |
 | `companion-cert.pem`, `companion-key.pem` | The phone companion's self-signed TLS certificate and key. |

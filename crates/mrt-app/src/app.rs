@@ -775,6 +775,8 @@ pub struct MrtGuiApp {
     pub(crate) pending_window_closes: Vec<u32>,
     /// The window the Command Palette opened in.
     pub(crate) palette_window: u32,
+    /// The settings window (`settings.rs`).
+    pub(crate) settings: crate::settings::SettingsState,
     /// One screen emulator per agent PTY and the transcript bytes it has read.
     pub(crate) agent_screens: HashMap<Uuid, (TerminalEmulator, usize)>,
     /// The session host that runs tab commands (`None` until connected, in tests, or
@@ -1083,6 +1085,7 @@ impl MrtGuiApp {
             pending_tab_moves: Vec::new(),
             pending_window_closes: Vec::new(),
             palette_window: 0,
+            settings: Default::default(),
             agent_screens: HashMap::new(),
             session_host: Arc::new(std::sync::Mutex::new(None)),
             host_blocks: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
@@ -2839,7 +2842,7 @@ impl MrtGuiApp {
         }
     }
 
-    fn submit_input(&mut self, command_override: Option<String>, bypass_safety: bool) {
+    pub(crate) fn submit_input(&mut self, command_override: Option<String>, bypass_safety: bool) {
         let Some(tab) = self.tabs.get_mut(self.active_tab) else {
             return;
         };
@@ -2908,6 +2911,11 @@ impl MrtGuiApp {
 
         if raw_input.eq_ignore_ascii_case(":unsplit") {
             tab.close_split();
+            return;
+        }
+
+        if raw_input.eq_ignore_ascii_case(":settings") {
+            self.open_settings();
             return;
         }
 
@@ -5226,6 +5234,7 @@ impl MrtGuiApp {
                     self.pending_tab_moves.push((tab.id, None));
                 }
             }
+            Action::OpenSettings => self.open_settings(),
             Action::MoveTabToMainWindow => {
                 if let Some(tab) = self.tabs.get(self.active_tab) {
                     self.pending_tab_moves.push((tab.id, Some(0)));
@@ -5322,6 +5331,7 @@ impl MrtGuiApp {
         let mut select_tab = None;
         let mut move_tab = None;
         let mut window_move: Option<(Uuid, Option<u32>)> = None;
+        let mut open_settings = false;
         let mut toggle_history = false;
         let mut toggle_runbooks = false;
         let new_tab_popup = egui::Id::new("mrt_new_tab_popup");
@@ -5554,6 +5564,13 @@ impl MrtGuiApp {
                 if nav_row(ui, "🔔", "Notifications", None, self.notifier.show_settings, compact).clicked() {
                     self.notifier.show_settings = !self.notifier.show_settings;
                 }
+                if window == 0 && nav_row(ui, "⚙", "Settings", None, self.settings.open, compact).clicked() {
+                    if self.settings.open {
+                        self.settings.open = false;
+                    } else {
+                        open_settings = true;
+                    }
+                }
 
                 // Status card pinned to the bottom
                 if !compact {
@@ -5613,6 +5630,9 @@ impl MrtGuiApp {
         }
         if let Some(request) = window_move {
             self.pending_tab_moves.push(request);
+        }
+        if open_settings {
+            self.open_settings();
         }
         if toggle_history {
             self.show_history = !self.show_history;
@@ -6865,6 +6885,7 @@ impl MrtGuiApp {
         self.render_tui_overlay(ctx);
         if main {
             self.notifier.render_settings(ctx);
+            self.render_settings_window(ctx);
             self.render_key_indicator(ctx);
         }
     }

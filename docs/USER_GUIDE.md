@@ -137,6 +137,7 @@ Commands that may be destructive open the **Safety Approval Gate** first (see [C
 | `:split-v` | Splits the tab vertically. |
 | `:unsplit` | Closes the split. |
 | `:window new` / `:window main` | Moves the tab to a new window / back to the main window. |
+| `:settings` | Opens the settings window (also `Ctrl+,`). |
 
 Drag the line between two panes to resize them (each keeps at least 15% of the tab; double-click the line to split evenly again); the size is saved with the layout. Drag a tab in the sidebar onto another row to move it there; a line shows where it will go.
 
@@ -228,6 +229,7 @@ Click **🔔 Notifications** in the sidebar to turn desktop notifications off, c
 | `Ctrl+Q` | Interactive TUI mode | Ends the session and saves its transcript as a block. |
 | `Ctrl+F` | Anywhere except a running program | Opens **Find in output** (the `find` action; rebindable). |
 | `Ctrl+Shift+Space` | Anywhere except a running program | **Copy mode**: select output with the keyboard (the `copy_mode` action; rebindable). |
+| `Ctrl+,` | Anywhere | Opens **Settings** (the `open_settings` action; rebindable). |
 | `Enter` / `Shift+Enter` | Find bar | Next / previous match. |
 | `Esc` | Find bar | Closes the find bar. |
 | `Ctrl+click` (`Cmd+click` on macOS) | Link in block output | Opens a URL in the browser, or a `file:line[:col]` path in your editor. |
@@ -272,6 +274,7 @@ Bindings are matched exactly first; a binding with no `shift`/`alt` also fires w
 | Action | Default | Does |
 | :--- | :--- | :--- |
 | `toggle_command_palette` | `Ctrl+K`, `Ctrl+P` | Opens or closes the Command Palette. |
+| `open_settings` | `Ctrl+,` | Opens the settings window. |
 | `exit_tui` | `Ctrl+Q` | Ends the Interactive TUI session (only while it is open). |
 | `new_tab` / `close_tab` | — | Opens a tab with the current shell / closes the active tab. |
 | `next_tab` / `previous_tab` | — | Cycles through the window's tabs. |
@@ -461,6 +464,8 @@ MRT reads two optional [TOML](https://toml.io) files. Every setting is optional:
 | :--- | :--- |
 | User config | `~/.config/mrt/config.toml` on Linux and macOS (`$XDG_CONFIG_HOME/mrt/config.toml` if set), `%APPDATA%\mrt\config.toml` on Windows. Set `MRT_CONFIG` to use another file. |
 | Project config | `.mrt.toml` in the folder you start MRT from. It is merged on top of the user config, so its values win. |
+
+**Settings window.** `Ctrl+,`, `:settings`, **Settings** in the sidebar or the Command Palette open a searchable form for the common settings (font, theme, default shell, Safety Gate, AI provider and model, notifications, session options). **Save** writes only the values you changed into the user config file: comments, other keys and their order stay as they were, and MRT applies the file like a change made by hand. `↺` puts a setting back to its default (the key is removed from the file). A setting that this folder's `.mrt.toml` also sets is marked, because the project file wins. The window also lists every keybinding with the problems found in `[keybindings]` (conflicts, unknown keys or actions) in red; **Add** writes a new `[keybindings]` entry once it does not conflict, and **Remove** deletes one of yours.
 
 **Merging.** Tables merge key by key. `[[mcp.servers]]` entries merge by `name` (a project entry replaces the user entry with the same name; others are added). `safety.blocked_patterns` is the union of both lists, so a project file cannot remove your blocked patterns.
 

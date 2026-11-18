@@ -63,6 +63,8 @@ pub enum Action {
     MoveTabToNewWindow,
     /// Move the active tab back to the main window.
     MoveTabToMainWindow,
+    /// Open the settings window.
+    OpenSettings,
 }
 
 /// The simple (argument-free) actions, in Command Palette order.
@@ -81,6 +83,7 @@ pub const PALETTE_ACTIONS: &[Action] = &[
     Action::NewWindow,
     Action::MoveTabToNewWindow,
     Action::MoveTabToMainWindow,
+    Action::OpenSettings,
     Action::ToggleExplorer,
     Action::ToggleHistory,
     Action::ToggleRunbooks,
@@ -107,6 +110,7 @@ const SIMPLE_ACTIONS: &[(Action, &str, &str)] = &[
     (Action::NewWindow, "new_window", "New window"),
     (Action::MoveTabToNewWindow, "move_tab_to_new_window", "Move tab to a new window"),
     (Action::MoveTabToMainWindow, "move_tab_to_main_window", "Move tab to the main window"),
+    (Action::OpenSettings, "open_settings", "Settings"),
     (
         Action::SplitHorizontal,
         "split_horizontal",
@@ -485,6 +489,20 @@ struct Binding {
     text: String,
 }
 
+/// One binding as the settings window lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BindingInfo {
+    /// The keys, formatted for display (`Ctrl+Shift+T`).
+    pub keys: String,
+    /// The binding as written in the config (`ctrl+shift+t`), the `[keybindings]` key.
+    pub written: String,
+    /// The action's config name (`new_tab`).
+    pub action: String,
+    pub title: String,
+    /// From the user's `[keybindings]` (otherwise a built-in default).
+    pub user: bool,
+}
+
 /// A problem found while loading keybinding overrides.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KeymapIssue {
@@ -566,6 +584,7 @@ const DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("ctrl+q", "exit_tui"),
     ("ctrl+f", "find"),
     ("ctrl+shift+space", "copy_mode"),
+    ("ctrl+comma", "open_settings"),
 ];
 
 impl Keymap {
@@ -660,6 +679,24 @@ impl Keymap {
             }
         }
         issues
+    }
+
+    /// Every binding, for the settings window: keys as displayed, the action's
+    /// config name and title, and whether it comes from the user's `[keybindings]`.
+    pub fn entries(&self) -> Vec<BindingInfo> {
+        let mut entries: Vec<BindingInfo> = self
+            .bindings
+            .iter()
+            .map(|b| BindingInfo {
+                keys: b.spec.display(self.platform),
+                written: b.text.clone(),
+                action: b.action.name(),
+                title: b.action.title(),
+                user: matches!(b.source, Source::User),
+            })
+            .collect();
+        entries.sort_by(|a, b| a.title.cmp(&b.title).then_with(|| a.keys.cmp(&b.keys)));
+        entries
     }
 
     /// Every binding of `action`, formatted for display (e.g. `Ctrl+K`).

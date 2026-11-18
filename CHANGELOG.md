@@ -1,12 +1,17 @@
 # Changelog
 
-## Unreleased
+## v0.5.0 — 2026-11-18
+
+Settings and secrets: [Milestone 10 of the roadmap](ROADMAP.md) is complete.
 
 ### New
 - **Update check** (opt-in): with `[updates] check = true` (or **Settings → Updates**), MRT asks GitHub Releases at start-up whether a newer version exists and shows a notice with a link to its release notes. Nothing is downloaded.
 - **SSH hosts in the Command Palette**: the hosts in `~/.ssh/config` (and its `Include` files) are listed under **SSH hosts**; choosing one opens a remote tab with `:ssh <host>`.
 - **API keys in the OS keyring**: **Settings → API keys** stores a provider key in Windows Credential Manager, the macOS Keychain or the Secret Service on Linux, so MRT started from a desktop launcher finds it without environment variables. The settings window shows where each key comes from; an environment variable still wins. `MRT_NO_KEYRING=1` turns the keyring off.
 - **Settings window**: `Ctrl+,`, `:settings`, the sidebar or the Command Palette open a searchable form for font, theme, default shell, Safety Gate, AI provider and model, notifications and session options. Saving writes only the changed values into `config.toml`, keeping its comments and other keys, and MRT applies them at once. The window lists every keybinding with the conflicts and errors in `[keybindings]`, and adds or removes your own bindings.
+
+### Notes
+- The Windows and Linux archives were built locally (Linux with `scripts/release/build-linux.sh`, glibc 2.17 or newer) and tested on Windows and Linux. There are no macOS archives, and the binaries are not code-signed yet.
 
 ## v0.4.0 — 2026-11-18
 

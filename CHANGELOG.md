@@ -1,10 +1,15 @@
 # Changelog
 
-## Unreleased
+## v0.4.0 — 2026-11-18
+
+Tabs, windows and scrolling (Milestone 8 of the [ROADMAP](ROADMAP.md) is complete): several windows, plus the tab dragging, split resizing and program scrollbar from v0.3.1.
 
 ### New
 - **Several windows**: right-click a tab in the sidebar and choose **Move to new window**, **Move to main window** or **Move to window N**, type `:window new` / `:window main`, or use the Command Palette (**New window**, **Move tab to a new window**, **Move tab to the main window**; actions `new_window`, `move_tab_to_new_window`, `move_tab_to_main_window` for `[keybindings]`). A moved tab keeps its shell, blocks and running commands. Each window has its own tabs, prompt and Mosaic; History, Runbooks, MCP Hub, Toolbox and Explorer stay in the main window. Closing a window moves its tabs back to the main window, and the layout remembers which window each tab was in.
 - **Smooth scrolling in programs**: a touchpad scrolls a program's history (`:tui` and pane programs) by pixels instead of jumping three lines per step.
+
+### Notes
+- The Windows and Linux archives were built locally (Linux with `scripts/release/build-linux.sh`, glibc 2.17 or newer) and tested on Windows and Linux. There are no macOS archives, and the binaries are not code-signed yet.
 
 ## v0.3.1 — 2026-11-18
 

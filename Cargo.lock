@@ -2594,7 +2594,7 @@ dependencies = [
 
 [[package]]
 name = "mrt-ai"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "mrt-core",
@@ -2607,7 +2607,7 @@ dependencies = [
 
 [[package]]
 name = "mrt-app"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2634,7 +2634,7 @@ dependencies = [
 
 [[package]]
 name = "mrt-core"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -2655,7 +2655,7 @@ dependencies = [
 
 [[package]]
 name = "mrt-mcp"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "directories",
@@ -2679,7 +2679,7 @@ dependencies = [
 
 [[package]]
 name = "mrt-tools"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "futures-util",

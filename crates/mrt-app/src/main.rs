@@ -19,6 +19,7 @@ mod settings;
 mod shell_pool;
 mod term_input;
 mod theme;
+mod update_check;
 mod widgets;
 mod windows;
 

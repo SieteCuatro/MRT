@@ -779,6 +779,9 @@ pub struct MrtGuiApp {
     pub(crate) settings: crate::settings::SettingsState,
     /// Hosts from `~/.ssh/config`, read each time the Command Palette opens.
     pub(crate) ssh_hosts: Vec<mrt_core::ssh_config::SshHost>,
+    /// The opt-in update check (`update_check.rs`): started once, and its finding.
+    pub(crate) update_check_started: bool,
+    pub(crate) update_available: Arc<Mutex<Option<crate::update_check::UpdateInfo>>>,
     /// One screen emulator per agent PTY and the transcript bytes it has read.
     pub(crate) agent_screens: HashMap<Uuid, (TerminalEmulator, usize)>,
     /// The session host that runs tab commands (`None` until connected, in tests, or
@@ -1089,6 +1092,8 @@ impl MrtGuiApp {
             palette_window: 0,
             settings: Default::default(),
             ssh_hosts: Vec::new(),
+            update_check_started: false,
+            update_available: Default::default(),
             agent_screens: HashMap::new(),
             session_host: Arc::new(std::sync::Mutex::new(None)),
             host_blocks: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
@@ -5783,6 +5788,7 @@ impl eframe::App for MrtGuiApp {
             self.submit_input(Some(command), false);
         }
         self.maybe_spawn_process_tick();
+        self.maybe_check_for_update(ctx);
         let other_windows = self.visible_in_extra_windows();
         if let Some(idx) = self.notifier.update(ctx, &self.tabs, self.active_tab, self.mosaic, &other_windows) {
             self.show_tab(ctx, idx);
@@ -5826,6 +5832,7 @@ impl MrtGuiApp {
         self.render_header(ctx);
         if main {
             self.render_config_notice(ctx);
+            self.render_update_notice(ctx);
             self.render_agent_ptys(ctx);
             self.render_worktree_close_prompt(ctx);
             if self.show_explorer {

@@ -44,7 +44,7 @@ MRT already covers much of this: vertical tab sidebar, scrollback search, key ta
 - **Settings window.** *(implemented: `Ctrl+,` / `:settings`; saves only the changed keys with comments kept, lists keybindings with problems, adds and removes bindings)* A searchable settings view that edits `config.toml` (font, theme, shell, Safety Gate, AI provider, notifications) and lists keybindings and actions with conflicts highlighted, writing the same file the watcher reloads.
 - **API keys in the OS keyring.** *(implemented: Settings → API keys; Windows Credential Manager, macOS Keychain, Secret Service over zbus; the environment still wins)* Store provider keys in Windows Credential Manager, the macOS Keychain or the Secret Service, as an alternative to environment variables, so MRT started from a desktop launcher finds them.
 - **SSH hosts.** *(implemented: Host names from `~/.ssh/config` and its Includes, under SSH hosts in the palette)* List hosts from `~/.ssh/config` in the Command Palette; choosing one opens a `:ssh` tab with shell integration.
-- **Update check.** Opt-in check against GitHub Releases at start-up, shown as a small notice, never downloading anything without a click.
+- **Update check.** *(implemented: `[updates] check`, a notice with a link; Milestone 10 is complete)* Opt-in check against GitHub Releases at start-up, shown as a small notice, never downloading anything without a click.
 
 ## Milestone 11 — Distribution
 

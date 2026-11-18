@@ -497,6 +497,7 @@ MRT reads two optional [TOML](https://toml.io) files. Every setting is optional:
 | `ai.ollama_endpoint` | `http://localhost:11434` | Ollama base URL. |
 | `[[mcp.servers]]` | none | MCP servers to connect at startup (`name`, `command`, `args`, `enabled`, `transport = "stdio"`). Servers added on reload are connected; removing one takes effect after a restart. |
 | `notifications.enabled`, `notifications.threshold_secs` | `true`, `10` | Desktop notification when a command runs at least this long while MRT or its tab is in the background ([Notifications for long commands](#notifications-for-long-commands)). Applied on load and on every reload; changes made in the Notifications window last until the next reload. |
+| `updates.check` | `false` | At start-up (or when you turn it on), ask GitHub Releases whether a newer MRT exists; if so, a notice under the header links to its release notes. The request sends only a generic `mrt/<version>` user agent, and nothing is downloaded or installed. Also in **Settings → Updates**. |
 | `[keybindings]` | none | `"binding" = "action"` overrides for the keymap (see [Custom keybindings](#custom-keybindings)). Applied on load and on every reload; problems are listed in the Command Palette. |
 
 **Environment variables win over the config file.** API keys are read only from the environment (never put them in the file). `OLLAMA_MODEL` and `OLLAMA_HOST` override `ai.model` and `ai.ollama_endpoint` for Ollama; with `ai.provider = "ollama"` and `ai.model` set, Ollama works without `OLLAMA_MODEL`.

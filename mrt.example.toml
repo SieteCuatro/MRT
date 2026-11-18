@@ -57,6 +57,15 @@ provider = "auto"
 # model = "gpt-4o-mini"   # model for the chosen provider (OLLAMA_MODEL wins for Ollama)
 ollama_endpoint = "http://localhost:11434" # OLLAMA_HOST wins if set
 
+# Prices for estimating what AI requests cost (`:ai-usage`), in US dollars per
+# million tokens, keyed by model name or "provider/model". Check your provider's
+# current prices; models without an entry still count their tokens. Local Ollama
+# models are free.
+[ai.prices]
+# "gpt-4o-mini" = { input = 0.15, output = 0.6 }
+# "gemini-2.5-flash" = { input = 0.3, output = 2.5 }
+# "openrouter/openrouter/auto" = { input = 1, output = 5 }
+
 # MCP servers to connect at startup (stdio transport). A project .mrt.toml entry with
 # the same name replaces the user entry.
 [[mcp.servers]]

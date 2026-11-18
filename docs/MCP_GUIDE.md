@@ -154,7 +154,7 @@ Each tab entry in `mrt_list_tabs`, `mrt_get_session_state` and the `mrt://sessio
 
 | Tool | Description | Key Parameters |
 | :--- | :--- | :--- |
-| **`mrt_ai_translate`** | Translates a natural-language task into an idiomatic command for the target shell using MRT's multi-provider AI / polyglot engine. | `query` *(required)*, `shell?` |
+| **`mrt_ai_translate`** | Translates a natural-language task into an idiomatic command for the target shell using MRT's multi-provider AI / polyglot engine. When a provider answered, `usage` has the requests, input and output tokens and the estimated cost (`cost_usd`, `unpriced_requests`) from `[ai.prices]`. | `query` *(required)*, `shell?` |
 | **`mrt_http_request`** | Performs an HTTP/REST request via `mrt-tools::http_inspector` and returns status, latency, headers, and formatted body. | `url` *(required)*, `method?` (default `GET`), `body?` |
 | **`mrt_web_fetch`** | Fetches a web URL and converts its HTML into clean readable Markdown. | `url` *(required)* |
 | **`mrt_inspect_ports`** | Lists active local listening TCP/UDP ports and PIDs on the host system in CSV format. | *(none)* |

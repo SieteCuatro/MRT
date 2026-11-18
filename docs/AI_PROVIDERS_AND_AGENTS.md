@@ -92,3 +92,17 @@ To eliminate waiting latency when requesting error diagnoses, MRT features token
 ## 5. Multi-step Assistance (`assist.rs`, `:assist`)
 
 `run_assist(question, shell, cwd, call_tool, on_step)` investigates with MRT's read-only MCP tools. Each turn, `build_assist_prompt` gives the model the question, the allowed tools (`ASSIST_TOOLS`) and the results so far; the model replies with one JSON object, `{"tool": .., "arguments": {..}}` or `{"answer": .., "command": ..}` (`parse_decision` also accepts a fenced block or text around the object). Providers are tried in the usual order through a raw JSON completion for Gemini, Anthropic, the OpenAI-compatible providers and Ollama. When no provider is configured, or one fails or replies with something unusable, `offline_next` finishes the investigation deterministically: list the tab's blocks → find the newest failed one → search for the same command → compare with an earlier successful run, if any → diagnose → answer, with the diagnosis's fix as the suggested command. At most `MAX_ASSIST_STEPS` (6) calls; tools outside `ASSIST_TOOLS` are refused. The assistant never executes commands: the GUI puts the suggestion in the block's AI panel, and **Apply fix** is submitted like typed input, so the Safety Gate checks it.
+
+## 6. Token Use and Cost (`usage.rs`, `:ai-usage`)
+
+Every provider reply reports the tokens the request used, and `usage_from_response` reads them: Gemini `usageMetadata` (`promptTokenCount`; output is `candidatesTokenCount` plus `thoughtsTokenCount`), Anthropic `usage` (`input_tokens` plus cache reads and writes; `output_tokens`), the OpenAI-compatible providers `usage.prompt_tokens` / `usage.completion_tokens`, and Ollama `prompt_eval_count` / `eval_count`. `AiUsage::request` prices them with the process-wide table set by `set_ai_prices` from the config's `[ai.prices]` (US dollars per million tokens, looked up as `provider/model`, then `model`); Ollama is always $0, and a model without a price counts its tokens with the cost unknown (`unpriced_requests`).
+
+`translate_nl_to_command` adds up every reply, including ones it could not use before falling back to the next provider or the offline engine, into `AiCommandProposal::usage`, which `mrt_ai_translate` returns too. `run_assist` adds up every model call into `AssistOutcome::usage`. The GUI adds both to the tab (`TerminalTab::ai_usage`) and the session, shows the summary on the suggestion card and the `:assist` block, the session total in the sidebar, and a table per tab with `:ai-usage`.
+
+```toml
+[ai.prices]
+"gpt-4o-mini" = { input = 0.15, output = 0.6 }
+"openrouter/anthropic/claude-sonnet-4" = { input = 3, output = 15 }
+```
+
+Prices change: copy them from your provider's pricing page.

@@ -55,6 +55,8 @@ pub struct AssistOutcome {
     pub steps: Vec<AssistStep>,
     /// Provider label, or "MRT built-in investigator".
     pub provider: String,
+    /// Tokens and estimated cost of every model call in the investigation.
+    pub usage: crate::AiUsage,
 }
 
 pub const OFFLINE_PROVIDER: &str = "MRT built-in investigator";
@@ -202,24 +204,24 @@ pub fn offline_next(steps: &[AssistStep]) -> AssistDecision {
     AssistDecision::Answer { answer, command: fix }
 }
 
-/// Raw text completion from one provider, asking for JSON.
-async fn complete(backend: &AiBackend, prompt: &str) -> anyhow::Result<(String, String)> {
+/// Raw completion from one provider, asking for JSON: the reply text, the
+/// provider label and the tokens it used.
+async fn complete(backend: &AiBackend, prompt: &str) -> anyhow::Result<(String, String, crate::AiUsage)> {
     let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build()?;
-    match backend {
+    let (val, label): (Value, String) = match backend {
         AiBackend::Gemini { api_key, model } => {
             let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}");
-            let val: Value = client
+            let val = client
                 .post(&url)
                 .json(&json!({ "contents": [{ "parts": [{ "text": prompt }] }], "generationConfig": { "responseMimeType": "application/json" } }))
                 .send()
                 .await?
                 .json()
                 .await?;
-            let text = val.pointer("/candidates/0/content/parts/0/text").and_then(Value::as_str).unwrap_or_default();
-            Ok((text.to_string(), format!("Google Gemini ({model})")))
+            (val, format!("Google Gemini ({model})"))
         }
         AiBackend::Anthropic { api_key, model } => {
-            let val: Value = client
+            let val = client
                 .post("https://api.anthropic.com/v1/messages")
                 .header("x-api-key", api_key)
                 .header("anthropic-version", "2023-06-01")
@@ -228,11 +230,10 @@ async fn complete(backend: &AiBackend, prompt: &str) -> anyhow::Result<(String, 
                 .await?
                 .json()
                 .await?;
-            let text = val.pointer("/content/0/text").and_then(Value::as_str).unwrap_or_default();
-            Ok((text.to_string(), format!("Anthropic Claude ({model})")))
+            (val, format!("Anthropic Claude ({model})"))
         }
         AiBackend::OpenAiCompatible { endpoint, api_key, model, label, .. } => {
-            let val: Value = client
+            let val = client
                 .post(endpoint)
                 .bearer_auth(api_key)
                 .json(&json!({ "model": model, "messages": [{ "role": "user", "content": prompt }], "response_format": { "type": "json_object" } }))
@@ -240,27 +241,29 @@ async fn complete(backend: &AiBackend, prompt: &str) -> anyhow::Result<(String, 
                 .await?
                 .json()
                 .await?;
-            let text = val.pointer("/choices/0/message/content").and_then(Value::as_str).unwrap_or_default();
-            Ok((text.to_string(), label.clone()))
+            (val, label.clone())
         }
         AiBackend::Ollama { host, model } => {
-            let val: Value = client
+            let val = client
                 .post(format!("{}/api/generate", host.trim_end_matches('/')))
                 .json(&json!({ "model": model, "prompt": prompt, "format": "json", "stream": false }))
                 .send()
                 .await?
                 .json()
                 .await?;
-            let text = val.get("response").and_then(Value::as_str).unwrap_or_default();
-            Ok((text.to_string(), format!("Ollama ({model})")))
+            (val, format!("Ollama ({model})"))
         }
-    }
+    };
+    let text = crate::reply_text(backend, &val).unwrap_or_default().to_string();
+    Ok((text, label, crate::usage_from_response(backend, &val)))
 }
 
-/// Asks the first provider that gives a usable reply; `None` when none does.
-async fn ask_providers(backends: &[AiBackend], prompt: &str) -> Option<(AssistDecision, String)> {
+/// Asks the first provider that gives a usable reply; `None` when none does. Every
+/// reply's tokens are added to `usage`.
+async fn ask_providers(backends: &[AiBackend], prompt: &str, usage: &mut crate::AiUsage) -> Option<(AssistDecision, String)> {
     for backend in backends {
-        if let Ok((text, label)) = complete(backend, prompt).await {
+        if let Ok((text, label, used)) = complete(backend, prompt).await {
+            usage.add(&used);
             if let Some(decision) = parse_decision(&text) {
                 return Some((decision, label));
             }
@@ -303,9 +306,10 @@ where
     // finishes the investigation.
     let mut use_model = !backends.is_empty();
     let mut provider = OFFLINE_PROVIDER.to_string();
+    let mut usage = crate::AiUsage::default();
     loop {
         let decision = if use_model {
-            match ask_providers(backends, &build_assist_prompt(question, shell, cwd, &steps)).await {
+            match ask_providers(backends, &build_assist_prompt(question, shell, cwd, &steps), &mut usage).await {
                 Some((decision, label)) => {
                     provider = label;
                     decision
@@ -321,7 +325,7 @@ where
         };
         match decision {
             AssistDecision::Answer { answer, command } => {
-                return AssistOutcome { answer, command, steps, provider };
+                return AssistOutcome { answer, command, steps, provider, usage };
             }
             AssistDecision::Call { tool, arguments } => {
                 if steps.len() >= MAX_ASSIST_STEPS {
@@ -330,7 +334,7 @@ where
                     } else {
                         "The investigation stopped after the maximum number of steps.".to_string()
                     };
-                    return AssistOutcome { answer, command: None, steps, provider };
+                    return AssistOutcome { answer, command: None, steps, provider, usage };
                 }
                 let result = if is_allowed_tool(&tool) {
                     call_tool(tool.clone(), arguments.clone()).await
@@ -343,6 +347,14 @@ where
             }
         }
     }
+}
+
+/// An investigation with these providers and a tool that returns nothing, for tests
+/// in other modules.
+#[cfg(test)]
+pub(crate) async fn run_assist_with_backends_for_test(backends: &[AiBackend]) -> AssistOutcome {
+    let mut call_tool = |_tool: String, _arguments: Value| async { String::new() };
+    run_assist_with("why?", "bash", ".", backends, &mut call_tool, &mut |_| {}).await
 }
 
 #[cfg(test)]

@@ -297,6 +297,18 @@ pub struct AiConfig {
     pub model: Option<String>,
     /// Ollama base URL (`OLLAMA_HOST` wins).
     pub ollama_endpoint: Option<String>,
+    /// `[ai.prices]`: US dollars per million tokens, keyed by model name or
+    /// `provider/model`, used to estimate what AI requests cost.
+    pub prices: std::collections::BTreeMap<String, AiPriceEntry>,
+}
+
+/// One `[ai.prices]` entry: `"gpt-4o-mini" = { input = 0.15, output = 0.6 }`.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+pub struct AiPriceEntry {
+    /// Dollars per million input (prompt) tokens.
+    pub input: f64,
+    /// Dollars per million output (completion) tokens.
+    pub output: f64,
 }
 
 impl Default for AiConfig {
@@ -305,6 +317,7 @@ impl Default for AiConfig {
             provider: "auto".to_string(),
             model: None,
             ollama_endpoint: None,
+            prices: Default::default(),
         }
     }
 }
@@ -727,6 +740,10 @@ mod tests {
             [keybindings]
             "ctrl+t" = "new_tab"
             "ctrl+shift+p" = "command_palette"
+
+            [ai.prices]
+            "gpt-4o-mini" = { input = 0.15, output = 0.6 }
+            "openrouter/anthropic/claude-sonnet-4" = { input = 3, output = 15 }
             "#,
         )
         .unwrap();
@@ -734,6 +751,8 @@ mod tests {
         assert_eq!(cfg.terminal.font_size, 15.0, "integers are accepted for floats");
         assert!(!cfg.safety.enabled);
         assert_eq!(cfg.ai.model.as_deref(), Some("qwen2.5-coder"));
+        assert_eq!(cfg.ai.prices["gpt-4o-mini"], AiPriceEntry { input: 0.15, output: 0.6 });
+        assert_eq!(cfg.ai.prices["openrouter/anthropic/claude-sonnet-4"].output, 15.0, "integers are accepted");
         let server = &cfg.mcp.servers[0];
         assert_eq!(server.transport, "stdio");
         assert!(server.enabled);

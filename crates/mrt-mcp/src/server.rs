@@ -41,6 +41,10 @@ pub struct McpTabSession {
     /// folder, and `mrt_run_command` runs only commands the Safety Gate rates Safe.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_root: Option<PathBuf>,
+    /// Set for a worktree tab (`:worktree`, or `mrt_create_tab` with `worktree`):
+    /// the git worktree the tab works in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<mrt_core::worktree::Worktree>,
 }
 
 /// JSON for a tab's activity (`state`, `progress`, `tone`, `agent`, `detail`, `command`).
@@ -134,6 +138,7 @@ impl Default for MrtMcpServerState {
             blocks: Vec::new(),
             activity: None,
             sandbox_root: None,
+            worktree: None,
         };
         Self {
             cwd: Arc::new(Mutex::new(cwd)),
@@ -227,14 +232,23 @@ impl MrtMcpServerState {
             },
             McpTool {
                 name: "mrt_create_tab".into(),
-                description: "Create a new terminal tab with an optional title, shell profile, Working Directory (cwd), and focus flag.".into(),
+                description: "Create a new terminal tab with an optional title, shell profile, Working Directory (cwd), and focus flag. With `worktree`, the tab works in its own git worktree for that branch (created next to the repository of `cwd`, or reused when the branch already has one), so several agents can change the same repository in parallel without touching each other's files.".into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "title": { "type": "string", "description": "Optional custom title for the new tab" },
                         "shell": { "type": "string", "description": "Optional shell id (e.g. 'pwsh', 'powershell', 'cmd', 'bash', 'git-bash', 'wsl', 'zsh', 'sh')" },
                         "cwd": { "type": "string", "description": "Optional starting directory path" },
-                        "activate": { "type": "boolean", "description": "Switch focus to the newly created tab (default true)" }
+                        "activate": { "type": "boolean", "description": "Switch focus to the newly created tab (default true)" },
+                        "worktree": {
+                            "type": "object",
+                            "description": "Open the tab in a git worktree for this branch of the repository that contains `cwd` (or the active tab's folder). A new branch starts from `base` (default: the current HEAD); an existing branch is checked out as it is.",
+                            "properties": {
+                                "branch": { "type": "string", "description": "Branch name, e.g. 'feature/login'" },
+                                "base": { "type": "string", "description": "Optional commit or branch a new branch starts from" }
+                            },
+                            "required": ["branch"]
+                        }
                     }
                 }),
             },
@@ -822,6 +836,7 @@ pub async fn execute_mrt_mcp_tool(
                         "block_count": t.blocks.len(),
                         "activity": tab_activity_json(t),
                         "sandbox": t.sandbox_root.as_ref().map(|r| r.display().to_string()),
+                        "worktree": t.worktree.as_ref().map(|w| json!({ "branch": w.branch, "path": w.path.display().to_string(), "repo": w.repo.display().to_string() })),
                     })
                 })
                 .collect();
@@ -869,6 +884,7 @@ pub async fn execute_mrt_mcp_tool(
                         "block_count": t.blocks.len(),
                         "activity": tab_activity_json(t),
                         "sandbox": t.sandbox_root.as_ref().map(|r| r.display().to_string()),
+                        "worktree": t.worktree.as_ref().map(|w| json!({ "branch": w.branch, "path": w.path.display().to_string(), "repo": w.repo.display().to_string() })),
                     })
                 })
                 .collect();
@@ -891,6 +907,20 @@ pub async fn execute_mrt_mcp_tool(
                 .get("activate")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
+            let worktree = match args.get("worktree") {
+                None | Some(Value::Null) => None,
+                Some(spec) => {
+                    let Some(branch) = spec.get("branch").and_then(|v| v.as_str()) else {
+                        return McpToolCallResult::text("`worktree` needs a `branch`", true);
+                    };
+                    let base = spec.get("base").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty());
+                    match mrt_core::worktree::create(&cwd, branch, base) {
+                        Ok(wt) => Some(wt),
+                        Err(e) => return McpToolCallResult::text(format!("Could not create the worktree: {e}"), true),
+                    }
+                }
+            };
+            let cwd = worktree.as_ref().map(|w| w.path.clone()).unwrap_or(cwd);
 
             let mut tabs = state.tabs.lock().unwrap();
             let n = tabs.len() + 1;
@@ -899,6 +929,7 @@ pub async fn execute_mrt_mcp_tool(
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.trim().is_empty())
                 .map(String::from)
+                .or_else(|| worktree.as_ref().map(|w| w.branch.clone()))
                 .unwrap_or_else(|| format!("Tab {n} ({})", shell.kind.short_label()));
             let new_id = Uuid::new_v4();
             let session = McpTabSession {
@@ -910,6 +941,7 @@ pub async fn execute_mrt_mcp_tool(
                 blocks: Vec::new(),
                 activity: None,
                 sandbox_root: None,
+                worktree: worktree.clone(),
             };
             tabs.push(session);
             drop(tabs);
@@ -926,6 +958,7 @@ pub async fn execute_mrt_mcp_tool(
                 "shell_id": shell.id,
                 "cwd": cwd.display().to_string(),
                 "activated": activate,
+                "worktree": worktree.as_ref().map(|w| json!({ "branch": w.branch, "path": w.path.display().to_string(), "repo": w.repo.display().to_string() })),
             });
             McpToolCallResult::text(
                 serde_json::to_string_pretty(&resp).unwrap_or_default(),

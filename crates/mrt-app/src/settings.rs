@@ -59,10 +59,11 @@ pub const SETTINGS: &[SettingDef] = &[
     SettingDef { key: "ai.ollama_endpoint", label: "Ollama address", help: "Base URL of a local Ollama (OLLAMA_HOST wins).", kind: FieldKind::Text { hint: "http://localhost:11434" } },
     SettingDef { key: "notifications.enabled", label: "Desktop notifications", help: "Notify when a long command finishes while you are elsewhere.", kind: FieldKind::Bool },
     SettingDef { key: "notifications.threshold_secs", label: "Notify after (seconds)", help: "Only commands that ran at least this long notify.", kind: FieldKind::Int { min: 1, max: 86_400 } },
+    SettingDef { key: "updates.check", label: "Check for updates", help: "At start, ask GitHub Releases whether a newer MRT exists and show a notice with a link. Nothing is downloaded.", kind: FieldKind::Bool },
 ];
 
 const SECTION_TITLES: &[(&str, &str)] =
-    &[("terminal", "Terminal"), ("safety", "Safety Gate"), ("ai", "AI"), ("notifications", "Notifications")];
+    &[("terminal", "Terminal"), ("safety", "Safety Gate"), ("ai", "AI"), ("notifications", "Notifications"), ("updates", "Updates")];
 
 /// A setting's value in the form.
 #[derive(Debug, Clone, PartialEq)]
@@ -111,6 +112,7 @@ pub fn current_value(config: &MrtConfig, key: &str) -> SettingValue {
         "ai.ollama_endpoint" => Text(config.ai.ollama_endpoint.clone().unwrap_or_default()),
         "notifications.enabled" => Bool(config.notifications.enabled),
         "notifications.threshold_secs" => Int(config.notifications.threshold_secs as i64),
+        "updates.check" => Bool(config.updates.check),
         _ => Text(String::new()),
     }
 }

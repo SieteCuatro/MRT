@@ -51,6 +51,7 @@ pub struct MrtConfig {
     pub ai: AiConfig,
     pub mcp: McpConfig,
     pub notifications: NotificationsConfig,
+    pub updates: UpdatesConfig,
     /// `[keybindings]`: binding (e.g. `"ctrl+t"`) -> action name. The GUI keymap
     /// (`mrt-app/src/keymap.rs`) interprets it. Read it with [`MrtConfig::keybindings`].
     pub keybindings: HashMap<String, String>,
@@ -126,6 +127,15 @@ impl HookEntry {
         }
         self.min_duration_secs.is_none_or(|secs| duration_ms >= secs.saturating_mul(1000))
     }
+}
+
+/// `[updates]`: the opt-in check for a newer MRT release.
+#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
+#[serde(default)]
+pub struct UpdatesConfig {
+    /// At start-up, ask GitHub Releases whether a newer MRT exists and show a notice
+    /// with a link. Nothing is downloaded. Off by default.
+    pub check: bool,
 }
 
 /// `[notifications]`: notify when a long-running command finishes.

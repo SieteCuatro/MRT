@@ -87,6 +87,11 @@ enabled = false # MRT's own tools are already built in; enable to test an extern
 enabled = true
 threshold_secs = 10
 
+# Ask GitHub Releases at start-up whether a newer MRT exists and show a notice with a
+# link (nothing is downloaded). Off by default.
+[updates]
+check = false
+
 # Keyboard shortcuts: "binding" = "action name". Applied live; problems are listed in
 # the Command Palette. See the User Guide, "Custom keybindings".
 [keybindings]

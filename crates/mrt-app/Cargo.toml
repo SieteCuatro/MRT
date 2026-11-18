@@ -28,6 +28,7 @@ similar = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 directories = "6"
 toml_edit = "0.25"
+reqwest.workspace = true
 notify-rust = "=4.11.3"
 raw-window-handle = "0.6"
 

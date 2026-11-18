@@ -15,6 +15,7 @@ mod notifications;
 mod remote_cli;
 mod server;
 mod session_host;
+mod settings;
 mod shell_pool;
 mod term_input;
 mod theme;

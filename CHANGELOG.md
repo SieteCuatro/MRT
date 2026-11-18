@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### New
+- **Settings window**: `Ctrl+,`, `:settings`, the sidebar or the Command Palette open a searchable form for font, theme, default shell, Safety Gate, AI provider and model, notifications and session options. Saving writes only the changed values into `config.toml`, keeping its comments and other keys, and MRT applies them at once. The window lists every keybinding with the conflicts and errors in `[keybindings]`, and adds or removes your own bindings.
+
 ## v0.4.0 — 2026-11-18
 
 Tabs, windows and scrolling (Milestone 8 of the [ROADMAP](ROADMAP.md) is complete): several windows, plus the tab dragging, split resizing and program scrollbar from v0.3.1.

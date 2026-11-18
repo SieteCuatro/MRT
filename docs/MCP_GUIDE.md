@@ -129,7 +129,7 @@ Each tab entry in `mrt_list_tabs`, `mrt_get_session_state` and the `mrt://sessio
 
 | Tool | Description | Key Parameters |
 | :--- | :--- | :--- |
-| **`mrt_run_command`** | Executes a command in a target tab and shell (`pwsh`, `powershell`, `cmd`, `bash`, `git-bash`, `wsl`, `zsh`, `fish`, `nu`, `sh` — whichever are installed) with MRT Safety Gate protection, recording a `CommandBlock`. | `command` *(required)*, `shell?`, `tab_id?`, `cwd?` |
+| **`mrt_run_command`** | Executes a command in a target tab and shell (`pwsh`, `powershell`, `cmd`, `bash`, `git-bash`, `wsl`, `zsh`, `fish`, `nu`, `sh` — whichever are installed) with MRT Safety Gate protection, recording a `CommandBlock`. With `idle: true` it runs in a tab of the same git checkout as `cwd` (or `tab_id`'s folder) that is not running anything, preferring the active tab, or opens a new tab there when all are busy; the response's `picked` says `idle_tab` or `new_tab`. A tab counts as busy while a command runs in it, including another agent's `mrt_run_command`, so agents asking at the same time get different tabs. Sandbox tabs are never picked. | `command` *(required)*, `shell?`, `tab_id?`, `cwd?`, `idle?` |
 | **`mrt_list_blocks`** | Lists recent `CommandBlock` summaries (ID, tab, command, shell, CWD, exit code, duration, structured type, output). | `tab_id?`, `limit?` (default `10`) |
 | **`mrt_get_block`** | Retrieves full details of a `CommandBlock` by UUID, including structured payload (`Json`, `Table`, `Markdown`, `HttpResult`), raw ANSI, plain text, and AI triage. | `block_id` *(required)* |
 | **`mrt_search_blocks`** | Searches and filters blocks across tabs by command/output substring or non-zero exit codes. | `query?`, `tab_id?`, `failed_only?`, `limit?` (default `20`) |

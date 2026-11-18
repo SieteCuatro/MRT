@@ -17,7 +17,7 @@ pub const EXIT_TOOL_ERROR: i32 = 70;
 #[derive(Debug, Clone, PartialEq)]
 pub enum CliCommand {
     List,
-    Send { command: String, shell: Option<String>, cwd: Option<String> },
+    Send { command: String, shell: Option<String>, cwd: Option<String>, idle: bool },
     Capture { lines: Option<usize>, blocks: usize },
     Split { direction: SplitArg },
     /// `mrt quick [show|hide|toggle]`: the quick terminal.
@@ -43,9 +43,11 @@ pub const SUBCOMMANDS: &[&str] = &["list", "send", "capture", "split", "quick", 
 pub const USAGE: &str = "\
 Control a running MRT window:
   mrt list [--json]                       List tabs (index, title, shell, folder, activity)
-  mrt send [-t TAB] [--shell S] [--cwd DIR] [--json] [--] COMMAND...
+  mrt send [-t TAB] [--shell S] [--cwd DIR] [--idle] [--json] [--] COMMAND...
                                           Run COMMAND in a tab and print its output;
-                                          exits with the command's exit code
+                                          exits with the command's exit code. --idle
+                                          picks a tab of this repository that is not
+                                          running anything (or opens one)
   mrt capture [-t TAB] [-n LINES] [-b BLOCKS] [--json]
                                           Print the last blocks of a tab (default 1 block)
   mrt split [-t TAB] h|v|off [--json]     Split a tab side by side (h), stacked (v), or unsplit
@@ -66,6 +68,7 @@ pub fn parse_args(args: &[String]) -> Result<CliInvocation, String> {
     let mut json_out = false;
     let mut shell = None;
     let mut cwd = None;
+    let mut idle = false;
     let mut lines = None;
     let mut blocks = 1usize;
     let mut rest: Vec<String> = Vec::new();
@@ -91,6 +94,7 @@ pub fn parse_args(args: &[String]) -> Result<CliInvocation, String> {
             "-t" | "--target" => target = Some(value(&mut i, arg)?),
             "--shell" if sub == "send" => shell = Some(value(&mut i, arg)?),
             "--cwd" if sub == "send" => cwd = Some(value(&mut i, arg)?),
+            "--idle" if sub == "send" => idle = true,
             "-n" | "--lines" if sub == "capture" => {
                 lines = Some(value(&mut i, arg)?.parse().map_err(|_| format!("{arg} needs a number"))?)
             }
@@ -108,7 +112,12 @@ pub fn parse_args(args: &[String]) -> Result<CliInvocation, String> {
             if rest.is_empty() {
                 return Err("send needs a command".into());
             }
-            CliCommand::Send { command: rest.join(" "), shell, cwd }
+            // `--idle` looks for a free tab of the repository you are in.
+            let cwd = match (idle, cwd) {
+                (true, None) => std::env::current_dir().ok().map(|d| d.display().to_string()),
+                (_, cwd) => cwd,
+            };
+            CliCommand::Send { command: rest.join(" "), shell, cwd, idle }
         }
         "capture" if rest.is_empty() => CliCommand::Capture { lines, blocks: blocks.max(1) },
         "split" => {
@@ -146,8 +155,11 @@ pub fn tool_request(inv: &CliInvocation) -> (&'static str, Value) {
             args.clear();
             "mrt_list_tabs"
         }
-        CliCommand::Send { command, shell, cwd } => {
+        CliCommand::Send { command, shell, cwd, idle } => {
             args.insert("command".into(), json!(command));
+            if *idle {
+                args.insert("idle".into(), json!(true));
+            }
             if let Some(shell) = shell {
                 args.insert("shell".into(), json!(shell));
             }
@@ -446,11 +458,11 @@ mod tests {
         assert_eq!(send.target.as_deref(), Some("build"));
         assert_eq!(
             send.command,
-            CliCommand::Send { command: "cargo test -p x --json".into(), shell: Some("bash".into()), cwd: None },
+            CliCommand::Send { command: "cargo test -p x --json".into(), shell: Some("bash".into()), cwd: None, idle: false },
             "flags after the command belong to the command"
         );
         let send = parse_args(&args("send -- -v --version")).unwrap();
-        assert_eq!(send.command, CliCommand::Send { command: "-v --version".into(), shell: None, cwd: None });
+        assert_eq!(send.command, CliCommand::Send { command: "-v --version".into(), shell: None, cwd: None, idle: false });
         assert_eq!(
             parse_args(&args("capture -t 2 -n 20")).unwrap().command,
             CliCommand::Capture { lines: Some(20), blocks: 1 }
@@ -464,6 +476,11 @@ mod tests {
         );
         assert!(parse_args(&args("quick spin")).is_err());
         assert!(parse_args(&args("send")).is_err());
+        // `--idle` uses the folder you are in to choose the repository.
+        let idle = parse_args(&args("send --idle make test")).unwrap();
+        let here = std::env::current_dir().unwrap().display().to_string();
+        assert_eq!(idle.command, CliCommand::Send { command: "make test".into(), shell: None, cwd: Some(here.clone()), idle: true });
+        assert_eq!(tool_request(&idle), ("mrt_run_command", json!({ "command": "make test", "cwd": here, "idle": true })));
         assert!(parse_args(&args("list extra")).is_err());
         assert!(parse_args(&args("capture -n many")).is_err());
         assert!(parse_args(&args("list --bogus")).is_err());

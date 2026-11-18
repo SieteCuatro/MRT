@@ -8,6 +8,7 @@ use crate::app::MrtGuiApp;
 use crate::keymap::{Action, Keymap, Platform, PALETTE_ACTIONS};
 use crate::theme::Palette;
 use egui::RichText;
+use mrt_ai::keys::{KeySource, API_KEYS};
 use mrt_core::config::{MrtConfig, KNOWN_AI_PROVIDERS};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -222,6 +223,11 @@ pub struct SettingsState {
     new_binding_action: String,
     /// Give the search box the keyboard on the next frame (just opened).
     focus_search: bool,
+    /// Where each of `mrt_ai::keys::API_KEYS` comes from, read on a background thread
+    /// when the window opens (`None` until then).
+    key_sources: std::sync::Arc<std::sync::Mutex<Option<Vec<KeySource>>>>,
+    /// Keys typed into the API key fields, by variable name.
+    key_inputs: HashMap<&'static str, String>,
 }
 
 impl SettingsState {
@@ -234,6 +240,19 @@ impl SettingsState {
         self.status = None;
         self.focus_search = !self.open;
         self.open = true;
+        self.refresh_key_sources();
+    }
+
+    /// Reads where every API key comes from, on a background thread (the keyring can
+    /// be slow to answer).
+    fn refresh_key_sources(&mut self) {
+        let slot = self.key_sources.clone();
+        std::thread::spawn(move || {
+            let sources = API_KEYS.iter().map(|(name, _)| mrt_ai::keys::key_source(name)).collect();
+            if let Ok(mut slot) = slot.lock() {
+                *slot = Some(sources);
+            }
+        });
     }
 
     /// The edits that turn the file into the form: changed keys and reset ones.
@@ -335,6 +354,7 @@ impl MrtGuiApp {
                             setting_row(ui, state, setting, &shells);
                         }
                     }
+                    api_keys_section(ui, state, &query);
                     keybindings_section(ui, state, &query, &entries, &issues, &user_bindings, &mut binding_edit);
                 });
                 ui.separator();
@@ -439,6 +459,76 @@ fn choice(ui: &mut egui::Ui, key: &str, value: &mut String, options: impl Iterat
     changed
 }
 
+/// API keys: where each provider's key comes from, a field to store one in the OS
+/// keyring, and Remove for a stored one. Keys are written right away, never to the
+/// config file.
+fn api_keys_section(ui: &mut egui::Ui, state: &mut SettingsState, query: &str) {
+    let query = query.trim().to_lowercase();
+    let rows: Vec<usize> = (0..API_KEYS.len())
+        .filter(|&i| {
+            let (name, provider) = API_KEYS[i];
+            query.is_empty() || "api keys keyring secrets".contains(&query) || name.to_lowercase().contains(&query) || provider.to_lowercase().contains(&query)
+        })
+        .collect();
+    if rows.is_empty() {
+        return;
+    }
+    ui.add_space(6.0);
+    ui.label(RichText::new("API keys").size(15.0).strong().color(Palette::TEXT_PRIMARY()));
+    ui.separator();
+    ui.label(
+        RichText::new(format!(
+            "Stored {} for MRT started without your shell's environment. An environment variable with the same name wins.",
+            mrt_ai::keys::keyring_name()
+        ))
+        .small()
+        .color(Palette::TEXT_SECONDARY()),
+    );
+    let sources = state.key_sources.lock().ok().and_then(|s| s.clone());
+    let mut changed = false;
+    for i in rows {
+        let (name, provider) = API_KEYS[i];
+        let source = sources.as_ref().and_then(|s| s.get(i).copied());
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width((ui.available_width() - 300.0).max(160.0));
+                ui.label(RichText::new(provider).strong().color(Palette::TEXT_PRIMARY()));
+                ui.label(RichText::new(name).monospace().small().color(Palette::TEXT_MUTED()));
+                let (text, color) = match source {
+                    None => ("checking…", Palette::TEXT_MUTED()),
+                    Some(KeySource::Missing) => ("not set", Palette::TEXT_MUTED()),
+                    Some(source) => (source.label(), Palette::ACCENT_GREEN()),
+                };
+                ui.label(RichText::new(text).small().color(color));
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if source == Some(KeySource::Keyring) && ui.small_button("Remove").clicked() {
+                    state.status = Some(match mrt_ai::keys::delete_api_key(name) {
+                        Ok(()) => (format!("Removed {name} from the keyring"), false),
+                        Err(error) => (error, true),
+                    });
+                    changed = true;
+                }
+                let input = state.key_inputs.entry(name).or_default();
+                let save = ui.add_enabled(!input.trim().is_empty(), egui::Button::new("Save"));
+                ui.add(egui::TextEdit::singleline(input).password(true).hint_text("paste a key").desired_width(170.0));
+                if save.clicked() {
+                    state.status = Some(match mrt_ai::keys::store_api_key(name, input) {
+                        Ok(()) => (format!("Stored {name} {}", mrt_ai::keys::keyring_name()), false),
+                        Err(error) => (error, true),
+                    });
+                    input.clear();
+                    changed = true;
+                }
+            });
+        });
+        ui.add_space(4.0);
+    }
+    if changed {
+        state.refresh_key_sources();
+    }
+}
+
 /// Keybindings: problems in the user's `[keybindings]`, every binding (user ones can
 /// be removed), and a row to add one. Changes are written right away.
 fn keybindings_section(
@@ -532,6 +622,7 @@ mod tests {
 
     #[test]
     fn the_form_writes_only_what_changed() {
+        mrt_ai::keys::set_secret_store(std::sync::Arc::new(mrt_ai::keys::MemoryStore::default()));
         let dir = std::env::temp_dir().join(format!("mrt-settings-{}", uuid::Uuid::new_v4()));
         let path = dir.join("nested").join("config.toml");
         let mut state = SettingsState::default();
@@ -564,6 +655,7 @@ mod tests {
 
     #[test]
     fn saving_from_the_window_applies_the_config() {
+        mrt_ai::keys::set_secret_store(std::sync::Arc::new(mrt_ai::keys::MemoryStore::default()));
         let dir = std::env::temp_dir().join(format!("mrt-settings-app-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");

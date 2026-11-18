@@ -465,7 +465,7 @@ MRT reads two optional [TOML](https://toml.io) files. Every setting is optional:
 | User config | `~/.config/mrt/config.toml` on Linux and macOS (`$XDG_CONFIG_HOME/mrt/config.toml` if set), `%APPDATA%\mrt\config.toml` on Windows. Set `MRT_CONFIG` to use another file. |
 | Project config | `.mrt.toml` in the folder you start MRT from. It is merged on top of the user config, so its values win. |
 
-**Settings window.** `Ctrl+,`, `:settings`, **Settings** in the sidebar or the Command Palette open a searchable form for the common settings (font, theme, default shell, Safety Gate, AI provider and model, notifications, session options). **Save** writes only the values you changed into the user config file: comments, other keys and their order stay as they were, and MRT applies the file like a change made by hand. `↺` puts a setting back to its default (the key is removed from the file). A setting that this folder's `.mrt.toml` also sets is marked, because the project file wins. The window also lists every keybinding with the problems found in `[keybindings]` (conflicts, unknown keys or actions) in red; **Add** writes a new `[keybindings]` entry once it does not conflict, and **Remove** deletes one of yours.
+**Settings window.** `Ctrl+,`, `:settings`, **Settings** in the sidebar or the Command Palette open a searchable form for the common settings (font, theme, default shell, Safety Gate, AI provider and model, notifications, session options). **Save** writes only the values you changed into the user config file: comments, other keys and their order stay as they were, and MRT applies the file like a change made by hand. `↺` puts a setting back to its default (the key is removed from the file). A setting that this folder's `.mrt.toml` also sets is marked, because the project file wins. **API keys** stores a provider key in the OS keyring (Windows Credential Manager, the macOS Keychain, or the Secret Service on Linux) and shows where each key comes from; keys are never written to the config file. The window also lists every keybinding with the problems found in `[keybindings]` (conflicts, unknown keys or actions) in red; **Add** writes a new `[keybindings]` entry once it does not conflict, and **Remove** deletes one of yours.
 
 **Merging.** Tables merge key by key. `[[mcp.servers]]` entries merge by `name` (a project entry replaces the user entry with the same name; others are added). `safety.blocked_patterns` is the union of both lists, so a project file cannot remove your blocked patterns.
 
@@ -539,7 +539,8 @@ MRT's window is exposed to screen readers through AccessKit (Windows UI Automati
 
 | Variable | Purpose |
 | :--- | :--- |
-| `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY` | AI provider keys, checked in this order (`ai.provider` in the config can move one to the front). See [AI Providers](AI_PROVIDERS_AND_AGENTS.md). |
+| `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY` | AI provider keys, checked in this order (`ai.provider` in the config can move one to the front). A key can also be stored in the OS keyring from **Settings → API keys**; the environment variable wins when both are set. See [AI Providers](AI_PROVIDERS_AND_AGENTS.md). |
+| `MRT_NO_KEYRING` | Set to `1` so MRT never reads or writes the OS keyring. |
 | `MRT_CONFIG` | Path of the user configuration file, instead of the default location. |
 | `OLLAMA_MODEL`, `OLLAMA_HOST` | Use a local Ollama model (default host `http://localhost:11434`). They override `ai.model` and `ai.ollama_endpoint`. |
 | `MRT_MCP_BRIDGE_PORT`, `MRT_MCP_BRIDGE_TOKEN` | Point `mrt --mcp-server` at a specific GUI bridge instead of reading `mcp-bridge.json`. |
@@ -548,7 +549,7 @@ MRT's window is exposed to screen readers through AccessKit (Windows UI Automati
 | `RUST_LOG` | Log level for the GUI's stderr logs (default `info`), e.g. `RUST_LOG=debug`. |
 | `MRT_DATA_DIR` | Use this folder for MRT's data files (history, layout, bridge, session host, pairing) instead of the platform's data folder: for portable installs, or to keep test runs apart. |
 
-With no AI variables set, MRT uses its offline heuristic engine, so `#` prompts and **Diagnose** always work.
+With no AI keys in the environment or the keyring, MRT uses its offline heuristic engine, so `#` prompts and **Diagnose** always work.
 
 ---
 

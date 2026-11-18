@@ -74,7 +74,7 @@ cargo test --workspace
 
 ## AI Providers
 
-MRT checks configured environment variables in the following order (set `ai.provider` in the [config file](docs/USER_GUIDE.md#6-configuration-file) to try one first) and falls back to the built-in offline heuristic engine if none are set or reachable:
+MRT checks the API keys in the environment, or stored in the OS keyring from **Settings → API keys**, in the following order (set `ai.provider` in the [config file](docs/USER_GUIDE.md#6-configuration-file) to try one first) and falls back to the built-in offline heuristic engine if none are set or reachable:
 
 | Provider | Environment Variable | Default Model |
 | :--- | :--- | :--- |

@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### New
+- **API keys in the OS keyring**: **Settings → API keys** stores a provider key in Windows Credential Manager, the macOS Keychain or the Secret Service on Linux, so MRT started from a desktop launcher finds it without environment variables. The settings window shows where each key comes from; an environment variable still wins. `MRT_NO_KEYRING=1` turns the keyring off.
 - **Settings window**: `Ctrl+,`, `:settings`, the sidebar or the Command Palette open a searchable form for font, theme, default shell, Safety Gate, AI provider and model, notifications and session options. Saving writes only the changed values into `config.toml`, keeping its comments and other keys, and MRT applies them at once. The window lists every keybinding with the conflicts and errors in `[keybindings]`, and adds or removes your own bindings.
 
 ## v0.4.0 — 2026-11-18

@@ -113,6 +113,12 @@ fn main() -> Result<()> {
         centered: true,
         viewport: egui::ViewportBuilder::default()
             .with_title("Modern Rust Terminal")
+            // Window and taskbar icon; on Linux the app id matches the desktop
+            // entry (`StartupWMClass=mrt`, `Icon=mrt`).
+            .with_icon(std::sync::Arc::new(
+                eframe::icon_data::from_png_bytes(include_bytes!("../assets/mrt-256.png")).unwrap_or_default(),
+            ))
+            .with_app_id("mrt")
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([860.0, 520.0])
             .with_visible(true)

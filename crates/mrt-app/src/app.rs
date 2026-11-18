@@ -7391,6 +7391,13 @@ error: test failed
     }
 
     #[test]
+    fn the_window_icon_decodes() {
+        let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/mrt-256.png")).expect("valid PNG");
+        assert_eq!((icon.width, icon.height), (256, 256));
+        assert!(icon.rgba.chunks(4).any(|p| p[3] == 0), "transparent corners");
+    }
+
+    #[test]
     fn agent_ptys_are_shown_with_the_grid_renderer() {
         let mut app = MrtGuiApp::new();
         let state = app.mcp_host.local_server_state.clone();

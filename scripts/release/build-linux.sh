@@ -32,6 +32,11 @@ if [ "$(printf '%s\n%s\n' "$NEWEST" "$GLIBC" | sort -V | tail -1)" != "$GLIBC" ]
 fi
 echo "newest glibc symbol: $NEWEST"
 
+# The binary, plus the desktop entry and its icon for a menu entry.
+STAGE="$(mktemp -d)"
+trap 'rm -rf "$STAGE"' EXIT
+cp "$BIN" "$STAGE/mrt"
+cp "$ROOT/packaging/linux/mrt.desktop" "$ROOT/packaging/linux/mrt.png" "$STAGE/"
 ARCHIVE="$ROOT/mrt-$TAG-$TARGET.tar.gz"
-tar -czf "$ARCHIVE" -C "$(dirname "$BIN")" mrt
+tar -czf "$ARCHIVE" -C "$STAGE" mrt mrt.desktop mrt.png
 echo "wrote $ARCHIVE"

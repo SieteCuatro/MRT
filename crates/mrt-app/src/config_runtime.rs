@@ -137,6 +137,12 @@ impl MrtGuiApp {
             model: ai.model.clone(),
             ollama_endpoint: ai.ollama_endpoint.clone(),
         });
+        mrt_ai::set_ai_prices(
+            ai.prices
+                .iter()
+                .map(|(model, p)| (model.clone(), mrt_ai::AiPrice { input: p.input, output: p.output }))
+                .collect(),
+        );
 
         let to_connect: Vec<_> = self
             .config_state

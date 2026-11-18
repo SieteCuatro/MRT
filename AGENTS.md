@@ -46,6 +46,7 @@ The Cargo workspace contains 5 modular crates:
   - `client.rs`: MRT as an MCP Host, connecting to in-process loopback and external `stdio` or Streamable HTTP MCP servers through one shared session layer (with one-click presets for Filesystem, Git, Memory, SQLite, Fetch).
   - `transport.rs`: `stdio` and Streamable HTTP transports (JSON/SSE responses, `Mcp-Session-Id`, `MCP-Protocol-Version`, GET listen stream, `Last-Event-ID` resume, redacted custom headers).
 - **`crates/mrt-ai`**:
+  - `usage.rs`: Token use and estimated cost of AI requests (`AiUsage`, `usage_from_response` for every provider, prices from `[ai.prices]` via `set_ai_prices`), shown on suggestions, `:assist` blocks, the sidebar and `:ai-usage`.
   - `assist.rs`: Multi-step `:assist` investigations over MRT's read-only MCP tools (model-driven JSON tool calls, or a built-in offline plan); suggestions are never executed directly.
   - `lib.rs`: Multi-provider AI client supporting **Google Gemini**, **Anthropic Claude**, **OpenAI**, **xAI Grok**, **DeepSeek**, **OpenRouter**, **Local Ollama**, and a deterministic **Offline Polyglot Heuristic Engine**, with streaming token delivery (`diagnose_command_error_streaming`).
 - **`crates/mrt-app`**:

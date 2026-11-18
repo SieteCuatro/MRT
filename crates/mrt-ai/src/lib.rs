@@ -1,5 +1,7 @@
 pub mod assist;
+pub mod usage;
 pub use assist::{run_assist, AssistOutcome, AssistStep, ASSIST_TOOLS};
+pub use usage::{format_usd, group_digits, set_ai_prices, usage_from_response, AiPrice, AiUsage};
 use anyhow::Result;
 use mrt_core::{ShellKind, ShellProfile};
 use serde::{Deserialize, Serialize};
@@ -12,6 +14,10 @@ pub struct AiCommandProposal {
     pub proposed_command: String,
     pub explanation: String,
     pub provider_used: String,
+    /// Tokens and estimated cost of the provider calls behind this proposal (also
+    /// calls that failed to give a usable reply). `None` for the offline engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<AiUsage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,44 +54,47 @@ pub async fn translate_nl_to_command(
 
     let backends = plan_ai_backends(&|name| std::env::var(name).ok(), &ai_preferences());
 
+    // Every reply costs tokens, also one that was not usable.
+    let mut usage = AiUsage::default();
     for backend in backends {
         let result = match &backend {
-            AiBackend::Gemini { api_key, model } => {
-                call_gemini_translator(api_key, model, cleaned_query, shell, &system_prompt).await
+            AiBackend::Gemini { api_key, model } => call_gemini_translator(api_key, model, &system_prompt).await,
+            AiBackend::Anthropic { api_key, model } => call_anthropic_translator(api_key, model, &system_prompt).await,
+            AiBackend::OpenAiCompatible { endpoint, api_key, model, label, .. } => {
+                call_openai_compatible_translator(endpoint, api_key, model, label, &system_prompt).await
             }
-            AiBackend::Anthropic { api_key, model } => {
-                call_anthropic_translator(api_key, model, cleaned_query, shell, &system_prompt)
-                    .await
-            }
-            AiBackend::OpenAiCompatible {
-                endpoint,
-                api_key,
-                model,
-                label,
-                ..
-            } => {
-                call_openai_compatible_translator(
-                    endpoint,
-                    api_key,
-                    model,
-                    label,
-                    cleaned_query,
-                    shell,
-                    &system_prompt,
-                )
-                .await
-            }
-            AiBackend::Ollama { host, model } => {
-                call_ollama_translator(host, model, cleaned_query, shell, &system_prompt).await
-            }
+            AiBackend::Ollama { host, model } => call_ollama_translator(host, model, &system_prompt).await,
         };
-        if let Ok(p) = result {
-            return Ok(p);
+        let Ok(reply) = result else { continue };
+        usage.add(&usage_from_response(&backend, &reply));
+        let label = match &backend {
+            AiBackend::Gemini { model, .. } => format!("Google Gemini ({model})"),
+            AiBackend::Anthropic { model, .. } => format!("Anthropic Claude ({model})"),
+            AiBackend::OpenAiCompatible { label, .. } => label.clone(),
+            AiBackend::Ollama { model, .. } => format!("Ollama ({model})"),
+        };
+        let text = reply_text(&backend, &reply);
+        if let Some(Ok(mut proposal)) = text.map(|t| parse_ai_json_response(t, cleaned_query, shell, &label)) {
+            proposal.usage = Some(usage);
+            return Ok(proposal);
         }
     }
 
     // Built-in Offline Polyglot Heuristic Engine
-    Ok(heuristic_shell_translator(cleaned_query, shell))
+    let mut proposal = heuristic_shell_translator(cleaned_query, shell);
+    proposal.usage = (!usage.is_empty()).then_some(usage);
+    Ok(proposal)
+}
+
+/// The text of a provider's reply.
+pub(crate) fn reply_text<'a>(backend: &AiBackend, reply: &'a serde_json::Value) -> Option<&'a str> {
+    let pointer = match backend {
+        AiBackend::Gemini { .. } => "/candidates/0/content/parts/0/text",
+        AiBackend::Anthropic { .. } => "/content/0/text",
+        AiBackend::OpenAiCompatible { .. } => "/choices/0/message/content",
+        AiBackend::Ollama { .. } => "/response",
+    };
+    reply.pointer(pointer).and_then(|v| v.as_str())
 }
 
 /// Provider preferences from MRT's configuration file (`[ai]`). API keys never come
@@ -299,13 +308,7 @@ fn build_system_prompt(
     )
 }
 
-async fn call_gemini_translator(
-    api_key: &str,
-    model: &str,
-    query: &str,
-    shell: &ShellProfile,
-    prompt: &str,
-) -> Result<AiCommandProposal> {
+async fn call_gemini_translator(api_key: &str, model: &str, prompt: &str) -> Result<serde_json::Value> {
     let url = format!(
         "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     );
@@ -320,22 +323,10 @@ async fn call_gemini_translator(
         }))
         .send()
         .await?;
-
-    let val: serde_json::Value = resp.json().await?;
-    let text = val
-        .pointer("/candidates/0/content/parts/0/text")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("Invalid Gemini response"))?;
-    parse_ai_json_response(text, query, shell, &format!("Google Gemini ({model})"))
+    Ok(resp.json().await?)
 }
 
-async fn call_anthropic_translator(
-    api_key: &str,
-    model: &str,
-    query: &str,
-    shell: &ShellProfile,
-    prompt: &str,
-) -> Result<AiCommandProposal> {
+async fn call_anthropic_translator(api_key: &str, model: &str, prompt: &str) -> Result<serde_json::Value> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(12))
         .build()?;
@@ -350,13 +341,7 @@ async fn call_anthropic_translator(
         }))
         .send()
         .await?;
-
-    let val: serde_json::Value = resp.json().await?;
-    let text = val
-        .pointer("/content/0/text")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("Invalid Anthropic response"))?;
-    parse_ai_json_response(text, query, shell, &format!("Anthropic Claude ({model})"))
+    Ok(resp.json().await?)
 }
 
 async fn call_openai_compatible_translator(
@@ -364,10 +349,8 @@ async fn call_openai_compatible_translator(
     api_key: &str,
     model: &str,
     provider_label: &str,
-    query: &str,
-    shell: &ShellProfile,
     prompt: &str,
-) -> Result<AiCommandProposal> {
+) -> Result<serde_json::Value> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(12))
         .build()?;
@@ -380,23 +363,12 @@ async fn call_openai_compatible_translator(
             "response_format": { "type": "json_object" }
         }))
         .send()
-        .await?;
-
-    let val: serde_json::Value = resp.json().await?;
-    let text = val
-        .pointer("/choices/0/message/content")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("Invalid response from {provider_label}"))?;
-    parse_ai_json_response(text, query, shell, provider_label)
+        .await
+        .map_err(|e| anyhow::anyhow!("{provider_label}: {e}"))?;
+    Ok(resp.json().await?)
 }
 
-async fn call_ollama_translator(
-    host: &str,
-    model: &str,
-    query: &str,
-    shell: &ShellProfile,
-    prompt: &str,
-) -> Result<AiCommandProposal> {
+async fn call_ollama_translator(host: &str, model: &str, prompt: &str) -> Result<serde_json::Value> {
     let url = format!("{}/api/generate", host.trim_end_matches('/'));
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -411,13 +383,7 @@ async fn call_ollama_translator(
         }))
         .send()
         .await?;
-
-    let val: serde_json::Value = resp.json().await?;
-    let text = val
-        .get("response")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("Invalid Ollama response"))?;
-    parse_ai_json_response(text, query, shell, &format!("Ollama ({model})"))
+    Ok(resp.json().await?)
 }
 
 fn parse_ai_json_response(
@@ -448,6 +414,7 @@ fn parse_ai_json_response(
         proposed_command: cmd,
         explanation: exp,
         provider_used: provider_label.to_string(),
+        usage: None,
     })
 }
 
@@ -571,6 +538,7 @@ pub fn heuristic_shell_translator(query: &str, shell: &ShellProfile) -> AiComman
         proposed_command: cmd,
         explanation,
         provider_used: format!("MRT Polyglot Engine ({})", shell.kind.short_label()),
+        usage: None,
     }
 }
 

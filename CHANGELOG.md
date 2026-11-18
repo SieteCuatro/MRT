@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### New
+- **AI token use and cost**: every `#` suggestion and `:assist` answer shows the tokens it used and its estimated cost, the sidebar shows the session total, and `:ai-usage` lists them per tab. Prices come from a new `[ai.prices]` table in the config (dollars per million tokens, by model); local Ollama models are free, and models without a price still count their tokens. `mrt_ai_translate` returns the usage too.
 - **Send work to an idle tab**: `mrt send --idle COMMAND` and `mrt_run_command` with `idle: true` run the command in a tab of the same git checkout that is not running anything (preferring the active tab), or open a new tab there when all are busy, so scripts and agents can queue work while another tab builds. Tabs where another agent's `mrt_run_command` is running count as busy.
 - **Review before merge**: a worktree tab has a bar under the header with Review, Merge, Open PR and Discard (`:worktree review|merge|pr|discard`). Review shows the commits, files and colored diff against the branch it was created from, plus files not committed yet. Merge merges it in the main checkout, Open PR pushes it and opens a pull request with `gh`, and Discard deletes the folder and the branch; all three always ask in the Safety Gate first.
 - **Safety Gate rules for git**: `git push`, `git merge` and `gh pr create` are Moderate (also as `git -C <folder> push`), `git branch -D` and `git worktree remove --force` are Critical.

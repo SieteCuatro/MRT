@@ -95,6 +95,8 @@ pub struct TerminalTab {
     /// Worktree tab (`:worktree <branch>`): the git worktree it works in. Closing the
     /// tab offers to remove the worktree folder when it has no uncommitted changes.
     pub worktree: Option<mrt_core::worktree::Worktree>,
+    /// Tokens and estimated cost of the AI requests made from this tab (`#`, `:assist`).
+    pub ai_usage: mrt_ai::AiUsage,
 }
 
 /// Closing a worktree tab waits for this prompt: remove the worktree folder or keep it.
@@ -128,6 +130,7 @@ impl TerminalTab {
             broadcast: false,
             sandbox_root: None,
             worktree: None,
+            ai_usage: mrt_ai::AiUsage::default(),
         }
     }
 
@@ -161,6 +164,11 @@ pub enum AsyncWorkerEvent {
     AiCommandReady {
         tab_id: Uuid,
         proposal: AiCommandProposal,
+    },
+    /// Tokens an AI request spent (from `:assist`).
+    AiUsageRecorded {
+        tab_id: Uuid,
+        usage: mrt_ai::AiUsage,
     },
     AiExplanationChunk {
         tab_id: Uuid,
@@ -667,6 +675,8 @@ pub struct MrtGuiApp {
     pub(crate) quit_requested: bool,
     /// `:agents`: the window showing agents' PTYs (`mrt_pty_*`) live.
     pub(crate) show_agent_ptys: bool,
+    /// Tokens and estimated cost of every AI request since MRT started.
+    pub(crate) ai_usage_session: mrt_ai::AiUsage,
     /// One screen emulator per agent PTY and the transcript bytes it has read.
     pub(crate) agent_screens: HashMap<Uuid, (TerminalEmulator, usize)>,
     /// The session host that runs tab commands (`None` until connected, in tests, or
@@ -967,6 +977,7 @@ impl MrtGuiApp {
             pending_service_command: None,
             quit_requested: false,
             show_agent_ptys: false,
+            ai_usage_session: mrt_ai::AiUsage::default(),
             agent_screens: HashMap::new(),
             session_host: Arc::new(std::sync::Mutex::new(None)),
             host_blocks: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
@@ -2669,7 +2680,11 @@ impl MrtGuiApp {
                     self.sync_mcp_from_gui();
                     self.on_runbook_block_completed(&block);
                 }
+                AsyncWorkerEvent::AiUsageRecorded { tab_id, usage } => self.record_ai_usage(tab_id, &usage),
                 AsyncWorkerEvent::AiCommandReady { tab_id, proposal } => {
+                    if let Some(usage) = &proposal.usage {
+                        self.record_ai_usage(tab_id, usage);
+                    }
                     if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
                         if tab.input_line.is_empty() {
                             tab.input_line = proposal.proposed_command.clone();
@@ -2914,6 +2929,19 @@ impl MrtGuiApp {
                 });
                 return;
             }
+        }
+
+        if raw_input == ":ai-usage" || raw_input == ":ai-usage reset" {
+            if raw_input.ends_with("reset") {
+                self.ai_usage_session = mrt_ai::AiUsage::default();
+                for tab in &mut self.tabs {
+                    tab.ai_usage = mrt_ai::AiUsage::default();
+                }
+            }
+            let (text, table) = self.ai_usage_report();
+            let block = CommandBlock::new_structured(&raw_input, PROCESS_BLOCK_SHELL, cwd.display().to_string(), text, table, 0, 0);
+            self.push_block(tab_id, block);
+            return;
         }
 
         if raw_input == ":agents" {
@@ -4526,6 +4554,10 @@ impl MrtGuiApp {
             )
             .await;
             trace.push_str(&format!("\nAnswered by {} after {} tool call(s).\n", outcome.provider, outcome.steps.len()));
+            if !outcome.usage.is_empty() {
+                trace.push_str(&format!("AI usage: {}\n", outcome.usage.summary()));
+                let _ = tx.send(AsyncWorkerEvent::AiUsageRecorded { tab_id, usage: outcome.usage.clone() });
+            }
             let mut block = CommandBlock::new_completed(
                 &raw_input,
                 "mrt-ai",
@@ -4679,6 +4711,44 @@ impl MrtGuiApp {
             tab_title: worktree.branch,
             ..Default::default()
         });
+    }
+
+    /// Adds an AI request's tokens and cost to its tab and to the session.
+    fn record_ai_usage(&mut self, tab_id: Uuid, usage: &mrt_ai::AiUsage) {
+        self.ai_usage_session.add(usage);
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+            tab.ai_usage.add(usage);
+        }
+    }
+
+    /// `:ai-usage`: AI requests, tokens and estimated cost per tab and for the session,
+    /// as tab-separated text and as the table the block shows.
+    fn ai_usage_report(&self) -> (String, StructuredOutput) {
+        let cost = |u: &mrt_ai::AiUsage| {
+            let priced = u.requests - u.unpriced_requests;
+            match (priced, u.unpriced_requests) {
+                (0, 0) => "$0".to_string(),
+                (0, _) => "no price".to_string(),
+                (_, 0) => mrt_ai::format_usd(u.cost_usd),
+                (_, n) => format!("{} + {n} without a price", mrt_ai::format_usd(u.cost_usd)),
+            }
+        };
+        let row = |name: &str, u: &mrt_ai::AiUsage| {
+            vec![
+                name.to_string(),
+                u.requests.to_string(),
+                mrt_ai::group_digits(u.input_tokens),
+                mrt_ai::group_digits(u.output_tokens),
+                cost(u),
+            ]
+        };
+        let headers: Vec<String> =
+            ["tab", "requests", "input tokens", "output tokens", "estimated cost"].iter().map(|h| h.to_string()).collect();
+        let mut rows: Vec<Vec<String>> =
+            self.tabs.iter().filter(|t| !t.ai_usage.is_empty()).map(|t| row(&t.title, &t.ai_usage)).collect();
+        rows.push(row("whole session", &self.ai_usage_session));
+        let text = std::iter::once(&headers).chain(rows.iter()).map(|r| r.join("\t")).collect::<Vec<_>>().join("\n");
+        (text, StructuredOutput::Table { headers, rows })
     }
 
     /// `:worktree review|merge|pr|discard` in a worktree tab. Review is read-only;
@@ -5291,6 +5361,17 @@ impl MrtGuiApp {
                                 None => "MCP bridge offline".to_string(),
                             };
                             ui.label(RichText::new(bridge).size(12.0).color(Palette::TEXT_MUTED()));
+                            let usage = &self.ai_usage_session;
+                            if !usage.is_empty() {
+                                let priced = usage.requests > usage.unpriced_requests;
+                                let text = format!(
+                                    "AI · {} tokens{}",
+                                    mrt_ai::group_digits(usage.total_tokens()),
+                                    if priced { format!(" · {}", mrt_ai::format_usd(usage.cost_usd)) } else { String::new() }
+                                );
+                                ui.label(RichText::new(text).size(12.0).color(Palette::TEXT_MUTED()))
+                                    .on_hover_text(format!("This session: {}\n:ai-usage shows it per tab", usage.summary()));
+                            }
                         });
                 }
             });
@@ -5680,6 +5761,9 @@ impl eframe::App for MrtGuiApp {
                                             .size(12.0)
                                             .color(Palette::TEXT_SECONDARY()),
                                     );
+                                    if let Some(usage) = &proposal.usage {
+                                        ui.label(RichText::new(usage.summary()).size(12.0).color(Palette::TEXT_MUTED()));
+                                    }
                                 });
                                 if !proposal.explanation.trim().is_empty() {
                                     ui.label(
@@ -6743,11 +6827,53 @@ mod tests {
             proposed_command: command.into(),
             explanation: String::new(),
             provider_used: "test".into(),
+            usage: None,
         };
         app.tx
             .send(AsyncWorkerEvent::AiCommandReady { tab_id, proposal })
             .unwrap();
         app.process_async_events();
+    }
+
+    #[test]
+    fn ai_usage_adds_up_per_tab_and_session() {
+        let mut app = MrtGuiApp::new();
+        let first = app.tabs[0].id;
+        app.tabs.push(TerminalTab::new("Second".into(), 0, app.tabs[0].cwd.clone()));
+        let second = app.tabs[1].id;
+        let mut proposal = AiCommandProposal {
+            query: String::new(),
+            target_shell: app.shells[0].name.clone(),
+            proposed_command: "ls".into(),
+            explanation: String::new(),
+            provider_used: "test".into(),
+            usage: Some(mrt_ai::AiUsage::request("ollama", "local", 100, 20)),
+        };
+        app.tx.send(AsyncWorkerEvent::AiCommandReady { tab_id: first, proposal: proposal.clone() }).unwrap();
+        proposal.usage = Some(mrt_ai::AiUsage::request("openai", "model-without-price", 50, 5));
+        app.tx.send(AsyncWorkerEvent::AiCommandReady { tab_id: second, proposal }).unwrap();
+        app.tx
+            .send(AsyncWorkerEvent::AiUsageRecorded { tab_id: second, usage: mrt_ai::AiUsage::request("ollama", "local", 1_000, 0) })
+            .unwrap();
+        app.process_async_events();
+        assert_eq!((app.tabs[0].ai_usage.requests, app.tabs[0].ai_usage.input_tokens), (1, 100));
+        assert_eq!((app.tabs[1].ai_usage.requests, app.tabs[1].ai_usage.input_tokens), (2, 1_050));
+        assert_eq!(app.ai_usage_session.total_tokens(), 1_175);
+
+        app.active_tab = 0;
+        app.submit_input(Some(":ai-usage".into()), false);
+        let report = app.tabs[0].blocks.last().unwrap();
+        let mrt_core::StructuredOutput::Table { headers, rows } = &report.structured else {
+            panic!("expected a table: {}", report.plain_output)
+        };
+        assert_eq!(headers[0], "tab");
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!(rows[1], vec!["Second", "2", "1,050", "5", "$0 + 1 without a price"]);
+        assert_eq!(rows[2][0], "whole session");
+        assert_eq!(rows[2][1], "3");
+
+        app.submit_input(Some(":ai-usage reset".into()), false);
+        assert!(app.ai_usage_session.is_empty() && app.tabs.iter().all(|t| t.ai_usage.is_empty()));
     }
 
     #[test]

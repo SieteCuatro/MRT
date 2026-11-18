@@ -57,6 +57,12 @@ pub enum Action {
     EnterTable(String),
     /// Leave the active key table.
     ExitTable,
+    /// Open a new window with a new tab.
+    NewWindow,
+    /// Move the active tab to a new window.
+    MoveTabToNewWindow,
+    /// Move the active tab back to the main window.
+    MoveTabToMainWindow,
 }
 
 /// The simple (argument-free) actions, in Command Palette order.
@@ -72,6 +78,9 @@ pub const PALETTE_ACTIONS: &[Action] = &[
     Action::CloseTab,
     Action::NextTab,
     Action::PreviousTab,
+    Action::NewWindow,
+    Action::MoveTabToNewWindow,
+    Action::MoveTabToMainWindow,
     Action::ToggleExplorer,
     Action::ToggleHistory,
     Action::ToggleRunbooks,
@@ -95,6 +104,9 @@ const SIMPLE_ACTIONS: &[(Action, &str, &str)] = &[
     (Action::CloseTab, "close_tab", "Close tab"),
     (Action::NextTab, "next_tab", "Next tab"),
     (Action::PreviousTab, "previous_tab", "Previous tab"),
+    (Action::NewWindow, "new_window", "New window"),
+    (Action::MoveTabToNewWindow, "move_tab_to_new_window", "Move tab to a new window"),
+    (Action::MoveTabToMainWindow, "move_tab_to_main_window", "Move tab to the main window"),
     (
         Action::SplitHorizontal,
         "split_horizontal",

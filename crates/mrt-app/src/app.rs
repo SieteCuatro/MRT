@@ -100,6 +100,8 @@ pub struct TerminalTab {
     /// Share of the tab the first pane takes in a split (0.15–0.85), set by dragging
     /// the divider.
     pub split_ratio: f32,
+    /// The window showing the tab: 0 for the main window, else an `ExtraWindow::id`.
+    pub window: u32,
 }
 
 /// The split ratio for the divider dragged to `pos` along a split `length` long that
@@ -158,6 +160,7 @@ impl TerminalTab {
             worktree: None,
             ai_usage: mrt_ai::AiUsage::default(),
             split_ratio: 0.5,
+            window: 0,
         }
     }
 
@@ -313,6 +316,9 @@ pub struct ActiveTuiSession {
     pub mouse_held: Option<crate::term_input::MouseButton>,
     pub mouse_cell: Option<(u16, u16)>,
     pub wheel_accum: f32,
+    /// The part of a line the history view is scrolled past `term.view_offset()`
+    /// (smooth touchpad scrolling), from 0 to 1.
+    pub scroll_frac: f32,
     /// Text selected by dragging (when the program does not take the mouse, or with
     /// Shift), and whether a selection drag is in progress.
     pub selection: Option<crate::widgets::term_view::Selection>,
@@ -353,6 +359,7 @@ impl ActiveTuiSession {
             mouse_held: None,
             mouse_cell: None,
             wheel_accum: 0.0,
+            scroll_frac: 0.0,
             selection: None,
             grid_copy: None,
             grid_search: crate::copy_mode::GridSearch::default(),
@@ -384,6 +391,7 @@ impl ActiveTuiSession {
     /// Back to the live screen, without a search.
     fn leave_grid_copy(&mut self) {
         self.term.set_view_offset(0);
+        self.scroll_frac = 0.0;
         self.grid_search = crate::copy_mode::GridSearch::default();
     }
 
@@ -430,6 +438,7 @@ impl ActiveTuiSession {
                 GridOutcome::Scroll(lines) => {
                     let offset = self.term.view_offset() as i64 + i64::from(lines);
                     self.term.set_view_offset(offset.max(0) as usize);
+                    self.scroll_frac = 0.0;
                 }
                 GridOutcome::StartSearch => self.grid_search.typing = Some(String::new()),
                 outcome @ (GridOutcome::NextMatch | GridOutcome::PreviousMatch) => {
@@ -495,6 +504,7 @@ impl ActiveTuiSession {
             self.selection = None;
             if self.grid_copy.is_none() {
                 self.term.set_view_offset(0);
+                self.scroll_frac = 0.0;
             }
             let _ = self.pty.send_bytes(&bytes);
         }
@@ -533,15 +543,19 @@ impl ActiveTuiSession {
             let _ = self.pty.resize(cols, rows);
         }
         let snapshot = self.term.snapshot();
-        let response =
-            crate::widgets::term_view::paint_terminal(
-                ui,
-                egui::Id::new(("tui_surface", self.tab_id, self.pane)),
-                &snapshot,
-                &font,
-                cell,
-                focused && window_focused,
-            );
+        if snapshot.modes.alt_screen || self.term.view_offset() >= self.term.scrollback_len() {
+            self.scroll_frac = 0.0;
+        }
+        let above = (self.scroll_frac > 0.0).then(|| self.term.line_above_view()).flatten();
+        let response = crate::widgets::term_view::paint_terminal_shifted(
+            ui,
+            egui::Id::new(("tui_surface", self.tab_id, self.pane)),
+            &snapshot,
+            &font,
+            cell,
+            focused && window_focused,
+            crate::widgets::term_view::SmoothShift { shift: self.scroll_frac * cell.y, above: above.as_deref() },
+        );
         // Scrollbar over the right edge when there is history to scroll (not on the
         // alternate screen, which has none).
         let history = self.term.scrollback_len();
@@ -557,6 +571,7 @@ impl ActiveTuiSession {
             if let Some(pos) = bar.interact_pointer_pos().filter(|_| bar.dragged() || bar.clicked()) {
                 let y = pos.y - track.top() - height / 2.0;
                 self.term.set_view_offset(crate::widgets::term_view::scrollbar_offset(track.height(), rows, history, y));
+                self.scroll_frac = 0.0;
             }
             let active = bar.hovered() || bar.dragged() || self.term.view_offset() > 0;
             let color = if active { Palette::TEXT_SECONDARY() } else { Palette::BORDER_FAINT() };
@@ -589,7 +604,7 @@ impl ActiveTuiSession {
                         texture
                     }
                 };
-                let min = response.rect.min + egui::vec2(placement.col as f32 * cell.x, placement.row as f32 * cell.y);
+                let min = response.rect.min + egui::vec2(placement.col as f32 * cell.x, placement.row as f32 * cell.y + self.scroll_frac * cell.y);
                 let rect = egui::Rect::from_min_size(min, egui::vec2(placement.cols as f32 * cell.x, placement.rows as f32 * cell.y));
                 painter.image(texture.id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
             }
@@ -646,6 +661,19 @@ impl ActiveTuiSession {
         }
         text
     }
+}
+
+/// A window besides the main one (an egui viewport). Its tabs are the ones whose
+/// `TerminalTab::window` is `id`; they keep running in the same app, so moving a tab
+/// between windows keeps its shell, blocks and running commands.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ExtraWindow {
+    pub id: u32,
+    /// The tab shown in the window.
+    pub active: Uuid,
+    pub mosaic: bool,
+    /// Not drawn yet: the command input takes focus on its first frame.
+    pub fresh: bool,
 }
 
 pub struct MrtGuiApp {
@@ -735,6 +763,18 @@ pub struct MrtGuiApp {
     pub(crate) ai_usage_session: mrt_ai::AiUsage,
     /// The sidebar tab being dragged to a new place.
     pub(crate) dragging_tab: Option<Uuid>,
+    /// Windows besides the main one, each showing its own tabs.
+    pub(crate) windows: Vec<ExtraWindow>,
+    /// The window being drawn this pass (0 = main): sidebars, tab cycling and new
+    /// tabs follow it.
+    pub(crate) current_window: u32,
+    pub(crate) next_window_id: u32,
+    /// Tabs to move to another window (`None` = a new one) once every window is drawn.
+    pub(crate) pending_tab_moves: Vec<(Uuid, Option<u32>)>,
+    /// Extra windows the user closed this frame; their tabs go back to the main window.
+    pub(crate) pending_window_closes: Vec<u32>,
+    /// The window the Command Palette opened in.
+    pub(crate) palette_window: u32,
     /// One screen emulator per agent PTY and the transcript bytes it has read.
     pub(crate) agent_screens: HashMap<Uuid, (TerminalEmulator, usize)>,
     /// The session host that runs tab commands (`None` until connected, in tests, or
@@ -1037,6 +1077,12 @@ impl MrtGuiApp {
             show_agent_ptys: false,
             ai_usage_session: mrt_ai::AiUsage::default(),
             dragging_tab: None,
+            windows: Vec::new(),
+            current_window: 0,
+            next_window_id: 1,
+            pending_tab_moves: Vec::new(),
+            pending_window_closes: Vec::new(),
+            palette_window: 0,
             agent_screens: HashMap::new(),
             session_host: Arc::new(std::sync::Mutex::new(None)),
             host_blocks: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
@@ -1919,11 +1965,12 @@ impl MrtGuiApp {
 
     fn add_mosaic_terminal(&mut self) {
         let active = &self.tabs[self.active_tab];
-        let tab = TerminalTab::new(
+        let mut tab = TerminalTab::new(
             format!("Terminal {}", self.tabs.len() + 1),
             active.active_shell_idx,
             active.cwd.clone(),
         );
+        tab.window = self.current_window;
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
     }
@@ -2025,6 +2072,7 @@ impl MrtGuiApp {
                 tui_screens.insert(session.tab_id, session.term.snapshot());
             }
         }
+        let visible = self.window_tab_indices(self.current_window);
         let shells = &self.shells;
         let tabs = &mut self.tabs;
 
@@ -2036,7 +2084,8 @@ impl MrtGuiApp {
                     ui.cursor().min,
                     egui::vec2(ui.available_width(), (viewport.height() - 10.0).max(200.0)),
                 );
-                let (order, rects) = mosaic_rects(layout, tabs.len(), columns, active_index, area, gap);
+                let active_slot = visible.iter().position(|&i| i == active_index).unwrap_or(0);
+                let (order, rects) = mosaic_rects(layout, visible.len(), columns, active_slot, area, gap);
                 let content_bottom = rects.iter().map(|r| r.bottom()).fold(area.top(), f32::max);
                 ui.allocate_rect(
                     egui::Rect::from_min_max(area.min, egui::pos2(area.right(), content_bottom)),
@@ -2044,7 +2093,7 @@ impl MrtGuiApp {
                 );
 
                 for (slot, rect) in rects.iter().enumerate() {
-                    let index = order[slot];
+                    let index = visible[order[slot]];
                     let tab = &mut tabs[index];
                     let id = tab.id;
                     let is_active = index == active_index;
@@ -2859,6 +2908,16 @@ impl MrtGuiApp {
 
         if raw_input.eq_ignore_ascii_case(":unsplit") {
             tab.close_split();
+            return;
+        }
+
+        // `:window new` / `:window main`: move this tab to a new window / the main one.
+        if let Some(target) = match raw_input.to_ascii_lowercase().as_str() {
+            ":window new" => Some(None),
+            ":window main" => Some(Some(0)),
+            _ => None,
+        } {
+            self.pending_tab_moves.push((tab_id, target));
             return;
         }
 
@@ -3761,8 +3820,9 @@ impl MrtGuiApp {
     /// otherwise the session in the active pane of the active tab. None while the
     /// command palette or the Safety Gate is open, or in Mosaic.
     fn focused_tui(&self) -> Option<FocusedTui> {
-        if self.active_tui.is_some() {
-            return Some(FocusedTui::Overlay);
+        if let Some(session) = &self.active_tui {
+            // The overlay belongs to the window of its tab.
+            return (self.window_of(session.tab_id) == self.current_window).then_some(FocusedTui::Overlay);
         }
         if self.mosaic || self.show_command_palette || self.pending_safety.is_some() {
             return None;
@@ -3995,6 +4055,9 @@ impl MrtGuiApp {
             .into_iter()
             .next()
             .unwrap_or_default();
+        if self.active_tui.as_ref().is_some_and(|s| self.window_of(s.tab_id) != self.current_window) {
+            return;
+        }
         let Some(session) = self.active_tui.as_mut() else {
             return;
         };
@@ -4197,6 +4260,29 @@ fn forward_tui_mouse(ctx: &egui::Context, session: &mut ActiveTuiSession, rect: 
             }
             egui::Event::MouseWheel { unit, delta, modifiers } => {
                 let Some(pos) = hover.filter(|p| rect.contains(*p)) else { continue };
+                // When the program takes neither wheel reports nor arrows, the wheel
+                // scrolls the history, smoothly: a touchpad's fractions of a line
+                // move the view by pixels, a wheel notch by three lines.
+                let program_takes_wheel =
+                    encode_mouse(MouseAction::WheelUp, 0, 0, modifiers, modes).or_else(|| wheel_as_arrows(true, modes)).is_some();
+                if !program_takes_wheel {
+                    if !modes.alt_screen {
+                        let lines = match unit {
+                            egui::MouseWheelUnit::Line => delta.y * 3.0,
+                            egui::MouseWheelUnit::Point => delta.y / cell.y,
+                            egui::MouseWheelUnit::Page => delta.y * rows as f32,
+                        };
+                        let (offset, frac) = crate::widgets::term_view::smooth_scroll(
+                            session.term.view_offset(),
+                            session.scroll_frac,
+                            lines,
+                            session.term.scrollback_len(),
+                        );
+                        session.term.set_view_offset(offset);
+                        session.scroll_frac = frac;
+                    }
+                    continue;
+                }
                 // Positive y moves the content down, i.e. scrolls up.
                 let notches = match unit {
                     egui::MouseWheelUnit::Line => delta.y,
@@ -4209,14 +4295,8 @@ fn forward_tui_mouse(ctx: &egui::Context, session: &mut ActiveTuiSession, rect: 
                     let up = session.wheel_accum > 0.0;
                     session.wheel_accum -= session.wheel_accum.signum();
                     let action = if up { MouseAction::WheelUp } else { MouseAction::WheelDown };
-                    match encode_mouse(action, col, row, modifiers, modes).or_else(|| wheel_as_arrows(up, modes)) {
-                        Some(bytes) => out.extend(bytes),
-                        // The program does not take the wheel: scroll the history.
-                        None if !modes.alt_screen => {
-                            let offset = session.term.view_offset() as i64 + if up { 3 } else { -3 };
-                            session.term.set_view_offset(offset.max(0) as usize);
-                        }
-                        None => {}
+                    if let Some(bytes) = encode_mouse(action, col, row, modifiers, modes).or_else(|| wheel_as_arrows(up, modes)) {
+                        out.extend(bytes);
                     }
                 }
             }
@@ -4421,6 +4501,8 @@ impl MrtGuiApp {
             return;
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        // The other windows close with it; their tabs wait in the main window.
+        self.pending_window_closes.extend(self.windows.iter().map(|w| w.id));
         if cfg!(windows) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         } else {
@@ -5050,11 +5132,9 @@ impl MrtGuiApp {
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
         let n = self.tabs.len() + 1;
-        self.tabs.push(TerminalTab::new(
-            format!("Tab {n} ({})", self.shells[shell_idx].kind.short_label()),
-            shell_idx,
-            cwd.clone(),
-        ));
+        let mut tab = TerminalTab::new(format!("Tab {n} ({})", self.shells[shell_idx].kind.short_label()), shell_idx, cwd.clone());
+        tab.window = self.current_window;
+        self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
         self.fire_hooks(crate::hooks::HookEvent {
             event: "tab_opened",
@@ -5126,14 +5206,29 @@ impl MrtGuiApp {
                     self.close_terminal(id);
                 }
             }
-            Action::NextTab => {
-                if !self.tabs.is_empty() {
-                    self.active_tab = (self.active_tab + 1) % self.tabs.len();
+            Action::NextTab | Action::PreviousTab => {
+                // Cycle through the tabs of the current window.
+                let tabs = self.window_tab_indices(self.current_window);
+                if let Some(at) = tabs.iter().position(|&i| i == self.active_tab) {
+                    let step = if action == Action::NextTab { 1 } else { tabs.len() - 1 };
+                    self.active_tab = tabs[(at + step) % tabs.len()];
                 }
             }
-            Action::PreviousTab => {
-                if !self.tabs.is_empty() {
-                    self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
+            Action::NewWindow => {
+                let shell_idx = self.tabs.get(self.active_tab).map(|t| t.active_shell_idx).unwrap_or(0);
+                if shell_idx < self.shells.len() {
+                    self.open_new_tab(shell_idx);
+                    self.pending_tab_moves.push((self.tabs[self.active_tab].id, None));
+                }
+            }
+            Action::MoveTabToNewWindow => {
+                if let Some(tab) = self.tabs.get(self.active_tab) {
+                    self.pending_tab_moves.push((tab.id, None));
+                }
+            }
+            Action::MoveTabToMainWindow => {
+                if let Some(tab) = self.tabs.get(self.active_tab) {
+                    self.pending_tab_moves.push((tab.id, Some(0)));
                 }
             }
             Action::SplitHorizontal | Action::SplitVertical | Action::Unsplit | Action::ClearBlocks => {
@@ -5226,6 +5321,7 @@ impl MrtGuiApp {
         let mut tab_to_close = None;
         let mut select_tab = None;
         let mut move_tab = None;
+        let mut window_move: Option<(Uuid, Option<u32>)> = None;
         let mut toggle_history = false;
         let mut toggle_runbooks = false;
         let new_tab_popup = egui::Id::new("mrt_new_tab_popup");
@@ -5322,7 +5418,13 @@ impl MrtGuiApp {
                 } else {
                     section_label(ui, "   Tabs");
                 }
-                let closable = self.tabs.len() > 1;
+                let window = self.current_window;
+                let window_tabs = self.tabs.iter().filter(|t| t.window == window).count();
+                // The main window keeps at least one tab; closing an extra window's last
+                // tab closes the window.
+                let closable = window != 0 || window_tabs > 1;
+                let other_windows: Vec<u32> =
+                    std::iter::once(0).chain(self.windows.iter().map(|w| w.id)).filter(|&w| w != window).collect();
                 let folder_of = |tab: &TerminalTab| {
                     tab.cwd
                         .file_name()
@@ -5338,6 +5440,9 @@ impl MrtGuiApp {
                 let mut tab_rows: Vec<(Uuid, egui::Rect)> = Vec::new();
                 let mut drag_started = None;
                 for (idx, tab) in self.tabs.iter().enumerate() {
+                    if tab.window != window {
+                        continue;
+                    }
                     let shell = self
                         .shells
                         .get(tab.active_shell_idx)
@@ -5369,6 +5474,19 @@ impl MrtGuiApp {
                         compact,
                     );
                     self.notifier.paint_badge(ui, badge_top, tab.id, compact);
+                    row.response.context_menu(|ui| {
+                        if ui.add_enabled(window_tabs > 1, egui::Button::new("Move to new window")).clicked() {
+                            window_move = Some((tab.id, None));
+                            ui.close_menu();
+                        }
+                        for &other in &other_windows {
+                            let label = if other == 0 { "Move to main window".to_string() } else { format!("Move to window {}", other + 1) };
+                            if ui.button(label).clicked() {
+                                window_move = Some((tab.id, Some(other)));
+                                ui.close_menu();
+                            }
+                        }
+                    });
                     tab_rows.push((tab.id, row.rect));
                     if row.drag_started {
                         drag_started = Some(tab.id);
@@ -5407,12 +5525,13 @@ impl MrtGuiApp {
                     }
                 }
 
-                // Workspace panels
+                // Workspace panels (the shared ones are in the main window)
                 if compact {
                     ui.add_space(10.0);
                 } else {
                     section_label(ui, "   Workspace");
                 }
+                if window == 0 {
                 if nav_row(ui, "🗀", "Explorer", None, self.show_explorer, compact).clicked() {
                     self.show_explorer = !self.show_explorer;
                 }
@@ -5427,6 +5546,7 @@ impl MrtGuiApp {
                 }
                 if nav_row(ui, "🧰", "Toolbox", None, self.side_state.show_toolbox_panel, compact).clicked() {
                     self.side_state.show_toolbox_panel = !self.side_state.show_toolbox_panel;
+                }
                 }
                 if nav_row(ui, "⊞", "Mosaic", None, self.mosaic, compact).clicked() {
                     self.mosaic = !self.mosaic;
@@ -5490,6 +5610,9 @@ impl MrtGuiApp {
         }
         if let Some((source, target)) = move_tab {
             self.move_terminal(source, target);
+        }
+        if let Some(request) = window_move {
+            self.pending_tab_moves.push(request);
         }
         if toggle_history {
             self.show_history = !self.show_history;
@@ -5618,9 +5741,6 @@ impl eframe::App for MrtGuiApp {
         }
         self.handle_close_request(ctx);
         let first_frame = !self.focused_on_start;
-        let mut focus_prompt = first_frame;
-        let palette_was_open = self.show_command_palette;
-        let previous_tab = self.tabs[self.active_tab].id;
         if first_frame {
             self.focused_on_start = true;
             apply_mrt_theme(ctx);
@@ -5635,16 +5755,14 @@ impl eframe::App for MrtGuiApp {
         self.process_async_events();
         self.process_history_events();
         self.process_mcp_ui_commands();
-        self.handle_keybindings(ctx);
-        self.update_copy_mode(ctx);
         self.apply_window_action(ctx);
         if let Some(command) = self.pending_service_command.take() {
             self.submit_input(Some(command), false);
         }
-        self.process_tui_session(ctx);
         self.maybe_spawn_process_tick();
-        if let Some(idx) = self.notifier.update(ctx, &self.tabs, self.active_tab, self.mosaic) {
-            self.active_tab = idx;
+        let other_windows = self.visible_in_extra_windows();
+        if let Some(idx) = self.notifier.update(ctx, &self.tabs, self.active_tab, self.mosaic, &other_windows) {
+            self.show_tab(ctx, idx);
         }
 
         // Running commands stream output through shared buffers (not the channel), so
@@ -5655,17 +5773,44 @@ impl eframe::App for MrtGuiApp {
             IDLE_REPAINT
         });
 
+        self.normalize_windows();
+        self.current_window = 0;
+        self.window_frame(ctx, first_frame);
+        self.render_extra_windows(ctx);
+        self.apply_window_changes();
+        self.sync_mcp_from_gui();
+        // Keep spinners turning and let quiet-period heuristics flip to "waiting".
+        if self.tabs.iter().any(|t| t.activity.running_commands() > 0 || is_animated(&Self::tab_status(t))) {
+            ctx.request_repaint_after(Duration::from_millis(150));
+        }
+    }
+}
+
+impl MrtGuiApp {
+    /// One window's frame: its keyboard input, then its panels. The main window also
+    /// shows the shared panels (history, runbooks, MCP Hub, Toolbox, Explorer); every
+    /// window shows its own tabs, prompt and output. `self.active_tab` is the
+    /// window's active tab while it is drawn.
+    pub(crate) fn window_frame(&mut self, ctx: &egui::Context, mut focus_prompt: bool) {
+        let main = self.current_window == 0;
+        let palette_was_open = self.show_command_palette;
+        let previous_tab = self.tabs[self.active_tab].id;
+        self.handle_keybindings(ctx);
+        self.update_copy_mode(ctx);
+        self.process_tui_session(ctx);
+
         self.render_sidebar(ctx);
         self.render_header(ctx);
-        self.render_config_notice(ctx);
-        self.render_agent_ptys(ctx);
-        self.render_worktree_close_prompt(ctx);
-
-        if self.show_explorer {
-            self.render_explorer(ctx);
+        if main {
+            self.render_config_notice(ctx);
+            self.render_agent_ptys(ctx);
+            self.render_worktree_close_prompt(ctx);
+            if self.show_explorer {
+                self.render_explorer(ctx);
+            }
         }
 
-        if self.show_history {
+        if main && self.show_history {
             let mut restore = None;
             let mut add_to_runbook: Option<crate::history::RunbookStep> = None;
             egui::SidePanel::right("history_panel").frame(panel_frame()).default_width(360.0).resizable(true).show(ctx, |ui| {
@@ -5727,7 +5872,7 @@ impl eframe::App for MrtGuiApp {
             }
         }
 
-        if self.runbooks_state.show_panel {
+        if main && self.runbooks_state.show_panel {
             let available_shells: Vec<String> = self
                 .shells
                 .iter()
@@ -5794,7 +5939,7 @@ impl eframe::App for MrtGuiApp {
 
         // Right-hand Side Panels (MCP Hub & Toolbox)
         let mut panel_event = None;
-        if self.side_state.show_mcp_panel {
+        if main && self.side_state.show_mcp_panel {
             egui::SidePanel::right("mrt_mcp_panel").frame(panel_frame())
                 .default_width(330.0)
                 .resizable(true)
@@ -5809,7 +5954,7 @@ impl eframe::App for MrtGuiApp {
                     }
                 });
         }
-        if self.side_state.show_toolbox_panel {
+        if main && self.side_state.show_toolbox_panel {
             egui::SidePanel::right("mrt_toolbox_panel").frame(panel_frame())
                 .default_width(380.0)
                 .resizable(true)
@@ -6317,8 +6462,9 @@ impl eframe::App for MrtGuiApp {
             }
         });
 
-        // Safety Gate: anchored just above the composer, like an inline confirmation
-        if self.pending_safety.is_some() {
+        // Safety Gate: anchored just above the composer, like an inline confirmation,
+        // in the window of the tab the command is for.
+        if self.pending_safety.is_some() && self.safety_window() == self.current_window {
             let mut approve = false;
             let mut cancel = false;
 
@@ -6454,8 +6600,11 @@ impl eframe::App for MrtGuiApp {
             }
         }
 
-        // Universal Command Palette (Ctrl+K / Ctrl+P)
-        if self.show_command_palette {
+        // Universal Command Palette (Ctrl+K / Ctrl+P), in the window it was opened in.
+        if self.show_command_palette && !palette_was_open {
+            self.palette_window = self.current_window;
+        }
+        if self.show_command_palette && self.palette_window == self.current_window {
             let mut close_palette = false;
             let mut cmd_to_run = None;
             let mut action_to_run: Option<Action> = None;
@@ -6713,13 +6862,10 @@ impl eframe::App for MrtGuiApp {
             }
         }
 
-        self.notifier.render_settings(ctx);
         self.render_tui_overlay(ctx);
-        self.render_key_indicator(ctx);
-        self.sync_mcp_from_gui();
-        // Keep spinners turning and let quiet-period heuristics flip to "waiting".
-        if self.tabs.iter().any(|t| t.activity.running_commands() > 0 || is_animated(&Self::tab_status(t))) {
-            ctx.request_repaint_after(Duration::from_millis(150));
+        if main {
+            self.notifier.render_settings(ctx);
+            self.render_key_indicator(ctx);
         }
     }
 }
@@ -7562,6 +7708,78 @@ error: test failed
         app.move_terminal(a, c);
         assert_eq!(app.tabs[2].id, a);
         assert_eq!(app.tabs[0].title, "b");
+    }
+
+    #[test]
+    fn tabs_move_between_windows_and_keep_running() {
+        let mut app = MrtGuiApp::new();
+        let cwd = app.tabs[0].cwd.clone();
+        app.tabs.push(TerminalTab::new("second".into(), 0, cwd.clone()));
+        let moved = app.tabs[1].id;
+        let (cmd, expected) = if cfg!(target_os = "windows") { ("ping -n 2 127.0.0.1", "127.0.0.1") } else { ("sleep 1; echo moved-ok", "moved-ok") };
+        let block_id = app.spawn_shell_command(moved, app.shells[0].clone(), cwd, cmd.to_string());
+
+        app.active_tab = 1;
+        app.dispatch_action(Action::MoveTabToNewWindow);
+        app.apply_window_changes();
+        assert_eq!(app.windows.len(), 1);
+        let window = app.windows[0].id;
+        assert_eq!(app.tabs[1].window, window);
+        assert_eq!(app.windows[0].active, moved);
+        assert_eq!(app.active_tab, 0, "the main window shows the tab it kept");
+
+        // The main window's last tab stays, and a window's only tab gets no new window.
+        app.pending_tab_moves.push((app.tabs[0].id, None));
+        app.pending_tab_moves.push((moved, None));
+        app.apply_window_changes();
+        assert_eq!(app.windows.len(), 1);
+        assert_eq!((app.tabs[0].window, app.tabs[1].window), (0, window));
+
+        // Both windows draw; each cycles through its own tabs.
+        let ctx = egui::Context::default();
+        app.current_window = window;
+        app.active_tab = 1;
+        let _ = ctx.run(Default::default(), |ctx| app.window_frame(ctx, true));
+        app.dispatch_action(Action::NextTab);
+        assert_eq!(app.active_tab, 1, "the extra window has one tab");
+        app.current_window = 0;
+        app.active_tab = 0;
+        let _ = ctx.run(Default::default(), |ctx| app.window_frame(ctx, false));
+
+        // The command started before the move finishes in the moved tab.
+        let start = Instant::now();
+        while !app.tabs[1].blocks.iter().any(|b| b.id == block_id && b.exit_code.is_some()) && start.elapsed() < Duration::from_secs(30) {
+            pump_one(&mut app);
+        }
+        let block = app.tabs[1].blocks.iter().find(|b| b.id == block_id).expect("block kept");
+        assert_eq!(block.exit_code, Some(0));
+        assert!(block.plain_output.contains(expected), "{}", block.plain_output);
+        assert_eq!(app.capture_layout().tabs[1].window, window, "the layout remembers the window");
+
+        // Closing the window brings its tabs back to the main window.
+        app.pending_window_closes.push(window);
+        app.apply_window_changes();
+        assert!(app.windows.is_empty());
+        assert_eq!(app.tabs[1].window, 0);
+        assert_eq!(app.tabs[1].blocks.len(), 1);
+
+        // A new window opens with a new tab of its own.
+        app.dispatch_action(Action::NewWindow);
+        app.apply_window_changes();
+        assert_eq!(app.tabs.len(), 3);
+        assert_eq!(app.windows.len(), 1);
+        assert_eq!(app.windows[0].active, app.tabs[2].id);
+        assert_eq!(app.tabs[app.active_tab].window, 0);
+
+        // `:window main` from that window's prompt brings the tab back.
+        app.current_window = app.windows[0].id;
+        app.active_tab = 2;
+        app.submit_input(Some(":window main".into()), false);
+        app.current_window = 0;
+        app.apply_window_changes();
+        assert!(app.windows.is_empty());
+        assert_eq!(app.tabs[2].window, 0);
+        assert_eq!(app.active_tab, 2, "the main window shows the tab that came back");
     }
 
     #[test]

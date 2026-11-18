@@ -664,6 +664,12 @@ impl TerminalEmulator {
         (row < self.rows()).then(|| self.line_cells(Line(row as i32)))
     }
 
+    /// The history line just above the view (the next one scrolling back would
+    /// show), drawn partly during smooth scrolling. `None` at the oldest line.
+    pub fn line_above_view(&self) -> Option<Vec<TermCell>> {
+        (self.view_offset < self.scrollback_len()).then(|| self.line_cells(Line(-(self.view_offset as i32) - 1)))
+    }
+
     /// Lines the view is scrolled back into the history (0 = the live screen).
     pub fn view_offset(&self) -> usize {
         self.view_offset

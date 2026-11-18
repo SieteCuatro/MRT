@@ -94,6 +94,8 @@ pub struct TabRowResponse {
     /// The row started being dragged (to reorder the tabs).
     pub drag_started: bool,
     pub rect: Rect,
+    /// The row itself, for a context menu.
+    pub response: Response,
 }
 
 /// A two-line sidebar row for a terminal tab with a status dot and a close
@@ -142,6 +144,7 @@ pub fn tab_row(
             close: false,
             drag_started,
             rect,
+            response,
         };
     }
 
@@ -227,6 +230,7 @@ pub fn tab_row(
         close,
         drag_started,
         rect,
+        response,
     }
 }
 

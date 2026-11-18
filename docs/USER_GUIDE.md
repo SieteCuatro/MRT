@@ -136,8 +136,11 @@ Commands that may be destructive open the **Safety Approval Gate** first (see [C
 | `:split` / `:split-h` | Splits the tab horizontally. |
 | `:split-v` | Splits the tab vertically. |
 | `:unsplit` | Closes the split. |
+| `:window new` / `:window main` | Moves the tab to a new window / back to the main window. |
 
 Drag the line between two panes to resize them (each keeps at least 15% of the tab; double-click the line to split evenly again); the size is saved with the layout. Drag a tab in the sidebar onto another row to move it there; a line shows where it will go.
+
+**Several windows.** Right-click a tab in the sidebar to move it: **Move to new window** opens a window with that tab, **Move to main window** and **Move to window N** move it into a window that is already open. `:window new` and `:window main` do the same from the prompt. The Command Palette has **New window** (a new window with a new tab), **Move tab to a new window** and **Move tab to the main window**; bind them in `[keybindings]` as `new_window`, `move_tab_to_new_window` and `move_tab_to_main_window`. A moved tab keeps its shell, its blocks and the command it is running. Each window has its own tabs, command input and Mosaic; History, Runbooks, MCP Hub, Toolbox and Explorer open in the main window. The main window always keeps at least one tab. Closing another window moves its tabs back to the main window, and when the main window goes to the background with work running, the other windows close the same way. The layout remembers which window each tab was in and opens those windows again.
 | `:clear` (or `cls`) | Removes all blocks from the tab (history in SQLite is kept). |
 | `:toolbox [network\|task-manager\|close]` | Shows the Toolbox panel, opens it on a tab, or hides it. With no argument it toggles. |
 | `:assist [question]` | Asks the assistant to investigate with MRT's read-only tools (blocks, tabs, ports, processes), choosing each next step from the last result. With no question it explains the latest failed command: it finds an earlier successful run of the same command, compares the two outputs and diagnoses. Each step appears in the block; the answer and any suggested fix appear in its AI panel, and **Apply fix** goes through the Safety Gate. Works offline; with an AI provider configured, the model drives the investigation (at most 6 tool calls). |
@@ -271,7 +274,8 @@ Bindings are matched exactly first; a binding with no `shift`/`alt` also fires w
 | `toggle_command_palette` | `Ctrl+K`, `Ctrl+P` | Opens or closes the Command Palette. |
 | `exit_tui` | `Ctrl+Q` | Ends the Interactive TUI session (only while it is open). |
 | `new_tab` / `close_tab` | — | Opens a tab with the current shell / closes the active tab. |
-| `next_tab` / `previous_tab` | — | Cycles through tabs. |
+| `next_tab` / `previous_tab` | — | Cycles through the window's tabs. |
+| `new_window` / `move_tab_to_new_window` / `move_tab_to_main_window` | — | Opens a window with a new tab / moves the active tab to a new window / back to the main window (see **Several windows** under [Built-in commands](#built-in-commands)). |
 | `split_horizontal` / `split_vertical` / `unsplit` | — | Same as `:split-h`, `:split-v`, `:unsplit`. |
 | `clear_blocks` | — | Same as `:clear`. |
 | `toggle_explorer`, `toggle_history`, `toggle_runbooks`, `toggle_mcp_hub`, `toggle_toolbox`, `toggle_mosaic` | — | Show or hide that panel. |
@@ -358,7 +362,7 @@ Full-screen programs need a real terminal. MRT opens them in a full-screen PTY o
 - The overlay is a real terminal screen: the program can move the cursor, use colors and the alternate screen, and set the window title. The screen is sized to the overlay in whole characters and follows the window when you resize it.
 - Keys are sent the way xterm sends them: text, `Enter`, `Backspace`, `Tab` / `Shift+Tab`, `Esc`, arrows (application cursor mode when the program asks), `Home` / `End`, `Insert` / `Delete`, `PageUp` / `PageDown`, `F1`-`F12` (with Shift/Alt/Ctrl), `Ctrl+` any letter, and `Alt+` a letter or digit (sent as `Esc` then the key, as readline and emacs expect). Pasted text is wrapped in bracketed-paste markers when the program enables them.
 - **Select and copy:** drag to select text (hold `Shift` while dragging when the program uses the mouse), then press `Ctrl+Shift+C`, or `Ctrl+C` while text is selected (`Cmd+C` on macOS). Without a selection, `Ctrl+C` is sent to the program as an interrupt. Typing clears the selection. `Ctrl+V` pastes.
-- When the program turns on mouse support (for example vim with `:set mouse=a`, htop, lazygit), clicks, drags and the wheel are sent to it. Otherwise the wheel scrolls a full-screen program that asks for it (alternate-scroll mode) with arrow keys, and anywhere else it scrolls back through the output that went off the top of the screen. A scrollbar on the right edge shows where you are in that history and can be dragged; typing returns to the live screen.
+- When the program turns on mouse support (for example vim with `:set mouse=a`, htop, lazygit), clicks, drags and the wheel are sent to it. Otherwise the wheel scrolls a full-screen program that asks for it (alternate-scroll mode) with arrow keys, and anywhere else it scrolls back through the output that went off the top of the screen. A scrollbar on the right edge shows where you are in that history and can be dragged; typing returns to the live screen. A mouse wheel moves three lines per notch, and a touchpad scrolls smoothly, by pixels.
 - Programs see `COLORTERM=truecolor` and `TERM_PROGRAM=MRT`, and `TERM=xterm-256color` on Linux and macOS. Git for Windows tools (vim, less) also need `LANG` (for example `LANG=C.UTF-8`) to read UTF-8 files; MRT does not set it.
 - The overlay closes when the program exits, or when you press `Ctrl+Q` (the `exit_tui` action; rebindable).
 - The session is saved as a normal command block in the tab: what the terminal showed (its history and main screen) with colors. A full-screen program such as vim leaves nothing behind once it exits, so its block is empty.

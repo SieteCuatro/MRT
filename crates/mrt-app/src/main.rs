@@ -19,6 +19,7 @@ mod shell_pool;
 mod term_input;
 mod theme;
 mod widgets;
+mod windows;
 
 use anyhow::Result;
 use app::MrtGuiApp;

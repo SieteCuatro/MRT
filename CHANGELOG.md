@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### New
+- **Icon**: `mrt.exe` has MRT's icon (the sidebar's `›_` mark) and version information in its file properties, the window and taskbar show it on Windows and Linux, and the Linux archive includes `mrt.desktop` and `mrt.png` for a menu entry. The icon is drawn by `scripts/icons/make_icon.py`.
+
+### Notes
+- The User Guide explains the Windows SmartScreen warning ("Windows protected your PC") that unsigned downloads show, and how to run MRT anyway.
+
 ## v0.3.0 — 2026-11-18
 
 Agents working in parallel (Milestone 7 of the [ROADMAP](ROADMAP.md)): each agent in its own git worktree tab, a review step before its work lands, work queued to idle tabs, and the cost of AI requests.

@@ -16,7 +16,14 @@ Every `v*` tag publishes archives on the [GitHub Releases](https://github.com/Si
 | macOS (Intel) | `mrt-<tag>-x86_64-apple-darwin.tar.gz` |
 | macOS (Apple Silicon) | `mrt-<tag>-aarch64-apple-darwin.tar.gz` |
 
-Each archive contains only the `mrt` (or `mrt.exe`) binary. Put it somewhere on your `PATH`.
+The Windows archive contains `mrt.exe`; the Linux archive contains `mrt`, plus `mrt.desktop` and `mrt.png` for a menu entry. Put the binary somewhere on your `PATH`. On Linux, for the menu entry and its icon:
+
+```bash
+cp mrt.desktop ~/.local/share/applications/
+mkdir -p ~/.local/share/icons/hicolor/512x512/apps && cp mrt.png ~/.local/share/icons/hicolor/512x512/apps/
+```
+
+**Windows SmartScreen.** The release binaries are not code-signed yet, so the first time you run a downloaded `mrt.exe` Windows may show "Windows protected your PC" (*Windows protegió su PC*) with an unknown publisher. Choose **More info → Run anyway**, or clear the downloaded-file mark first: right-click `mrt.exe` → Properties → **Unblock**, or in PowerShell `Unblock-File .\mrt.exe`. Signing is planned (Milestone 11 in the [roadmap](../ROADMAP.md)).
 
 The Linux binary is linked against glibc 2.17, so it runs on any x86_64 distribution with glibc 2.17 or newer: RHEL/CentOS 7 and later, Ubuntu 14.04 and later, Debian 8 and later, and current rolling distributions. The window needs X11 or Wayland and OpenGL (Mesa is enough); `mrt server`, `mrt --mcp-server` and the other command-line modes need neither. Releases up to v0.2.1 had a Linux binary that needed glibc 2.43; build from source or use a newer release on older systems.
 

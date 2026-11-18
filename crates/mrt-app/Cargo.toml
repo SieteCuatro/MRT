@@ -30,3 +30,6 @@ directories = "6"
 toml_edit = "0.25"
 notify-rust = "=4.11.3"
 raw-window-handle = "0.6"
+
+[build-dependencies]
+embed-resource = "3.0.12"

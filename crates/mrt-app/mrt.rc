@@ -1,0 +1,30 @@
+// Windows resources for mrt.exe: the icon and the version information.
+// MRT_VERSION_NUMBERS and MRT_VERSION_TEXT come from build.rs.
+#include <winver.h>
+
+1 ICON "assets/mrt.ico"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION MRT_VERSION_NUMBERS
+PRODUCTVERSION MRT_VERSION_NUMBERS
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Modern Rust Terminal contributors"
+            VALUE "FileDescription", "Modern Rust Terminal"
+            VALUE "FileVersion", MRT_VERSION_TEXT
+            VALUE "InternalName", "mrt"
+            VALUE "OriginalFilename", "mrt.exe"
+            VALUE "ProductName", "Modern Rust Terminal"
+            VALUE "ProductVersion", MRT_VERSION_TEXT
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

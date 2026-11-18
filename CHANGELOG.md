@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## v0.3.0 — 2026-11-18
+
+Agents working in parallel (Milestone 7 of the [ROADMAP](ROADMAP.md)): each agent in its own git worktree tab, a review step before its work lands, work queued to idle tabs, and the cost of AI requests.
 
 ### New
 - **AI token use and cost**: every `#` suggestion and `:assist` answer shows the tokens it used and its estimated cost, the sidebar shows the session total, and `:ai-usage` lists them per tab. Prices come from a new `[ai.prices]` table in the config (dollars per million tokens, by model); local Ollama models are free, and models without a price still count their tokens. `mrt_ai_translate` returns the usage too.
@@ -11,6 +13,10 @@
 
 ### Fixed
 - A command an agent submits with `mrt_control_gui` (`input_text` + `submit_input`) no longer stays in the input box.
+
+### Notes
+- The CI and release workflows are still disabled; the Windows and Linux archives were built locally (Linux with `scripts/release/build-linux.sh`, glibc 2.17 or newer) and tested on Windows and Linux. There are no macOS archives.
+- Open PR (`:worktree pr`) and the token counts of the cloud AI providers were not tried against the real services; their command lines and response formats are covered by tests.
 
 ## v0.2.2 — 2026-11-17
 

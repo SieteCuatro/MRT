@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### New
+- **Send work to an idle tab**: `mrt send --idle COMMAND` and `mrt_run_command` with `idle: true` run the command in a tab of the same git checkout that is not running anything (preferring the active tab), or open a new tab there when all are busy, so scripts and agents can queue work while another tab builds. Tabs where another agent's `mrt_run_command` is running count as busy.
 - **Review before merge**: a worktree tab has a bar under the header with Review, Merge, Open PR and Discard (`:worktree review|merge|pr|discard`). Review shows the commits, files and colored diff against the branch it was created from, plus files not committed yet. Merge merges it in the main checkout, Open PR pushes it and opens a pull request with `gh`, and Discard deletes the folder and the branch; all three always ask in the Safety Gate first.
 - **Safety Gate rules for git**: `git push`, `git merge` and `gh pr create` are Moderate (also as `git -C <folder> push`), `git branch -D` and `git worktree remove --force` are Critical.
 - **Worktree tabs**: `:worktree <branch> [base]` opens a tab in a git worktree for the branch (in `<repo>.worktrees/<branch>`, next to the repository), so several agents can change the same repository at once without touching each other's files; `:worktree list` lists them. Agents get the same with `mrt_create_tab` and `"worktree": { "branch": … }`. Closing a worktree tab asks whether to remove the folder when it has no uncommitted changes; the branch and its commits always stay.

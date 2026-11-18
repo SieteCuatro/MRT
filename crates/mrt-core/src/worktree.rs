@@ -85,6 +85,14 @@ pub fn main_repo_root(dir: &Path) -> Result<PathBuf, String> {
     Ok(clean_path(std::fs::canonicalize(&root).unwrap_or(root)))
 }
 
+/// The top folder of the checkout that contains `dir` (a worktree's own folder for a
+/// worktree, unlike [`main_repo_root`]), or `None` outside a git repository.
+pub fn checkout_root(dir: &Path) -> Option<PathBuf> {
+    let top = run(dir, &["rev-parse", "--show-toplevel"]).ok().filter(|t| !t.is_empty())?;
+    let top = PathBuf::from(top);
+    Some(clean_path(std::fs::canonicalize(&top).unwrap_or(top)))
+}
+
 /// Checks a branch name the way git does (`git check-ref-format --branch`).
 pub fn validate_branch(repo: &Path, branch: &str) -> Result<(), String> {
     if branch.trim().is_empty() || branch.starts_with('-') {

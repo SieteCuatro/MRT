@@ -115,6 +115,9 @@ pub struct MrtMcpServerState {
     /// The Safety Gate prompt the GUI shows (command, risk, reason), mirrored for
     /// paired remote devices.
     pub pending_approval: Arc<Mutex<Option<Value>>>,
+    /// Tabs where `mrt_run_command` is running a command right now. They count as
+    /// busy when `idle: true` looks for a free tab.
+    pub mcp_busy_tabs: Arc<Mutex<std::collections::HashSet<Uuid>>>,
 }
 
 impl Default for MrtMcpServerState {
@@ -152,7 +155,90 @@ impl Default for MrtMcpServerState {
             owned_processes: Arc::new(Mutex::new(HashMap::new())),
             process_baseline: Arc::new(Mutex::new(None)),
             pending_approval: Arc::new(Mutex::new(None)),
+            mcp_busy_tabs: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
+    }
+}
+
+/// Where `mrt_run_command` with `idle: true` runs.
+enum IdlePick {
+    Existing(Uuid),
+    New(Uuid),
+}
+
+/// Takes the busy mark off a tab when `mrt_run_command` finishes, however it ends.
+struct BusyGuard {
+    tabs: Arc<Mutex<std::collections::HashSet<Uuid>>>,
+    id: Option<Uuid>,
+}
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        if let Some(id) = self.id {
+            if let Ok(mut tabs) = self.tabs.lock() {
+                tabs.remove(&id);
+            }
+        }
+    }
+}
+
+impl MrtMcpServerState {
+    /// A tab that is not running anything in the same git checkout as `folder` (the
+    /// same folder outside git), preferring the active tab; else a new tab opened in
+    /// `folder`. Sandbox tabs are never picked. The chosen tab is marked busy at once,
+    /// so a second agent asking at the same moment gets another one.
+    fn pick_idle_tab(&self, folder: &std::path::Path, shell_hint: Option<&str>) -> Result<IdlePick, String> {
+        let key = |dir: &std::path::Path| {
+            mrt_core::worktree::checkout_root(dir)
+                .or_else(|| std::fs::canonicalize(dir).ok())
+                .unwrap_or_else(|| dir.to_path_buf())
+        };
+        let wanted = key(folder);
+        let active = *self.active_tab_id.lock().unwrap();
+        let candidates: Vec<(Uuid, PathBuf, bool, String)> = {
+            let tabs = self.tabs.lock().unwrap();
+            tabs.iter()
+                .filter(|t| t.sandbox_root.is_none())
+                .map(|t| {
+                    let activity = t.activity.clone().unwrap_or_else(|| ActivitySnapshot::from_blocks(&t.blocks));
+                    let busy = matches!(
+                        activity.state,
+                        mrt_core::ActivityState::Running | mrt_core::ActivityState::Progress(_) | mrt_core::ActivityState::WaitingForInput
+                    ) || t.blocks.iter().any(|b| b.exit_code.is_none());
+                    (t.id, t.cwd.clone(), busy, t.shell_id.clone())
+                })
+                .collect()
+        };
+        let mut busy_tabs = self.mcp_busy_tabs.lock().unwrap();
+        let mut same_checkout: Vec<&(Uuid, PathBuf, bool, String)> =
+            candidates.iter().filter(|(_, cwd, _, _)| key(cwd) == wanted).collect();
+        same_checkout.sort_by_key(|(id, ..)| *id != active);
+        if let Some((id, ..)) = same_checkout.iter().find(|(id, _, busy, _)| !busy && !busy_tabs.contains(id)) {
+            busy_tabs.insert(*id);
+            return Ok(IdlePick::Existing(*id));
+        }
+        // Every tab there is busy (or there is none): open one, with the same shell.
+        let shell_hint = shell_hint.map(str::to_string).or_else(|| same_checkout.first().map(|(.., s)| s.clone()));
+        let shell = self
+            .resolve_shell(shell_hint.as_deref())
+            .ok_or_else(|| "No shell available on host".to_string())?;
+        let mut tabs = self.tabs.lock().unwrap();
+        let name = wanted.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "tab".into());
+        let n = tabs.iter().filter(|t| t.title.starts_with(&name)).count() + 1;
+        let id = Uuid::new_v4();
+        tabs.push(McpTabSession {
+            id,
+            title: format!("{name} {n}"),
+            shell_id: shell.id.clone(),
+            shell_name: shell.kind.short_label().to_string(),
+            cwd: folder.to_path_buf(),
+            blocks: Vec::new(),
+            activity: None,
+            sandbox_root: None,
+            worktree: None,
+        });
+        busy_tabs.insert(id);
+        Ok(IdlePick::New(id))
     }
 }
 
@@ -307,7 +393,11 @@ impl MrtMcpServerState {
                         },
                         "cwd": {
                             "type": "string",
-                            "description": "Optional working directory override for this command"
+                            "description": "Optional working directory override for this command. With `idle`, the folder whose repository to look in (default: the target tab's folder)"
+                        },
+                        "idle": {
+                            "type": "boolean",
+                            "description": "Run in a tab that is not running anything, in the same git checkout as `cwd` (or the target tab), preferring the active tab; opens a new tab there when every one is busy. The command runs in the chosen tab's folder. Lets agents queue work while another tab is busy."
                         }
                     },
                     "required": ["command"]
@@ -1465,7 +1555,36 @@ pub async fn execute_mrt_mcp_tool(
             }
 
             let req_tab = args.get("tab_id").and_then(|v| v.as_str());
-            let target_tab_id = state.resolve_tab_id(req_tab);
+            let mut target_tab_id = state.resolve_tab_id(req_tab);
+
+            // `idle: true`: the command goes to a free tab of the same checkout.
+            let idle = args.get("idle").and_then(|v| v.as_bool()).unwrap_or(false);
+            let mut picked = None;
+            if idle {
+                let hint_tab_cwd = target_tab_id
+                    .and_then(|tid| state.tabs.lock().unwrap().iter().find(|t| t.id == tid).map(|t| t.cwd.clone()));
+                let folder = args
+                    .get("cwd")
+                    .and_then(|v| v.as_str())
+                    .map(PathBuf::from)
+                    .or(hint_tab_cwd)
+                    .unwrap_or_else(|| state.cwd.lock().unwrap().clone());
+                match state.pick_idle_tab(&folder, args.get("shell").and_then(|v| v.as_str())) {
+                    Ok(IdlePick::Existing(id)) => {
+                        target_tab_id = Some(id);
+                        picked = Some("idle_tab");
+                    }
+                    Ok(IdlePick::New(id)) => {
+                        target_tab_id = Some(id);
+                        picked = Some("new_tab");
+                        state.notify_gui(GuiUiCommand::SyncFromMcp);
+                    }
+                    Err(e) => return McpToolCallResult::text(e, true),
+                }
+            } else if let Some(tid) = target_tab_id {
+                state.mcp_busy_tabs.lock().unwrap().insert(tid);
+            }
+            let _busy = BusyGuard { tabs: state.mcp_busy_tabs.clone(), id: target_tab_id };
 
             let tab_defaults = target_tab_id.and_then(|tid| {
                 state
@@ -1503,6 +1622,8 @@ pub async fn execute_mrt_mcp_tool(
 
             let cwd = match &sandbox_root {
                 Some(root) => root.clone(),
+                // With `idle`, `cwd` only chose the repository: run in the tab's folder.
+                None if idle => tab_defaults.map(|(_, c)| c).unwrap_or_else(|| state.cwd.lock().unwrap().clone()),
                 None => args
                     .get("cwd")
                     .and_then(|v| v.as_str())
@@ -1555,6 +1676,7 @@ pub async fn execute_mrt_mcp_tool(
                         "duration_ms": res.duration_ms,
                         "structured_type": structured_badge,
                         "output": res.combined_output,
+                        "picked": picked,
                     });
                     McpToolCallResult::text(
                         serde_json::to_string_pretty(&summary).unwrap_or_default(),
@@ -2396,6 +2518,87 @@ mod sandbox_tests {
         let result = resp.result.unwrap();
         let text = result["content"][0]["text"].as_str().unwrap_or("").to_string();
         (text, result["isError"].as_bool().unwrap_or(false))
+    }
+
+    #[tokio::test]
+    async fn idle_runs_go_to_a_free_tab_of_the_same_checkout() {
+        let git_ok = std::process::Command::new("git").arg("--version").output().is_ok_and(|o| o.status.success());
+        if !git_ok {
+            return;
+        }
+        let base = std::env::temp_dir().join(format!("mrt-idle-{}", Uuid::new_v4().simple()));
+        let repo = base.join("proj");
+        let other = base.join("other");
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let mut init = std::process::Command::new("git");
+        init.current_dir(&repo).args(["init", "-q"]);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            init.creation_flags(0x08000000);
+        }
+        assert!(init.output().unwrap().status.success());
+
+        let state = MrtMcpServerState::default();
+        let shell = state.shells.first().cloned().expect("a shell");
+        let tab = |title: &str, cwd: &std::path::Path, running: bool| {
+            let mut blocks = Vec::new();
+            if running {
+                let mut block = CommandBlock::new_completed("cargo build", shell.kind.short_label(), cwd.display().to_string(), "", 0, 0);
+                block.exit_code = None; // still running
+                blocks.push(block);
+            }
+            McpTabSession {
+                id: Uuid::new_v4(),
+                title: title.into(),
+                shell_id: shell.id.clone(),
+                shell_name: shell.kind.short_label().into(),
+                cwd: cwd.to_path_buf(),
+                blocks,
+                activity: None,
+                sandbox_root: None,
+                worktree: None,
+            }
+        };
+        let busy = tab("busy", &repo, true);
+        let free_sub = tab("free-sub", &repo.join("sub"), false);
+        let elsewhere = tab("elsewhere", &other, false);
+        let (busy_id, free_id) = (busy.id, free_sub.id);
+        *state.tabs.lock().unwrap() = vec![busy, free_sub, elsewhere];
+        *state.active_tab_id.lock().unwrap() = busy_id;
+
+        // The busy tab's checkout has a free tab (in a subfolder): it gets the command,
+        // which runs in that tab's folder.
+        let (text, err) = call(&state, "mrt_run_command", json!({ "command": "echo idle-ok", "idle": true, "cwd": repo.display().to_string() })).await;
+        assert!(!err, "{text}");
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["picked"], "idle_tab");
+        assert_eq!(v["tab_id"], json!(free_id));
+        assert!(v["output"].as_str().unwrap().contains("idle-ok"));
+        assert!(state.mcp_busy_tabs.lock().unwrap().is_empty(), "released after the command");
+
+        // Two agents asking at once never get the same tab; with none free, a new tab
+        // opens in the folder asked for.
+        let first = state.pick_idle_tab(&repo, None).unwrap();
+        assert!(matches!(first, IdlePick::Existing(id) if id == free_id));
+        let second = state.pick_idle_tab(&repo, None).unwrap();
+        let IdlePick::New(new_id) = second else { panic!("expected a new tab") };
+        {
+            let tabs = state.tabs.lock().unwrap();
+            let new_tab = tabs.iter().find(|t| t.id == new_id).unwrap();
+            assert_eq!(new_tab.cwd, repo);
+            assert_eq!(new_tab.title, "proj 1");
+            assert_eq!(tabs.len(), 4);
+        }
+        state.mcp_busy_tabs.lock().unwrap().clear();
+
+        // Outside git, only the same folder counts; `tab_id` gives the folder.
+        let (text, _) = call(&state, "mrt_run_command", json!({ "command": "echo x", "idle": true, "tab_id": "elsewhere" })).await;
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["picked"], "idle_tab");
+        assert_eq!(v["cwd"], json!(other.display().to_string()));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[tokio::test]
